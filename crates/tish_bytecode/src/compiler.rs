@@ -11,7 +11,7 @@ use tishlang_ast::{
 
 use crate::chunk::{Chunk, Constant};
 use crate::encoding::{binop_to_u8, compound_op_to_u8, unaryop_to_u8};
-use crate::opcode::Opcode;
+use crate::opcode::{MathUnaryFn, Opcode};
 
 enum SimpleMapResult {
     Identity,
@@ -125,6 +125,11 @@ struct Compiler<'a> {
     /// JIT lowers it to a native recursive call). `None` for anonymous fns, top-level, or anywhere the
     /// self-binding can't be proven stable.
     self_fn_name: Option<Arc<str>>,
+    /// #186 — `Math` is provably the global builtin: it is never rebound/shadowed anywhere in the
+    /// program (via the conservative [`stmt_rebinds`] scan). Only then may `Math.<fn>(arg)` lower to
+    /// the [`Opcode::MathUnary`] intrinsic, which the numeric JIT can compile without a shape guard.
+    /// `false` on nested-fn compilers and whenever the scan can't prove stability.
+    math_is_global: bool,
 }
 
 /// Does `e` reference only the given params (no free/global vars, no nested
@@ -613,6 +618,7 @@ impl<'a> Compiler<'a> {
             general_slots: false,
             finally_stack: Vec::new(),
             self_fn_name: None,
+            math_is_global: false,
         }
     }
 
@@ -2010,6 +2016,30 @@ impl<'a> Compiler<'a> {
                 self.emit_u8(Opcode::UnaryOp, unaryop_to_u8(*op));
             }
             Expr::Call { callee, args, .. } => {
+                // #186: `Math.<unaryfn>(arg)` → `<arg>; MathUnary(id)` when `Math` is provably the
+                // global builtin (unshadowed program-wide) and there is exactly one argument. Lets the
+                // numeric JIT lower the intrinsic (math_trig; a Math.* prereq for other kernels).
+                if self.math_is_global && args.len() == 1 {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: fname, .. },
+                        optional: false,
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if let (Expr::Ident { name: obj, .. }, CallArg::Expr(arg)) =
+                            (object.as_ref(), &args[0])
+                        {
+                            if obj.as_ref() == "Math" && self.resolve_slot("Math").is_none() {
+                                if let Some(mfn) = MathUnaryFn::from_name(fname.as_ref()) {
+                                    self.compile_expr(arg)?;
+                                    self.emit_u16(Opcode::MathUnary, mfn as u16);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
                 // Fast path: arr.sort((a,b)=>a-b) or arr.sort((a,b)=>b-a) -> ArraySortNumeric
                 if !args.iter().any(|a| matches!(a, CallArg::Spread(_)))
                     && args.len() == 1
@@ -2714,6 +2744,10 @@ fn compile_internal(
     let mut chunk = Chunk::new();
     chunk.source = source; // tag before compiling so nested chunks inherit it (#74)
     let mut compiler = Compiler::new(&mut chunk, retain_last_expr);
+    // #186 — `Math` intrinsics are sound only if `Math` is never rebound anywhere in the program.
+    // `stmt_rebinds` is conservative (any rebind, destructure, FunDecl, or unknown node → true), so a
+    // `false` here only forgoes the optimization, never risks a miscompile.
+    compiler.math_is_global = !program.statements.iter().any(|s| stmt_rebinds(s, "Math"));
     compiler.compile_program(program)?;
     if peephole {
         crate::peephole::optimize(&mut chunk);

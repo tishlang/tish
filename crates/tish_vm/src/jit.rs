@@ -32,7 +32,9 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
 use tishlang_ast::{BinOp, UnaryOp};
-use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
+use tishlang_bytecode::{
+    u8_to_binop, u8_to_unaryop, Chunk, Constant, MathUnaryFn, Opcode, NO_REST_PARAM,
+};
 
 /// A JIT-compiled hot LOOP REGION for on-stack replacement (#190). Unlike [`NumericFn`] (a whole
 /// function over register-`f64` params), this is native code over a chunk's **numeric slot frame**:
@@ -345,6 +347,9 @@ struct JitGlobal {
     /// whitelist is scanned once, not on every back-edge past the trigger threshold.
     osr_cache: HashMap<(usize, usize), (u64, Option<LoopFn>)>,
     counter: usize,
+    /// `FuncId` of the imported `tish_math_call` host fn (#186), declared once at module init and
+    /// re-imported into each compiled function via `declare_func_in_func`.
+    math_call_id: cranelift_module::FuncId,
 }
 
 // SAFETY: `JITModule` is `!Send`, but the single instance lives behind the
@@ -354,7 +359,19 @@ unsafe impl Send for JitGlobal {}
 
 static JIT: OnceLock<Option<Mutex<JitGlobal>>> = OnceLock::new();
 
-fn new_module() -> Option<JITModule> {
+/// Host entry point the JIT calls for `Math.<fn>` intrinsics it doesn't lower to a native op (#186):
+/// sin/cos/tan/exp/log/round/sign/… The single source of truth is [`MathUnaryFn::apply`], so JIT ≡
+/// VM ≡ interpreter bit-for-bit. `extern "C"` and registered as a JIT symbol; the id is the operand.
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_math_call(id: i32, x: f64) -> f64 {
+    match tishlang_bytecode::MathUnaryFn::from_u16(id as u16) {
+        Some(m) => m.apply(x),
+        None => f64::NAN,
+    }
+}
+
+/// Build the JIT module and declare the imported `tish_math_call` host function, returning both.
+fn new_module() -> Option<(JITModule, cranelift_module::FuncId)> {
     let mut flag_builder = settings::builder();
     // JIT code is loaded at a fixed address; no PIC / colocated libcalls needed.
     flag_builder.set("use_colocated_libcalls", "false").ok()?;
@@ -364,18 +381,29 @@ fn new_module() -> Option<JITModule> {
     let isa = isa_builder
         .finish(settings::Flags::new(flag_builder))
         .ok()?;
-    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    Some(JITModule::new(builder))
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    builder.symbol("tish_math_call", tish_math_call as *const u8);
+    let mut module = JITModule::new(builder);
+    // Import signature: `(i32 fn-id, f64 x) -> f64`.
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I32));
+    sig.params.push(AbiParam::new(types::F64));
+    sig.returns.push(AbiParam::new(types::F64));
+    let math_id = module
+        .declare_function("tish_math_call", Linkage::Import, &sig)
+        .ok()?;
+    Some((module, math_id))
 }
 
 fn jit() -> Option<&'static Mutex<JitGlobal>> {
     JIT.get_or_init(|| {
-        new_module().map(|module| {
+        new_module().map(|(module, math_call_id)| {
             Mutex::new(JitGlobal {
                 module,
                 cache: HashMap::new(),
                 osr_cache: HashMap::new(),
                 counter: 0,
+                math_call_id,
             })
         })
     })
@@ -532,7 +560,8 @@ fn compile_loop_region(
             | Opcode::ExitBlock
             | Opcode::LoopVarsEnd
             | Opcode::LoopVarsBegin
-            | Opcode::UnaryOp => {}
+            | Opcode::UnaryOp
+            | Opcode::MathUnary => {} // #186 — `Math.<fn>(x)`: 1 f64 in, 1 f64 out (like UnaryOp)
             Opcode::LoadLocal | Opcode::StoreLocal => {
                 used.insert(peek_u16(code, ip + 1)?);
             }
@@ -608,6 +637,7 @@ fn compile_loop_region(
 
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
+    let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     let built = build_loop_region_body(
         &mut ctx.func,
@@ -619,6 +649,7 @@ fn compile_loop_region(
         &used_slots,
         &buf_pos,
         &exit_id,
+        math_fref,
     );
     if !built {
         g.module.clear_context(&mut ctx);
@@ -656,6 +687,7 @@ fn build_loop_region_body(
     used_slots: &[u16],
     buf_pos: &HashMap<u16, usize>,
     exit_id: &HashMap<usize, usize>,
+    math_fref: cranelift::codegen::ir::FuncRef,
 ) -> bool {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -837,6 +869,24 @@ fn build_loop_region_body(
                 terminated = true;
                 ip += 3;
             }
+            Opcode::MathUnary => {
+                // #186 — `Math.<fn>(x)`: pop the arg, emit the native op / host call, push the result.
+                let id = match peek_u16(code, ip + 1) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let mfn = match MathUnaryFn::from_u16(id) {
+                    Some(m) => m,
+                    None => return false,
+                };
+                let (x, _) = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
+                stack.push((r, false));
+                ip += 3;
+            }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &[], 0) {
                 SimpleOp::Handled(_) => {}
                 _ => return false, // LoadConst/BinOp/UnaryOp handled; anything else → keep interpreting
@@ -867,6 +917,31 @@ fn build_loop_region_body(
 /// `op_size` of the opcode at `off`, or `None` if the byte is not a known opcode.
 fn op_size_at(code: &[u8], off: usize) -> Option<usize> {
     op_size(Opcode::from_u8(*code.get(off)?)?)
+}
+
+/// Lower `Math.<mfn>(x)` (#186): a single native op for the ones bit-identical to Rust's `f64`
+/// methods (== the `tishlang_builtins::math` fns), else a call to the imported `tish_math_call` host
+/// fn (`math_fref`) which routes through [`MathUnaryFn::apply`] — so JIT ≡ VM ≡ interp exactly.
+fn emit_math_unary(
+    bcx: &mut FunctionBuilder,
+    math_fref: cranelift::codegen::ir::FuncRef,
+    mfn: MathUnaryFn,
+    x: ClifValue,
+) -> ClifValue {
+    match mfn {
+        MathUnaryFn::Sqrt => bcx.ins().sqrt(x),
+        MathUnaryFn::Floor => bcx.ins().floor(x),
+        MathUnaryFn::Ceil => bcx.ins().ceil(x),
+        MathUnaryFn::Trunc => bcx.ins().trunc(x),
+        MathUnaryFn::Abs => bcx.ins().fabs(x),
+        // `Round` (JS `-0` tie edge), `Sign`, and every transcendental go through the host call so
+        // the result is byte-identical to the interpreter (no native-op divergence).
+        _ => {
+            let id = bcx.ins().iconst(types::I32, mfn as i64);
+            let call = bcx.ins().call(math_fref, &[id, x]);
+            bcx.inst_results(call)[0]
+        }
+    }
 }
 
 /// Lower `f64` comparison to `1.0`/`0.0` (JS boolean-in-number form).
@@ -939,6 +1014,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
+    let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     let result_bool = match build_body_cfg(
         &mut ctx.func,
@@ -948,6 +1024,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         Some(self_ref),
         0,
         recur_guard,
+        math_fref,
     ) {
         Some(b) => b,
         None => {
@@ -1078,9 +1155,11 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
 
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
+    let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     // No self-call in array mode (recursive call would need the array signature) → pass None.
-    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask, false).is_none() {
+    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask, false, math_fref).is_none()
+    {
         g.module.clear_context(&mut ctx);
         return None;
     }
@@ -1298,7 +1377,7 @@ fn op_size(op: Opcode) -> Option<usize> {
     Some(match op {
         Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock | GetIndex => 1,
         LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
-        | LoopVarsBegin | SelfCall => 3,
+        | LoopVarsBegin | SelfCall | MathUnary => 3,
         _ => return None,
     })
 }
@@ -1357,6 +1436,8 @@ fn build_body_cfg(
     // `*mut RecurGuard` param, and the function entry emits a stack-pointer check that bails before
     // the native recursion overflows. `false` for array mode and every non-recursive function.
     recur_guard: bool,
+    // #186: the imported `tish_math_call` host fn, for lowering `Math.<fn>` (`MathUnary`) intrinsics.
+    math_fref: cranelift::codegen::ir::FuncRef,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -1655,6 +1736,15 @@ fn build_body_cfg(
                 stack.push((result, false));
                 ip += 3;
             }
+            Opcode::MathUnary => {
+                // #186 — `Math.<fn>(x)`: pop the arg, emit native op / host call, push the result.
+                let id = peek_u16(code, ip + 1)?;
+                let mfn = MathUnaryFn::from_u16(id)?;
+                let (x, _) = stack.pop()?;
+                let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
+                stack.push((r, false));
+                ip += 3;
+            }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
                 SimpleOp::Handled(_) => {}
                 _ => return None, // LoadConst/BinOp/UnaryOp handled; anything else → VM
@@ -1921,17 +2011,18 @@ mod tests {
         assert_eq!(got, vec![10.0, 45.0], "s=45 (sum 0..9), i=10 after the loop");
     }
 
-    /// #190 — a loop that touches a non-slot value (a call) is not pure-numeric slot math, so the
-    /// region must be rejected (negative-cached) and the VM keeps interpreting.
+    /// #190 — a loop that touches a non-slot value (a general call) is not pure-numeric slot math, so
+    /// the region must be rejected (negative-cached) and the VM keeps interpreting. `Math.max` is a
+    /// 2-arg call (NOT the #186 unary intrinsic), so it stays a `Call` the region must reject.
     #[test]
     fn osr_region_rejects_calls() {
         let chunk = top_chunk(
-            "let a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + Math.floor(i / 2.0) }\n",
+            "let a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + Math.max(i, 2.0) }\n",
         );
         let (header, end) = first_region(&chunk);
         assert!(
             try_compile_loop(&chunk, header, end).is_none(),
-            "a loop containing a call must not OSR-compile"
+            "a loop containing a general call must not OSR-compile"
         );
     }
 

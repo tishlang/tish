@@ -139,13 +139,159 @@ pub enum Opcode {
     /// nothing on the stack — only emitted where the assignment's result is discarded. Slots are
     /// frame-private (never captured), so the buffer needs no cross-frame sharing.
     AppendLocal = 54,
+    /// #186 — apply a unary `Math.<fn>` intrinsic to the top-of-stack number: pop one value, push
+    /// `Math.fn(x)`. The u16 operand is the [`MathUnaryFn`] id. Emitted by the compiler ONLY when
+    /// `Math` is provably the global builtin (never shadowed in the program), so the numeric JIT can
+    /// lower it to a native op / libcall without a runtime shape guard. Behaviour is identical to
+    /// `LoadVar Math; GetMember fn; <arg>; Call 1` on a number.
+    MathUnary = 55,
+}
+
+/// The unary `Math` functions the [`Opcode::MathUnary`] fast path recognizes (#186). f64→f64;
+/// the discriminant is the opcode operand. Kept in sync with the VM handler and the JIT lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum MathUnaryFn {
+    Sqrt = 0,
+    Cbrt = 1,
+    Abs = 2,
+    Floor = 3,
+    Ceil = 4,
+    Round = 5,
+    Trunc = 6,
+    Sign = 7,
+    Sin = 8,
+    Cos = 9,
+    Tan = 10,
+    Asin = 11,
+    Acos = 12,
+    Atan = 13,
+    Sinh = 14,
+    Cosh = 15,
+    Tanh = 16,
+    Exp = 17,
+    Log = 18,
+    Log2 = 19,
+    Log10 = 20,
+}
+
+impl MathUnaryFn {
+    /// Map a `Math.<name>` member to its id, or `None` if it isn't a supported unary intrinsic.
+    pub fn from_name(name: &str) -> Option<MathUnaryFn> {
+        Some(match name {
+            "sqrt" => MathUnaryFn::Sqrt,
+            "cbrt" => MathUnaryFn::Cbrt,
+            "abs" => MathUnaryFn::Abs,
+            "floor" => MathUnaryFn::Floor,
+            "ceil" => MathUnaryFn::Ceil,
+            "round" => MathUnaryFn::Round,
+            "trunc" => MathUnaryFn::Trunc,
+            "sign" => MathUnaryFn::Sign,
+            "sin" => MathUnaryFn::Sin,
+            "cos" => MathUnaryFn::Cos,
+            "tan" => MathUnaryFn::Tan,
+            "asin" => MathUnaryFn::Asin,
+            "acos" => MathUnaryFn::Acos,
+            "atan" => MathUnaryFn::Atan,
+            "sinh" => MathUnaryFn::Sinh,
+            "cosh" => MathUnaryFn::Cosh,
+            "tanh" => MathUnaryFn::Tanh,
+            "exp" => MathUnaryFn::Exp,
+            "log" => MathUnaryFn::Log,
+            "log2" => MathUnaryFn::Log2,
+            "log10" => MathUnaryFn::Log10,
+            _ => return None,
+        })
+    }
+
+    /// Decode an opcode operand to the fn id (safe match — no transmute).
+    pub fn from_u16(v: u16) -> Option<MathUnaryFn> {
+        use MathUnaryFn::*;
+        Some(match v {
+            0 => Sqrt,
+            1 => Cbrt,
+            2 => Abs,
+            3 => Floor,
+            4 => Ceil,
+            5 => Round,
+            6 => Trunc,
+            7 => Sign,
+            8 => Sin,
+            9 => Cos,
+            10 => Tan,
+            11 => Asin,
+            12 => Acos,
+            13 => Atan,
+            14 => Sinh,
+            15 => Cosh,
+            16 => Tanh,
+            17 => Exp,
+            18 => Log,
+            19 => Log2,
+            20 => Log10,
+            _ => return None,
+        })
+    }
+
+    /// Apply the intrinsic (the single source of truth for VM + JIT + interp result parity).
+    #[inline]
+    pub fn apply(self, x: f64) -> f64 {
+        match self {
+            MathUnaryFn::Sqrt => x.sqrt(),
+            MathUnaryFn::Cbrt => x.cbrt(),
+            MathUnaryFn::Abs => x.abs(),
+            MathUnaryFn::Floor => x.floor(),
+            MathUnaryFn::Ceil => x.ceil(),
+            // JS `Math.round`: ties toward +∞, `[-0.5, 0) → -0`; EXACTLY `tishlang_builtins::math::
+            // round_f64` (replicated here — this crate sits below builtins — so VM/JIT == interp).
+            MathUnaryFn::Round => {
+                if x.is_nan() || x.is_infinite() || x == 0.0 {
+                    x
+                } else if (-0.5..0.5).contains(&x) {
+                    if x < 0.0 {
+                        -0.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (x + 0.5).floor()
+                }
+            }
+            MathUnaryFn::Trunc => x.trunc(),
+            // JS `Math.sign` (matches `tishlang_builtins::math::sign`): NaN→NaN, else ±1, and 0/-0→+0.
+            MathUnaryFn::Sign => {
+                if x.is_nan() {
+                    f64::NAN
+                } else if x > 0.0 {
+                    1.0
+                } else if x < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            }
+            MathUnaryFn::Sin => x.sin(),
+            MathUnaryFn::Cos => x.cos(),
+            MathUnaryFn::Tan => x.tan(),
+            MathUnaryFn::Asin => x.asin(),
+            MathUnaryFn::Acos => x.acos(),
+            MathUnaryFn::Atan => x.atan(),
+            MathUnaryFn::Sinh => x.sinh(),
+            MathUnaryFn::Cosh => x.cosh(),
+            MathUnaryFn::Tanh => x.tanh(),
+            MathUnaryFn::Exp => x.exp(),
+            MathUnaryFn::Log => x.ln(),
+            MathUnaryFn::Log2 => x.log2(),
+            MathUnaryFn::Log10 => x.log10(),
+        }
+    }
 }
 
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=54 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=55 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 54 {
+        if b <= 55 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None
