@@ -1368,7 +1368,7 @@ impl Vm {
         let mut deopt: u8 = 0;
         // SAFETY: `buf` is a valid `[f64; used_slots.len()]`; `deopt` is a valid `*mut u8`. The region
         // was compiled for exactly this chunk+header (fingerprint-checked in the cache).
-        let exit_id = unsafe { loopfn.call(buf.as_mut_ptr(), &mut deopt as *mut u8) };
+        let exit_id = loopfn.call(&mut buf, &mut deopt);
         for (p, &slot) in loopfn.used_slots.iter().enumerate() {
             if let Some(d) = slots.get_mut(slot_base + slot as usize) {
                 *d = Value::Number(buf[p]);

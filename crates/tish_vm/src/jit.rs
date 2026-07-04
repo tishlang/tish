@@ -61,15 +61,18 @@ unsafe impl Send for LoopFn {}
 unsafe impl Sync for LoopFn {}
 
 impl LoopFn {
-    /// Run the region. `buf` points at `used_slots.len()` `f64`s (the live-ins), updated in place
-    /// with the live-outs on return. `deopt` is a 1-byte flag (unused in v1). Returns the exit id.
-    ///
-    /// # Safety
-    /// `buf` must be a valid, writable `[f64; used_slots.len()]` and `deopt` a valid `*mut u8`.
+    /// Run the region. `buf` holds the live-ins (`used_slots.len()` `f64`s), updated in place with the
+    /// live-outs on return. `deopt` is a 1-byte flag (unused in v1). Returns the exit id. Safe wrapper
+    /// — the raw-pointer transmute (same soundness as [`NumericFn::call`]: immutable native code with a
+    /// fixed C ABI) is confined here, so call sites need no `unsafe`.
     #[inline]
-    pub unsafe fn call(&self, buf: *mut f64, deopt: *mut u8) -> i32 {
-        let f: extern "C" fn(*mut f64, *mut u8) -> i32 = std::mem::transmute(self.ptr);
-        f(buf, deopt)
+    pub fn call(&self, buf: &mut [f64], deopt: &mut u8) -> i32 {
+        // SAFETY: `ptr` is immutable executable code compiled for exactly this `(*mut f64, *mut u8)`
+        // ABI; `buf`/`deopt` are valid for the call and the region only touches `buf[0..used_slots]`.
+        unsafe {
+            let f: extern "C" fn(*mut f64, *mut u8) -> i32 = std::mem::transmute(self.ptr);
+            f(buf.as_mut_ptr(), deopt as *mut u8)
+        }
     }
 }
 
@@ -1910,7 +1913,7 @@ mod tests {
         assert!(!lf.used_slots.is_empty() && !lf.exits.is_empty());
         let mut buf = vec![0.0f64; lf.used_slots.len()];
         let mut deopt = 0u8;
-        let exit = unsafe { lf.call(buf.as_mut_ptr(), &mut deopt as *mut u8) };
+        let exit = lf.call(&mut buf, &mut deopt);
         assert!((exit as usize) < lf.exits.len(), "exit id in range");
         assert_eq!(deopt, 0, "v1 region never sets the deopt flag");
         let mut got = buf.clone();
@@ -1943,7 +1946,7 @@ mod tests {
         let lf = try_compile_loop(&chunk, header, end).expect("branchy numeric loop must OSR-compile");
         let mut buf = vec![0.0f64; lf.used_slots.len()];
         let mut deopt = 0u8;
-        unsafe { lf.call(buf.as_mut_ptr(), &mut deopt as *mut u8) };
+        lf.call(&mut buf, &mut deopt);
         let mut got = buf.clone();
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(got, vec![20.0, 90.0], "s=90 (0+2+…+18), i=20");
