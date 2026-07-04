@@ -26,6 +26,8 @@ pub fn lint_program(program: &Program) -> Vec<LintDiagnostic> {
     let mut out = Vec::new();
     check_unreachable(&program.statements, &mut out);
     for s in &program.statements {
+        // Top-level bare `{}` blocks are standalone statements: flag them like ESLint no-empty.
+        check_empty_block(s, &mut out);
         lint_stmt(s, &mut out);
     }
     out
@@ -94,7 +96,10 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
                 }
                 lint_stmt(cb, out);
             }
+            // #153: ESLint no-empty flags an empty `finally` (but not the try body). Report before
+            // recursing so the finally's own bare-block children aren't double-counted below.
             if let Some(fb) = finally_body {
+                check_empty_block(fb, out);
                 lint_stmt(fb, out);
             }
         }
@@ -102,6 +107,8 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
         Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
             check_unreachable(statements, out);
             for st in statements {
+                // #153: a bare `{}` nested inside another block is a standalone empty block.
+                check_empty_block(st, out);
                 lint_stmt(st, out);
             }
         }
@@ -113,17 +120,21 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             ..
         } => {
             lint_expr(cond, out);
+            check_empty_block(then_branch, out); // #153: empty `if` branch
             lint_stmt(then_branch, out);
             if let Some(e) = else_branch {
+                check_empty_block(e, out); // #153: empty `else` branch
                 lint_stmt(e, out);
             }
         }
         Statement::While { cond, body, .. } => {
             lint_expr(cond, out);
+            check_empty_block(body, out); // #153: empty `while` body
             lint_stmt(body, out);
         }
         Statement::ForOf { iterable, body, .. } => {
             lint_expr(iterable, out);
+            check_empty_block(body, out); // #153: empty `for-of` body
             lint_stmt(body, out);
         }
         Statement::For {
@@ -142,6 +153,7 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             if let Some(u) = update {
                 lint_expr(u, out);
             }
+            check_empty_block(body, out); // #153: empty `for` body
             lint_stmt(body, out);
         }
         Statement::FunDecl { body, .. } => lint_stmt(body, out),
@@ -169,6 +181,7 @@ fn lint_stmt(s: &Statement, out: &mut Vec<LintDiagnostic>) {
             }
         }
         Statement::DoWhile { body, cond, .. } => {
+            check_empty_block(body, out); // #153: empty `do-while` body
             lint_stmt(body, out);
             lint_expr(cond, out);
         }
@@ -193,6 +206,25 @@ fn is_empty_block_or_stmt(s: &Statement) -> bool {
         Statement::Block { statements, .. } => statements.is_empty(),
         Statement::ExprStmt { .. } => false,
         _ => false,
+    }
+}
+
+/// `tish-empty-block` (ESLint no-empty parity): flag `s` if it is an empty `{ }` block. Callers pass
+/// only positions ESLint no-empty covers — `if`/`else`, loop bodies, `finally`, and standalone bare
+/// blocks. Function bodies, the `try` body, and `catch` bodies are intentionally NOT routed here:
+/// ESLint allows empty functions and empty try bodies, and an empty catch is its own
+/// `tish-empty-catch` diagnostic (so this never double-reports a catch). The message/span/severity
+/// mirror the empty-catch diagnostic exactly.
+fn check_empty_block(s: &Statement, out: &mut Vec<LintDiagnostic>) {
+    if is_empty_block_or_stmt(s) {
+        let span = stmt_span(s);
+        out.push(LintDiagnostic {
+            code: "tish-empty-block",
+            message: "Empty block; add statements or remove it.".into(),
+            line: span.0,
+            col: span.1,
+            severity: Severity::Warning,
+        });
     }
 }
 
@@ -345,6 +377,10 @@ pub const RULES: &[(&str, &str)] = &[
         "Warns on catch blocks with no statements (likely mistake).",
     ),
     (
+        "tish-empty-block",
+        "Warns on empty blocks in if/else, loops, finally, or as bare `{}` (ESLint no-empty; function bodies and try bodies are allowed).",
+    ),
+    (
         "tish-duplicate-key",
         "Warns when an object literal repeats the same key.",
     ),
@@ -438,6 +474,95 @@ mod tests {
         assert_eq!(unreachable("fn g() {\n  return 1\n  fn helper() { return 2 }\n}\n"), 0, "hoisted fn");
         // Switch fall-through (no terminator) is intentional.
         assert_eq!(unreachable("switch (x) {\n  case 1:\n    a()\n  case 2:\n    b()\n}\n"), 0, "fallthrough");
+    }
+}
+
+// #153: `tish-empty-block` (ESLint no-empty parity) — empty blocks outside catch are flagged, but
+// function bodies and the try body are not, and an empty catch stays `tish-empty-catch`.
+#[cfg(test)]
+mod empty_block_tests {
+    use super::*;
+
+    fn count(src: &str, code: &str) -> usize {
+        lint_source(src)
+            .expect("parse")
+            .iter()
+            .filter(|d| d.code == code)
+            .count()
+    }
+
+    fn empty_blocks(src: &str) -> usize {
+        count(src, "tish-empty-block")
+    }
+
+    #[test]
+    fn flags_empty_if_branch() {
+        assert_eq!(empty_blocks("if (c) {}\n"), 1);
+    }
+
+    #[test]
+    fn flags_empty_if_and_else_branches() {
+        // Both the empty then-branch and the empty else-branch are flagged.
+        assert_eq!(empty_blocks("if (c) {} else {}\n"), 2);
+    }
+
+    #[test]
+    fn flags_empty_while_body() {
+        assert_eq!(empty_blocks("while (c) {}\n"), 1);
+    }
+
+    #[test]
+    fn flags_empty_for_body() {
+        assert_eq!(empty_blocks("for (;;) {}\n"), 1);
+    }
+
+    #[test]
+    fn flags_empty_for_of_body() {
+        assert_eq!(empty_blocks("for (const x of xs) {}\n"), 1);
+    }
+
+    #[test]
+    fn flags_empty_do_while_body() {
+        assert_eq!(empty_blocks("do {} while (c)\n"), 1);
+    }
+
+    #[test]
+    fn flags_bare_empty_block() {
+        assert_eq!(empty_blocks("{}\n"), 1);
+    }
+
+    #[test]
+    fn flags_empty_finally() {
+        // Try body is unflagged; only the empty `finally` is reported.
+        assert_eq!(empty_blocks("try { f() } catch (e) { g() } finally {}\n"), 1);
+    }
+
+    #[test]
+    fn does_not_flag_empty_function_body() {
+        // ESLint no-empty allows empty functions.
+        assert_eq!(empty_blocks("function f() {}\n"), 0, "fn decl");
+        assert_eq!(empty_blocks("fn f() {}\n"), 0, "fn keyword");
+        assert_eq!(empty_blocks("const f = () => {}\n"), 0, "arrow");
+    }
+
+    #[test]
+    fn does_not_flag_empty_try_body() {
+        // ESLint no-empty does NOT flag the try body itself.
+        assert_eq!(empty_blocks("try {} catch (e) { g() }\n"), 0);
+    }
+
+    #[test]
+    fn does_not_flag_non_empty_blocks() {
+        assert_eq!(empty_blocks("if (c) { f() } else { g() }\n"), 0, "if/else");
+        assert_eq!(empty_blocks("while (c) { f() }\n"), 0, "while");
+        assert_eq!(empty_blocks("{ f() }\n"), 0, "bare block");
+    }
+
+    #[test]
+    fn empty_catch_stays_empty_catch_not_empty_block() {
+        // The catch keeps its dedicated code and is NOT also reported as an empty block.
+        assert_eq!(count("try { f() } catch (e) {}\n", "tish-empty-catch"), 1, "empty-catch");
+        assert_eq!(count("try { f() } catch (e) {}\n", "tish-empty-block"), 0, "not empty-block");
     }
 }
 
