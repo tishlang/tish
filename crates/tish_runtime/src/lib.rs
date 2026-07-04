@@ -18,7 +18,16 @@ pub use tishlang_core::{ObjectData, PropMap};
 pub use tishlang_core::Value;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
-pub use tishlang_core::value_call;
+/// Wraps `tishlang_core::value_call` with a pending-throw suppression check (#381): while a thrown
+/// value is unwinding toward its checkpoint, calling anything would run side effects JS semantics
+/// say must not happen after a throw (e.g. `console.log(f(x))` printing the NaN sentinel a tripped
+/// recursion guard unwound with). One thread-local read on a path already dominated by boxing.
+pub fn value_call(callee: &Value, args: &[Value]) -> Value {
+    if has_pending_throw() {
+        return Value::Null;
+    }
+    tishlang_core::value_call(callee, args)
+}
 /// JS ToInt32/ToUint32 for the emitted bitwise/shift code (modulo 2³², NaN/±Infinity → 0).
 pub use tishlang_core::{
     to_int32, to_int32_value, to_number_value, to_uint32, to_uint32_value,
@@ -610,6 +619,89 @@ impl std::error::Error for TishError {}
 // the VM shares the same slot. Re-export the accessors so the Rust emitted by `tishlang_compile`
 // keeps calling `tishlang_runtime::{set,has,take}_pending_throw`. See `tishlang_core` for the docs.
 pub use tishlang_core::{has_pending_throw, set_pending_throw, take_pending_throw};
+
+// #381 — the recursion-guard plumbing for generated native code. The depth counter lives in
+// `tishlang_core` beside the pending-throw slot; the entry point generated code uses is the
+// wrapper below, which adds the stack-pressure check the counter alone can't provide.
+pub use tishlang_core::{stack_overflow_error, CallDepthGuard};
+
+/// #381 — enter a boxed user-fn call frame, or trip the recursion guard. Emitted at the top of
+/// every generated user-fn closure. Trips on EITHER limit: the counted ceiling
+/// (`TISH_MAX_CALL_DEPTH`, default 20000 — parity with the interp/VM guards) or real stack
+/// pressure ([`stack_low`]) — boxed native frames are large enough that 20000 of them can exceed
+/// the stack before the counter does (the VM sidesteps this with `stacker::maybe_grow`; generated
+/// code has no stack growth, so pressure must be its own trigger). On trip: parks the catchable
+/// `RangeError` and returns `None`; the closure returns its dummy `Value::Null` and the throw
+/// surfaces at the caller's pending-throw checkpoint.
+#[inline]
+pub fn enter_call_guarded() -> Option<CallDepthGuard> {
+    if stack_low() {
+        set_pending_throw(stack_overflow_error());
+        return None;
+    }
+    tishlang_core::enter_call_guarded()
+}
+
+#[cfg(not(target_family = "wasm"))]
+thread_local! {
+    // The current thread's bail floor for guarded self-recursive native fns: the stack address below
+    // which recursion must stop (real stack bottom + headroom margin). 0 = not yet initialized.
+    // Thread-local because every thread's stack occupies a different address range. #381
+    static STACK_FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Headroom left below the deepest allowed recursion level (#381): must cover the levels emitted
+/// between two guard checks (the rotation window), the bail path, and building/raising the
+/// `RangeError`. Mirrors the VM JIT tier's margin (`RECUR_STACK_MARGIN`).
+#[cfg(not(target_family = "wasm"))]
+const RECUR_STACK_MARGIN: usize = 256 * 1024;
+
+/// #381 — is the current thread's stack nearly exhausted? Emitted by the native backend at the
+/// entry of self-recursive typed fns (every K-th rotation copy), so unbounded numeric recursion
+/// bails into a catchable `RangeError` instead of overflowing the stack (an uncatchable abort).
+/// One thread-local read + pointer compare after first init; the margin is capped at half the
+/// remaining stack so a first call on an already-deep stack can't false-trip (limit stays below SP).
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+pub fn stack_low() -> bool {
+    let anchor = 0u8;
+    let sp = &anchor as *const u8 as usize;
+    STACK_FLOOR.with(|c| {
+        let mut floor = c.get();
+        if floor == 0 {
+            // `None` (unknown bounds) → floor 1: SP can never be below it, guard never trips —
+            // same do-no-harm fallback as the VM JIT tier.
+            floor = match stacker::remaining_stack() {
+                Some(rem) => {
+                    let margin = RECUR_STACK_MARGIN.min(rem / 2);
+                    sp.saturating_sub(rem).saturating_add(margin).max(1)
+                }
+                None => 1,
+            };
+            c.set(floor);
+        }
+        sp < floor
+    })
+}
+
+/// Wasm: the sandbox traps on overflow (contained by design), and `stacker` has no wasm support —
+/// the guard compiles to a constant `false` so the emitted check folds away.
+#[cfg(target_family = "wasm")]
+#[inline]
+pub fn stack_low() -> bool {
+    false
+}
+
+/// #381 — the bail path for a tripped typed-fn recursion guard: park the catchable `RangeError`
+/// and return the NaN sentinel the f64 frame unwinds with. Typed native fns are pure numeric
+/// (no side effects), so the NaN propagates harmlessly until the first `Value`/`Result` frame's
+/// pending-throw checkpoint raises the error.
+#[cold]
+#[inline(never)]
+pub fn recursion_tripped_f64() -> f64 {
+    set_pending_throw(stack_overflow_error());
+    f64::NAN
+}
 
 /// Function-boundary unwind: convert a completion that escaped a function body's `Result`-closure
 /// back into the function's `Value`. A `return v` yields `v`; an uncaught `throw` is stored in the

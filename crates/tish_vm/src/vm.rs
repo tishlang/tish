@@ -41,45 +41,10 @@ fn pending_throw_is_set() -> bool {
     tishlang_core::has_pending_throw()
 }
 
-const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
-
-thread_local! {
-    // The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A
-    // thread-local (not a process-global `OnceLock`) so each worker thread reads it independently and
-    // — crucially — so tests can lower it on their own thread without a cross-test data race. Read on
-    // the call path, so it's a cheap thread-local `Cell` load after the first init. #381
-    static MAX_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// The catchable-recursion ceiling. Past this depth a VM call throws a `RangeError` instead of
-/// overflowing the native stack. Mirrors the interpreter (`TISH_MAX_CALL_DEPTH`, default 20000).
-#[inline]
-fn max_call_depth() -> usize {
-    MAX_CALL_DEPTH.with(|c| {
-        let v = c.get();
-        if v != 0 {
-            return v;
-        }
-        let init = std::env::var("TISH_MAX_CALL_DEPTH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MAX_CALL_DEPTH);
-        c.set(init);
-        init
-    })
-}
-
-#[cfg(test)]
-fn set_max_call_depth_for_test(n: usize) {
-    MAX_CALL_DEPTH.with(|c| c.set(n));
-}
-
-/// Build the catchable `RangeError` thrown when the recursion ceiling is exceeded.
-#[inline]
-fn stack_overflow_error() -> Value {
-    construct_builtin::error_object("RangeError", "Maximum call stack size exceeded")
-}
+// The recursion ceiling + trip error moved to `tishlang_core` (#381) so the native backend's
+// boxed-call guard shares one implementation with the VM. Same semantics: thread-local ceiling
+// lazily read from `TISH_MAX_CALL_DEPTH` (default 20000), `{name, message}` RangeError.
+use tishlang_core::{max_call_depth, stack_overflow_error};
 
 /// Headroom (bytes) a self-recursive JIT'd function leaves below the real stack bottom before it
 /// bails (#381). Must cover the bail path plus building the `RangeError` back in the VM; 256 KiB is
@@ -3743,8 +3708,7 @@ pub fn run_with_options(chunk: &Chunk, opts: VmRunOptions) -> Result<Value, Stri
 
 #[cfg(test)]
 mod recursion_limit_tests_381 {
-    use super::{set_max_call_depth_for_test, DEFAULT_MAX_CALL_DEPTH};
-    use tishlang_core::Value;
+    use tishlang_core::{set_max_call_depth_for_test, Value, DEFAULT_MAX_CALL_DEPTH};
 
     fn run_src(src: &str) -> Result<Value, String> {
         let program = tishlang_parser::parse(src).expect("parse");

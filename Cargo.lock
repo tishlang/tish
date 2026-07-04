@@ -3505,6 +3505,7 @@ dependencies = [
  "libc",
  "reqwest",
  "socket2 0.5.10",
+ "stacker",
  "tiny_http",
  "tishlang_builtins",
  "tishlang_core",
