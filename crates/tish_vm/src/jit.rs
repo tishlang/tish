@@ -94,6 +94,10 @@ pub struct NumericFn {
     /// array-mode uniform 3-pointer ABI (the [`NumericFn::call_arrays`] path). Kept as a `u8` (arity
     /// ≤ 8) so `NumericFn` stays `Copy`. `TISH_JIT_ARRAYS`-gated; `0` in every default build.
     array_param_mask: u8,
+    /// #187: subset of `array_param_mask` whose arrays are WRITTEN (`arr[i] = v`). After a non-deopt
+    /// `call_arrays`, [`try_call_array_jit`] copies each such scratch buffer back into the caller's
+    /// `Value::Array`. `0` ⇒ every array param is read-only (no writeback).
+    array_writable_mask: u8,
     /// True when this is a self-recursive function compiled with a trailing `*mut RecurGuard` param
     /// (the recursion-depth bail, #381). Such a function must be invoked via [`NumericFn::call_guarded`];
     /// non-recursive functions keep the plain ABI and [`NumericFn::call`] (zero overhead).
@@ -105,13 +109,14 @@ pub struct NumericFn {
 }
 
 /// A flat numeric array handed to an array-mode JIT function: a raw `f64` slice (`ptr`, `len`).
-/// Built by the VM wrapper from a `NumberArray` (zero-copy) or by extracting an all-numeric
-/// `Array` into a scratch `Vec<f64>` (the wrapper only builds one when every element is a
-/// `Value::Number` — non-numeric arrays never reach the JIT, so the slice is always valid `f64`).
+/// Built by the VM wrapper by extracting an all-numeric `Array` into a scratch `Vec<f64>` (the
+/// wrapper only builds one when every element is a `Value::Number`, so the slice is always valid
+/// `f64`). `ptr` is `*mut` because #187 array-param WRITES store through it into the scratch buffer;
+/// read-only params only load, so the mut provenance is harmless there.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ArrayHandle {
-    pub ptr: *const f64,
+    pub ptr: *mut f64,
     pub len: usize,
 }
 
@@ -362,6 +367,13 @@ impl NumericFn {
     #[inline]
     pub fn array_param_mask(&self) -> u8 {
         self.array_param_mask
+    }
+
+    /// #187: bit k set ⇒ array param k is WRITTEN (`arr[i] = v`) and its scratch buffer must be copied
+    /// back into the caller's `Value::Array` after a non-deopt run. Subset of [`array_param_mask`].
+    #[inline]
+    pub fn array_writable_mask(&self) -> u8 {
+        self.array_writable_mask
     }
 
     /// Call an array-mode function (`array_param_mask != 0`). `numeric` holds the f64 values for the
@@ -1248,13 +1260,13 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     // 3-pointer array ABI instead of the register-`f64` ABI. mask 0 ⇒ ordinary numeric path below.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let array_mask = if jit_arrays_enabled() {
+        let (array_mask, writable_mask) = if jit_arrays_enabled() {
             classify_params(chunk, arity)
         } else {
-            0
+            (0, 0)
         };
         if array_mask != 0 {
-            return compile_chunk_arrays(g, chunk, arity, array_mask);
+            return compile_chunk_arrays(g, chunk, arity, array_mask, writable_mask);
         }
     }
 
@@ -1370,83 +1382,99 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         arity: arity as u8,
         result_bool,
         array_param_mask: 0,
+        array_writable_mask: 0,
         recur_guarded: recur_guard,
         jv: is_jv,
     })
 }
 
-/// Classify each param slot of an array-mode candidate. Returns a bitmask: **bit k set ⇒ param k is
-/// an ARRAY** used only as `arr[i]` / `arr[const]`. Returns `0` when there are no array params OR the
-/// function is ineligible for array mode (a param used both as an array and as a number, a `GetIndex`
-/// the peephole can't consume, etc.) — the caller then takes the ordinary numeric path, which itself
-/// bails on `GetIndex`, so a `0` here is always safe (never a miscompile, just no array-JIT).
+/// Classify each param slot of an array-mode candidate. Returns `(array_mask, writable_mask)`:
+/// **array bit k ⇒ param k is an ARRAY** used only as `arr[i]` (read, `GetIndex`) or `arr[i] = v`
+/// (write, `SetIndex`); **writable bit k ⇒ that array is written**. Returns `(0, 0)` when there are no
+/// array params OR the function is ineligible (a param used as both an array and a number, an index
+/// shape the peephole can't consume, etc.). A `0` is always safe: the caller takes the ordinary
+/// numeric path (which itself bails on `GetIndex`/`SetIndex`), and `try_call_array_jit` re-checks every
+/// arg's runtime type, so a misclassification bails to the interpreter rather than miscompiling.
 #[cfg(not(target_arch = "wasm32"))]
-fn classify_params(chunk: &Chunk, arity: usize) -> u8 {
+fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8) {
     if arity == 0 || arity > 8 || (chunk.num_slots as usize) == 0 {
-        return 0;
+        return (0, 0);
     }
     let code = &chunk.code;
     let mut used_numeric = [false; 8];
     let mut used_array = [false; 8];
+    let mut written = [false; 8];
     let mut ip = 0usize;
+    let simple = |o: Option<Opcode>| matches!(o, Some(Opcode::LoadLocal) | Some(Opcode::LoadConst));
     while ip < code.len() {
         let op = match Opcode::from_u8(code[ip]) {
             Some(o) => o,
-            None => return 0,
+            None => return (0, 0),
         };
         let size = match op_size(op) {
             Some(s) => s,
-            None => return 0, // an opcode the array CFG can't handle ⇒ ineligible
+            None => return (0, 0), // an opcode the array CFG can't handle ⇒ ineligible
         };
         match op {
             Opcode::LoadLocal => {
                 let slot = match peek_u16(code, ip + 1) {
                     Some(s) => s as usize,
-                    None => return 0,
+                    None => return (0, 0),
                 };
-                // Peephole: `LoadLocal(arr) ; (LoadLocal|LoadConst) ; GetIndex` ⇒ array access of arr.
-                let idx_then_getindex = matches!(
-                    (
-                        code.get(ip + 3).copied().and_then(Opcode::from_u8),
-                        code.get(ip + 6).copied().and_then(Opcode::from_u8),
-                    ),
-                    (Some(Opcode::LoadLocal), Some(Opcode::GetIndex))
-                        | (Some(Opcode::LoadConst), Some(Opcode::GetIndex))
-                );
-                if idx_then_getindex && slot < arity {
+                let at = |off: usize| code.get(ip + off).copied().and_then(Opcode::from_u8);
+                // Read peephole: `LoadLocal(arr) ; (LoadLocal|LoadConst) idx ; GetIndex`.
+                if slot < arity && simple(at(3)) && at(6) == Some(Opcode::GetIndex) {
                     used_array[slot] = true;
-                    ip += 7; // consume LoadLocal(arr) + index op + GetIndex
+                    ip += 7;
                     continue;
-                } else if slot < arity {
+                }
+                // Write peephole: `LoadLocal(arr) ; (LoadLocal|LoadConst) idx ; (LoadLocal|LoadConst)
+                // val ; Dup ; SetIndex` — a plain `arr[i] = v` with a simple index and value.
+                if slot < arity
+                    && simple(at(3))
+                    && simple(at(6))
+                    && at(9) == Some(Opcode::Dup)
+                    && at(10) == Some(Opcode::SetIndex)
+                {
+                    used_array[slot] = true;
+                    written[slot] = true;
+                    ip += 11;
+                    continue;
+                }
+                if slot < arity {
                     used_numeric[slot] = true;
                 }
             }
             Opcode::StoreLocal => {
                 let slot = match peek_u16(code, ip + 1) {
                     Some(s) => s as usize,
-                    None => return 0,
+                    None => return (0, 0),
                 };
                 if slot < arity {
                     used_numeric[slot] = true; // a written param is numeric-shaped (can't be our array)
                 }
             }
-            // Any `GetIndex` not already consumed by the peephole above ⇒ an index shape we don't
-            // handle (e.g. `arr[i+1]`, `arr[brr[i]]`) ⇒ ineligible.
-            Opcode::GetIndex => return 0,
+            // Any `GetIndex`/`SetIndex` not consumed by a peephole above ⇒ an index/value shape we don't
+            // handle (`arr[i+1]`, `arr[i] = a + b`, `arr[brr[i]]`, …) ⇒ ineligible.
+            Opcode::GetIndex | Opcode::SetIndex => return (0, 0),
             _ => {}
         }
         ip += size;
     }
-    let mut mask = 0u8;
+    let mut array_mask = 0u8;
+    let mut writable_mask = 0u8;
     for k in 0..arity {
         if used_array[k] {
             if used_numeric[k] {
-                return 0; // used as BOTH array and number ⇒ ambiguous ⇒ bail
+                return (0, 0); // used as BOTH array and number ⇒ ambiguous ⇒ bail
             }
-            mask |= 1u8 << k;
+            array_mask |= 1u8 << k;
+            if written[k] {
+                writable_mask |= 1u8 << k;
+            }
         }
     }
-    mask
+    (array_mask, writable_mask)
 }
 
 /// Compile an array-mode function: numeric params + array params (read as `arr[i]`). Uses ONE uniform
@@ -1460,6 +1488,7 @@ fn compile_chunk_arrays(
     chunk: &Chunk,
     arity: usize,
     mask: u8,
+    writable_mask: u8,
 ) -> Option<NumericFn> {
     let ptr_ty = g.module.target_config().pointer_type();
     let mut sig = g.module.make_signature();
@@ -1511,6 +1540,7 @@ fn compile_chunk_arrays(
         arity: arity as u8,
         result_bool: false,
         array_param_mask: mask,
+        array_writable_mask: writable_mask,
         recur_guarded: false,
         jv: false,
     })
@@ -1728,7 +1758,7 @@ fn falsy_flag(bcx: &mut FunctionBuilder, cond: ClifValue) -> ClifValue {
 fn op_size(op: Opcode) -> Option<usize> {
     use Opcode::*;
     Some(match op {
-        Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock | GetIndex => 1,
+        Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock | GetIndex | SetIndex => 1,
         LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
         | LoopVarsBegin | SelfCall | MathUnary => 3,
         _ => return None,
@@ -1876,6 +1906,33 @@ fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
     let a = *code.get(off)? as u16;
     let b = *code.get(off + 1)? as u16;
     Some((a << 8) | b)
+}
+
+/// Read a "simple" operand at byte `at` — a `LoadLocal(slot)` (→ the slot's f64 Variable) or a
+/// `LoadConst(Number)` (→ an f64 const) — for the array read/write peepholes. `None` for any other
+/// opcode / a non-numeric const, which makes the caller bail. #187
+#[cfg(not(target_arch = "wasm32"))]
+fn read_simple_operand(
+    bcx: &mut FunctionBuilder,
+    code: &[u8],
+    at: usize,
+    chunk: &Chunk,
+    vars: &[Variable],
+) -> Option<ClifValue> {
+    match Opcode::from_u8(*code.get(at)?)? {
+        Opcode::LoadLocal => {
+            let s = peek_u16(code, at + 1)? as usize;
+            Some(bcx.use_var(*vars.get(s)?))
+        }
+        Opcode::LoadConst => {
+            let ci = peek_u16(code, at + 1)? as usize;
+            match chunk.constants.get(ci) {
+                Some(Constant::Number(n)) => Some(bcx.ins().f64const(*n)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Control-flow JIT: lower a slot-based numeric function WITH loops/branches to native code. Uses a
@@ -2131,30 +2188,28 @@ fn build_body_cfg(
                     ip += 3;
                     continue;
                 }
-                // Array-mode peephole: `LoadLocal(arrayparam) ; (LoadLocal|LoadConst) ; GetIndex` →
-                // a bounds-checked native f64 load; out-of-bounds branches to the deopt pad.
+                // Array-mode peepholes on an array param, both bounds-checked (OOB → the deopt pad):
+                //   READ  `LoadLocal(arr) ; (LoadLocal|LoadConst) idx ; GetIndex`         → native load
+                //   WRITE `LoadLocal(arr) ; idx ; (LoadLocal|LoadConst) val ; Dup ; SetIndex` (#187) → store
                 if array_mask != 0 && slot < arity && (array_mask >> slot) & 1 == 1 {
                     let (aptr, alen) = *array_slots.get(&slot)?;
-                    let idx_op = Opcode::from_u8(*code.get(ip + 3)?)?;
-                    let idx_f64 = match idx_op {
-                        Opcode::LoadLocal => {
-                            let islot = peek_u16(code, ip + 4)? as usize;
-                            bcx.use_var(*vars.get(islot)?)
-                        }
-                        Opcode::LoadConst => {
-                            let ci = peek_u16(code, ip + 4)? as usize;
-                            match chunk.constants.get(ci) {
-                                Some(Constant::Number(n)) => bcx.ins().f64const(*n),
-                                _ => return None,
-                            }
-                        }
-                        _ => return None,
-                    };
-                    if Opcode::from_u8(*code.get(ip + 6)?)? != Opcode::GetIndex {
-                        return None;
+                    let idx_f64 = read_simple_operand(&mut bcx, code, ip + 3, chunk, &vars)?;
+                    let at6 = Opcode::from_u8(*code.get(ip + 6)?)?;
+                    let is_write = at6 != Opcode::GetIndex
+                        && Opcode::from_u8(*code.get(ip + 9)?)? == Opcode::Dup
+                        && Opcode::from_u8(*code.get(ip + 10)?)? == Opcode::SetIndex;
+                    if at6 != Opcode::GetIndex && !is_write {
+                        return None; // an array-param use we can't peephole (computed idx/val, escape)
                     }
                     // i = idx as usize (saturating: NaN→0, neg→0 — matches the VM's `n as usize`).
                     let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx_f64);
+                    // Read `val` (write only) BEFORE the bounds-check split so its LoadLocal reads the
+                    // slot's current SSA value in `cur`, not the fresh `cont` block.
+                    let store_val = if is_write {
+                        Some(read_simple_operand(&mut bcx, code, ip + 6, chunk, &vars)?)
+                    } else {
+                        None
+                    };
                     let inb = bcx.ins().icmp(IntCC::UnsignedLessThan, i, alen);
                     let cont = bcx.create_block();
                     let db = deopt_block?;
@@ -2163,9 +2218,15 @@ fn build_body_cfg(
                     cur = cont; // keep block-boundary tracking accurate after the mid-stream split
                     let off = bcx.ins().imul_imm(i, 8);
                     let addr = bcx.ins().iadd(aptr, off);
-                    let val = bcx.ins().load(types::F64, MemFlags::new(), addr, 0);
-                    stack.push((val, false));
-                    ip += 7; // LoadLocal(arr) + index op + GetIndex
+                    if let Some(val) = store_val {
+                        bcx.ins().store(MemFlags::new(), val, addr, 0);
+                        stack.push((val, false)); // assignment yields the value (a Pop usually discards it)
+                        ip += 11; // LoadLocal(arr) + idx + val + Dup + SetIndex
+                    } else {
+                        let val = bcx.ins().load(types::F64, MemFlags::new(), addr, 0);
+                        stack.push((val, false));
+                        ip += 7; // LoadLocal(arr) + idx + GetIndex
+                    }
                     continue;
                 }
                 let v = *vars.get(slot)?;
@@ -2786,6 +2847,98 @@ mod tests {
                 "`bool === 1` must be false → hits stays 0"
             );
         }
+    }
+
+    /// #187: compile the first array-mode fn (`array_param_mask != 0`) in `src` via `compile_chunk`.
+    fn jit_arrays(src: &str) -> NumericFn {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based || c.rest_param_index != NO_REST_PARAM || c.param_count == 0 {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
+        fn find(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if let Some(f) = compile_uncached(n) {
+                    if f.array_param_mask() != 0 {
+                        return Some(f);
+                    }
+                }
+                if let Some(f) = find(n) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&chunk)
+            .expect("the JIT must array-compile this fn (did classify_params stop matching?)")
+    }
+
+    /// #187: an array param written as `dst[i] = v` is stored into and copied back. Here `copy` reads
+    /// `src[i]` into `dst[i]`; after `call_arrays` the caller's `dst` buffer must equal `src`, and the
+    /// writable mask must flag `dst` (so [`try_call_array_jit`] knows to write it back).
+    #[test]
+    fn jit_array_param_write_and_readback() {
+        let f = jit_arrays(
+            "function copy(n, src, dst) {\n\
+             let i = 0\n\
+             while (i < n) { let x = src[i]; dst[i] = x; i = i + 1 }\n\
+             return dst[0]\n\
+             }\n\
+             copy(0, [], [])\n",
+        );
+        assert!(f.array_param_mask() != 0, "src/dst are array params");
+        assert_ne!(f.array_writable_mask(), 0, "dst must be flagged writable");
+        let mut src = [10.0f64, 20.0, 30.0];
+        let mut dst = [0.0f64; 3];
+        // arity 3 = [n (numeric), src (array), dst (array)]. numeric = [n]; arrays in param order.
+        let handles = [
+            ArrayHandle {
+                ptr: src.as_mut_ptr(),
+                len: 3,
+            },
+            ArrayHandle {
+                ptr: dst.as_mut_ptr(),
+                len: 3,
+            },
+        ];
+        let (res, deopt) = f.call_arrays(&[3.0], &handles);
+        assert!(!deopt, "in-bounds writes never deopt");
+        assert_eq!(dst, [10.0, 20.0, 30.0], "dst must be overwritten with src");
+        assert_eq!(res, 10.0, "returns dst[0]");
+    }
+
+    /// #187: an out-of-bounds array-param WRITE sets the deopt flag (the wrapper then discards the
+    /// scratch — no partial writeback — and re-interprets).
+    #[test]
+    fn jit_array_param_write_oob_deopts() {
+        let f = jit_arrays(
+            "function copy(n, src, dst) {\n\
+             let i = 0\n\
+             while (i < n) { let x = src[i]; dst[i] = x; i = i + 1 }\n\
+             return dst[0]\n\
+             }\n\
+             copy(0, [], [])\n",
+        );
+        let mut src = [1.0f64; 5];
+        let mut dst = [0.0f64; 2]; // only 2 elements — a write to dst[2] is OOB
+        let handles = [
+            ArrayHandle {
+                ptr: src.as_mut_ptr(),
+                len: 5,
+            },
+            ArrayHandle {
+                ptr: dst.as_mut_ptr(),
+                len: 2,
+            },
+        ];
+        let (_res, deopt) = f.call_arrays(&[5.0], &handles); // writes dst[0..5) into a len-2 array
+        assert!(deopt, "OOB array-param write must deopt");
     }
 
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME

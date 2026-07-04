@@ -1055,16 +1055,32 @@ fn try_call_array_jit(
     arity: usize,
     mask: u8,
 ) -> Option<Value> {
+    let writable = nf.array_writable_mask();
     let mut numeric: Vec<f64> = Vec::with_capacity(arity);
     // `scratch` OWNS the extracted f64 data; handles point into it. Build handles only AFTER scratch is
     // fully populated so its backing buffers never reallocate out from under a live pointer.
     let mut scratch: Vec<Vec<f64>> = Vec::new();
+    let mut array_arg: Vec<usize> = Vec::new(); // the `args` index each scratch buffer came from
     #[allow(clippy::needless_range_loop)]
     // `i` drives bit-mask math (`mask >> i`), not just indexing
     for i in 0..arity {
         if (mask >> i) & 1 == 1 {
             match &args[i] {
                 Value::Array(a) => {
+                    // #187: a writable array must not alias another array arg — the JIT reads/writes a
+                    // private scratch copy, so aliasing would make reads see stale data or a writeback
+                    // silently drop the other param's writes. Bail (→ interpret) on any such overlap.
+                    if writable != 0 {
+                        for &j in &array_arg {
+                            if let Value::Array(other) = &args[j] {
+                                if VmRef::ptr_eq(a, other)
+                                    && ((writable >> i) & 1 == 1 || (writable >> j) & 1 == 1)
+                                {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
                     let b = a.borrow();
                     let mut buf: Vec<f64> = Vec::with_capacity(b.len());
                     for el in b.iter() {
@@ -1074,6 +1090,7 @@ fn try_call_array_jit(
                         }
                     }
                     scratch.push(buf);
+                    array_arg.push(i);
                 }
                 _ => return None, // NumberArray / non-array → interpreter
             }
@@ -1084,16 +1101,37 @@ fn try_call_array_jit(
             }
         }
     }
+    // `as_mut_ptr`: #187 writable params store through this pointer, so it must carry mut provenance
+    // (read-only params only load — harmless). Handles are built only AFTER `scratch` is fully
+    // populated so its backing buffers never reallocate out from under a live pointer.
     let handles: Vec<crate::jit::ArrayHandle> = scratch
-        .iter()
+        .iter_mut()
         .map(|buf| crate::jit::ArrayHandle {
-            ptr: buf.as_ptr(),
+            ptr: buf.as_mut_ptr(),
             len: buf.len(),
         })
         .collect();
     let (res, deopt) = nf.call_arrays(&numeric, &handles);
     if deopt {
-        return None; // OOB access → re-run interpreter (OOB reads coerce as Value::Null)
+        return None; // OOB access → re-run interpreter (the discarded scratch writes never escaped)
+    }
+    // #187: copy each WRITTEN array param's (possibly-mutated) scratch back into its `Value::Array`. The
+    // length is unchanged (`SetIndex` can't grow; an OOB write deopts above), so this is a same-length
+    // element overwrite. Only reached on a non-deopt return, so partial mutations never leak.
+    if writable != 0 {
+        for (k, buf) in scratch.iter().enumerate() {
+            let i = array_arg[k];
+            if (writable >> i) & 1 == 1 {
+                if let Value::Array(a) = &args[i] {
+                    let mut b = a.borrow_mut();
+                    for (j, &v) in buf.iter().enumerate() {
+                        if let Some(slot) = b.get_mut(j) {
+                            *slot = Value::Number(v);
+                        }
+                    }
+                }
+            }
+        }
     }
     Some(Value::Number(res))
 }

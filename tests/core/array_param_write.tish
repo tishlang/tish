@@ -1,0 +1,19 @@
+// #187: a function that mutates an array passed as a parameter (`arr[i] = v`). The write must be
+// visible to the caller (JIT writeback) and identical across every backend. Exercises the array-param
+// WRITE JIT path (VM `tish run`) alongside the read path, all in-bounds.
+function fill(n, arr, val) {
+  let i = 0
+  while (i < n) { arr[i] = val; i = i + 1 }
+}
+function copyInto(n, src, dst) {
+  let i = 0
+  while (i < n) { let x = src[i]; dst[i] = x; i = i + 1 }
+}
+let a = []
+for (let i = 0; i < 6; i = i + 1) { a.push(0) }
+fill(6, a, 7)
+console.log(a.join(","))
+let b = []
+for (let i = 0; i < 6; i = i + 1) { b.push(i * i) }
+copyInto(6, b, a)
+console.log(a.join(","))
