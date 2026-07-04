@@ -204,13 +204,33 @@ impl MathUnaryFn {
         })
     }
 
-    /// Decode an opcode operand to the fn id.
+    /// Decode an opcode operand to the fn id (safe match — no transmute).
     pub fn from_u16(v: u16) -> Option<MathUnaryFn> {
-        if v <= 20 {
-            Some(unsafe { std::mem::transmute::<u16, MathUnaryFn>(v) })
-        } else {
-            None
-        }
+        use MathUnaryFn::*;
+        Some(match v {
+            0 => Sqrt,
+            1 => Cbrt,
+            2 => Abs,
+            3 => Floor,
+            4 => Ceil,
+            5 => Round,
+            6 => Trunc,
+            7 => Sign,
+            8 => Sin,
+            9 => Cos,
+            10 => Tan,
+            11 => Asin,
+            12 => Acos,
+            13 => Atan,
+            14 => Sinh,
+            15 => Cosh,
+            16 => Tanh,
+            17 => Exp,
+            18 => Log,
+            19 => Log2,
+            20 => Log10,
+            _ => return None,
+        })
     }
 
     /// Apply the intrinsic (the single source of truth for VM + JIT + interp result parity).
