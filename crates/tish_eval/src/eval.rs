@@ -311,6 +311,7 @@ impl Evaluator {
                 process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                 process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
                 process_obj.insert("exec".into(), Value::Native(natives::process_exec));
+                process_obj.insert("execFile".into(), Value::Native(natives::process_exec_file));
                 let argv: Vec<Value> = tishlang_core::process_argv()
                     .into_iter()
                     .map(|s| Value::String(s.into()))
@@ -1242,6 +1243,7 @@ impl Evaluator {
                     exports.insert("exit".into(), Value::Native(natives::process_exit));
                     exports.insert("cwd".into(), Value::Native(natives::process_cwd));
                     exports.insert("exec".into(), Value::Native(natives::process_exec));
+                    exports.insert("execFile".into(), Value::Native(natives::process_exec_file));
                     let argv: Vec<Value> = tishlang_core::process_argv()
                         .into_iter()
                         .map(|s| Value::String(s.into()))
@@ -1261,6 +1263,7 @@ impl Evaluator {
                     process_obj.insert("exit".into(), Value::Native(natives::process_exit));
                     process_obj.insert("cwd".into(), Value::Native(natives::process_cwd));
                     process_obj.insert("exec".into(), Value::Native(natives::process_exec));
+                    process_obj.insert("execFile".into(), Value::Native(natives::process_exec_file));
                     process_obj.insert("argv".into(), Value::Array(Rc::new(RefCell::new(argv))));
                     process_obj.insert("env".into(), Value::object(env_obj));
                     exports.insert(

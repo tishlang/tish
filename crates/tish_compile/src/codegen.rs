@@ -1613,9 +1613,10 @@ impl Codegen {
                     "exit" => Some("Value::native(|args: &[Value]| tish_process_exit(args))"),
                     "cwd" => Some("Value::native(|args: &[Value]| tish_process_cwd(args))"),
                     "exec" => Some("Value::native(|args: &[Value]| tish_process_exec(args))"),
+                    "execFile" => Some("Value::native(|args: &[Value]| tish_process_exec_file(args))"),
                     "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
                     "env" => Some("Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); Value::object(m) }"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); Value::object(m) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
@@ -2169,7 +2170,7 @@ impl Codegen {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
         }
         if self.has_feature("process") {
-            self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec};\n");
+            self.write("use tishlang_runtime::{process_exit as tish_process_exit, process_cwd as tish_process_cwd, process_exec as tish_process_exec, process_exec_file as tish_process_exec_file};\n");
         }
         if self.has_feature("timers") {
             self.write("use tishlang_runtime::{timer_set_timeout as tish_timer_set_timeout, timer_clear_timeout as tish_timer_clear_timeout, timer_set_interval as tish_timer_set_interval, timer_clear_interval as tish_timer_clear_interval};\n");
@@ -2525,6 +2526,7 @@ impl Codegen {
             self.writeln("p.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args)));");
             self.writeln("p.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args)));");
             self.writeln("p.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args)));");
+            self.writeln("p.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args)));");
             self.writeln("let argv: Vec<Value> = std::env::args().map(|s| Value::String(s.into())).collect();");
             self.writeln("p.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(argv)));");
             self.writeln("let mut env_obj = ObjectMap::default();");

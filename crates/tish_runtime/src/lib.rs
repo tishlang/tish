@@ -880,6 +880,48 @@ pub fn process_exec(args: &[Value]) -> Value {
     }
 }
 
+/// `process.execFile(program, [args])` — run a program directly, WITHOUT a shell (no `sh -c`). Each
+/// argument is passed to the program verbatim, so shell metacharacters in untrusted argument data are
+/// never interpreted — the safe counterpart to `exec` when arguments derive from input (#384). Returns
+/// the exit code, like `exec`.
+#[cfg(feature = "process")]
+pub fn process_exec_file(args: &[Value]) -> Value {
+    use std::process::Command;
+    let program = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    if program.is_empty() {
+        return Value::Number(0.0);
+    }
+    let argv: Vec<String> = match args.get(1) {
+        Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
+        _ => Vec::new(),
+    };
+    match Command::new(&program).args(&argv).status() {
+        Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
+        Err(_) => Value::Number(1.0),
+    }
+}
+
+#[cfg(all(test, feature = "process", unix))]
+mod execfile_tests_384 {
+    use super::process_exec_file;
+    use tishlang_core::{Value, VmRef};
+
+    #[test]
+    fn execfile_runs_without_shell_and_returns_exit_code() {
+        // Runs the program directly (no `sh -c`); `true`/`false`/`echo` exist on unix.
+        assert!(matches!(process_exec_file(&[Value::String("true".into())]), Value::Number(n) if n == 0.0));
+        assert!(matches!(process_exec_file(&[Value::String("false".into())]), Value::Number(n) if n == 1.0));
+        // args are passed verbatim as a Value::Array.
+        let args = Value::Array(VmRef::new(vec![Value::String("ok".into())]));
+        assert!(matches!(process_exec_file(&[Value::String("echo".into()), args]), Value::Number(n) if n == 0.0));
+        // empty program is a no-op returning 0, matching `exec`.
+        assert!(matches!(process_exec_file(&[]), Value::Number(n) if n == 0.0));
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Value {
     let path = args
