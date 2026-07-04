@@ -229,13 +229,17 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                     Value::Function(_) => raw,
                     Value::Object(ref obj) => {
                         let obj_ref = obj.borrow();
-                        if let Some(Value::Function(on_worker)) =
-                            obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
+                        if let Some(Value::Function(on_worker)) = obj_ref
+                            .strings
+                            .get(&std::sync::Arc::from("onWorker"))
+                            .cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
                             on_worker.call(&args_for_init)
-                        } else if let Some(h) =
-                            obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
+                        } else if let Some(h) = obj_ref
+                            .strings
+                            .get(&std::sync::Arc::from("handler"))
+                            .cloned()
                         {
                             h
                         } else {
@@ -297,7 +301,10 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 tishlang_runtime::process_exec_file(args)
             })),
             "argv" => Some(Value::Array(VmRef::new(
-                tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
+                tishlang_core::process_argv()
+                    .into_iter()
+                    .map(|s| Value::String(s.into()))
+                    .collect(),
             ))),
             "env" => Some(value_object_from_map(
                 std::env::vars()
@@ -325,7 +332,10 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 m.insert(
                     "argv".into(),
                     Value::Array(VmRef::new(
-                        tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
+                        tishlang_core::process_argv()
+                            .into_iter()
+                            .map(|s| Value::String(s.into()))
+                            .collect(),
                     )),
                 );
                 m.insert(
@@ -368,8 +378,12 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
     #[cfg(feature = "tty")]
     if spec == "tish:tty" && cap_allows(enabled, "tty") {
         return match export_name {
-            "size" => Some(Value::native(|args: &[Value]| tishlang_runtime::tty_size(args))),
-            "isTTY" => Some(Value::native(|args: &[Value]| tishlang_runtime::tty_is_tty(args))),
+            "size" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::tty_size(args)
+            })),
+            "isTTY" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::tty_is_tty(args)
+            })),
             "setRawMode" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::tty_set_raw_mode(args)
             })),
@@ -379,7 +393,9 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "leaveAltScreen" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::tty_leave_alt_screen(args)
             })),
-            "read" => Some(Value::native(|args: &[Value]| tishlang_runtime::tty_read(args))),
+            "read" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::tty_read(args)
+            })),
             "readLine" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::tty_read_line(args)
             })),
@@ -679,10 +695,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::String(v.type_name().into())
         }),
     );
-    g.insert(
-        "Symbol".into(),
-        tishlang_builtins::symbol::symbol_object(),
-    );
+    g.insert("Symbol".into(), tishlang_builtins::symbol::symbol_object());
 
     // Date - full constructor (new Date(...)) plus statics now()/parse()/UTC().
     g.insert(
@@ -703,14 +716,38 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             "Float64Array",
             tishlang_builtins::typedarrays::float64_array_constructor_value as fn() -> Value,
         ),
-        ("Float32Array", tishlang_builtins::typedarrays::float32_array_constructor_value),
-        ("Int8Array", tishlang_builtins::typedarrays::int8_array_constructor_value),
-        ("Uint8Array", tishlang_builtins::typedarrays::uint8_array_constructor_value),
-        ("Uint8ClampedArray", tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value),
-        ("Int16Array", tishlang_builtins::typedarrays::int16_array_constructor_value),
-        ("Uint16Array", tishlang_builtins::typedarrays::uint16_array_constructor_value),
-        ("Int32Array", tishlang_builtins::typedarrays::int32_array_constructor_value),
-        ("Uint32Array", tishlang_builtins::typedarrays::uint32_array_constructor_value),
+        (
+            "Float32Array",
+            tishlang_builtins::typedarrays::float32_array_constructor_value,
+        ),
+        (
+            "Int8Array",
+            tishlang_builtins::typedarrays::int8_array_constructor_value,
+        ),
+        (
+            "Uint8Array",
+            tishlang_builtins::typedarrays::uint8_array_constructor_value,
+        ),
+        (
+            "Uint8ClampedArray",
+            tishlang_builtins::typedarrays::uint8_clamped_array_constructor_value,
+        ),
+        (
+            "Int16Array",
+            tishlang_builtins::typedarrays::int16_array_constructor_value,
+        ),
+        (
+            "Uint16Array",
+            tishlang_builtins::typedarrays::uint16_array_constructor_value,
+        ),
+        (
+            "Int32Array",
+            tishlang_builtins::typedarrays::int32_array_constructor_value,
+        ),
+        (
+            "Uint32Array",
+            tishlang_builtins::typedarrays::uint32_array_constructor_value,
+        ),
     ] {
         g.insert(name.into(), ctor());
     }
@@ -720,7 +757,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     );
     // Error constructors (issue #60): `new Error(msg)` / `Error(msg)` → `{ name, message }`.
     for name in ["Error", "TypeError", "RangeError", "SyntaxError"] {
-        g.insert(name.into(), construct_builtin::error_constructor_value(name));
+        g.insert(
+            name.into(),
+            construct_builtin::error_constructor_value(name),
+        );
     }
 
     // Object methods - delegate to tishlang_builtins::globals
@@ -829,7 +869,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         process_obj.insert(
             "argv".into(),
             Value::Array(VmRef::new(
-                tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
+                tishlang_core::process_argv()
+                    .into_iter()
+                    .map(|s| Value::String(s.into()))
+                    .collect(),
             )),
         );
         process_obj.insert(
@@ -901,13 +944,17 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
                     Value::Function(_) => raw,
                     Value::Object(ref obj) => {
                         let obj_ref = obj.borrow();
-                        if let Some(Value::Function(on_worker)) =
-                            obj_ref.strings.get(&std::sync::Arc::from("onWorker")).cloned()
+                        if let Some(Value::Function(on_worker)) = obj_ref
+                            .strings
+                            .get(&std::sync::Arc::from("onWorker"))
+                            .cloned()
                         {
                             let args_for_init = [Value::Number(0.0)];
                             on_worker.call(&args_for_init)
-                        } else if let Some(h) =
-                            obj_ref.strings.get(&std::sync::Arc::from("handler")).cloned()
+                        } else if let Some(h) = obj_ref
+                            .strings
+                            .get(&std::sync::Arc::from("handler"))
+                            .cloned()
                         {
                             h
                         } else {
@@ -1012,7 +1059,8 @@ fn try_call_array_jit(
     // `scratch` OWNS the extracted f64 data; handles point into it. Build handles only AFTER scratch is
     // fully populated so its backing buffers never reallocate out from under a live pointer.
     let mut scratch: Vec<Vec<f64>> = Vec::new();
-    #[allow(clippy::needless_range_loop)] // `i` drives bit-mask math (`mask >> i`), not just indexing
+    #[allow(clippy::needless_range_loop)]
+    // `i` drives bit-mask math (`mask >> i`), not just indexing
     for i in 0..arity {
         if (mask >> i) & 1 == 1 {
             match &args[i] {
@@ -1085,47 +1133,66 @@ impl tishlang_core::Callable for VmClosure {
                             }
                         }
                         if all_numbers {
-                            // #381: a self-recursive JIT'd function carries a RecurGuard so it bails
-                            // (rather than overflowing the native stack) when the recursion nears the
-                            // real remaining stack. On a bail we raise the same catchable RangeError as
-                            // the non-JIT paths — tish's deopt tier producing the throw, not the JIT.
-                            let res = if nf.recur_guarded() {
-                                let anchor = 0u8;
-                                let current_sp = &anchor as *const u8 as usize;
-                                // `stack_limit` = the stack address below which we bail, leaving a
-                                // headroom margin. If the remaining stack is unknown we pass 0 (SP is
-                                // never below 0 → never trips), i.e. behave as before.
-                                let stack_limit = match stacker::remaining_stack() {
-                                    Some(rem) => {
-                                        // Cap the margin at half of what's left: when a JIT'd function
-                                        // is first entered on an already-deep stack (rem < margin),
-                                        // `bottom + margin` would sit ABOVE the current SP and trip on
-                                        // the very first call — a false positive on shallow recursion.
-                                        // Capping keeps the limit strictly below SP for any rem, while
-                                        // still bailing with real headroom to spare.
-                                        let margin = RECUR_STACK_MARGIN.min(rem / 2);
-                                        current_sp.saturating_sub(rem).saturating_add(margin)
-                                    }
-                                    None => 0,
-                                };
-                                let mut guard = crate::jit::RecurGuard {
-                                    stack_limit,
-                                    tripped: 0,
-                                };
-                                let r = nf.call_guarded(&nums[..arity], &mut guard);
-                                if guard.tripped != 0 {
-                                    set_pending_throw(stack_overflow_error());
-                                    return Value::Null;
+                            // #189: a JV function has function-local `f64` arrays lowered to
+                            // `tish_jv_*` calls over a per-thread arena. An out-of-bounds access (or a
+                            // non-numeric return) sets a per-thread deopt flag; we discard the numeric
+                            // result and re-run the interpreter. Sound because JV arrays never escape
+                            // the function — nothing observable was mutated, so re-execution
+                            // reproduces identical behaviour.
+                            if nf.is_jv() {
+                                crate::jit::jv_reset_deopt();
+                                let r = nf.call(&nums[..arity]);
+                                if !crate::jit::jv_take_deopt() {
+                                    return if nf.result_is_bool() {
+                                        Value::Bool(r != 0.0)
+                                    } else {
+                                        Value::Number(r)
+                                    };
                                 }
-                                r
+                                // deopt ⇒ fall through to the interpreter below.
                             } else {
-                                nf.call(&nums[..arity])
-                            };
-                            return if nf.result_is_bool() {
-                                Value::Bool(res != 0.0)
-                            } else {
-                                Value::Number(res)
-                            };
+                                // #381: a self-recursive JIT'd function carries a RecurGuard so it bails
+                                // (rather than overflowing the native stack) when the recursion nears the
+                                // real remaining stack. On a bail we raise the same catchable RangeError as
+                                // the non-JIT paths — tish's deopt tier producing the throw, not the JIT.
+                                let res = if nf.recur_guarded() {
+                                    let anchor = 0u8;
+                                    let current_sp = &anchor as *const u8 as usize;
+                                    // `stack_limit` = the stack address below which we bail, leaving a
+                                    // headroom margin. If the remaining stack is unknown we pass 0 (SP is
+                                    // never below 0 → never trips), i.e. behave as before.
+                                    let stack_limit = match stacker::remaining_stack() {
+                                        Some(rem) => {
+                                            // Cap the margin at half of what's left: when a JIT'd function
+                                            // is first entered on an already-deep stack (rem < margin),
+                                            // `bottom + margin` would sit ABOVE the current SP and trip on
+                                            // the very first call — a false positive on shallow recursion.
+                                            // Capping keeps the limit strictly below SP for any rem, while
+                                            // still bailing with real headroom to spare.
+                                            let margin = RECUR_STACK_MARGIN.min(rem / 2);
+                                            current_sp.saturating_sub(rem).saturating_add(margin)
+                                        }
+                                        None => 0,
+                                    };
+                                    let mut guard = crate::jit::RecurGuard {
+                                        stack_limit,
+                                        tripped: 0,
+                                    };
+                                    let r = nf.call_guarded(&nums[..arity], &mut guard);
+                                    if guard.tripped != 0 {
+                                        set_pending_throw(stack_overflow_error());
+                                        return Value::Null;
+                                    }
+                                    r
+                                } else {
+                                    nf.call(&nums[..arity])
+                                };
+                                return if nf.result_is_bool() {
+                                    Value::Bool(res != 0.0)
+                                } else {
+                                    Value::Number(res)
+                                };
+                            }
                         }
                     } else if let Some(v) = try_call_array_jit(&nf, args, arity, mask) {
                         // Array-mode path: succeeded (all-numeric arrays, in-bounds). On any bail
@@ -1280,7 +1347,11 @@ impl Vm {
         // regression to the DEFAULT path — caching makes the flag-off check a single atomic load.
         use std::sync::OnceLock;
         static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| std::env::var("TISH_FRAME_VM").map(|v| v == "1").unwrap_or(false))
+        *ENABLED.get_or_init(|| {
+            std::env::var("TISH_FRAME_VM")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+        })
     }
 
     /// A `VmClosure` runs on the frame stack iff its chunk is frame-eligible AND it has no numeric
@@ -1493,7 +1564,9 @@ impl Vm {
                     let idx = Self::read_u16(code, &mut ip) as usize;
                     let v = match cur.constants.get(idx) {
                         Some(Constant::Number(n)) => Value::Number(*n),
-                        Some(Constant::String(s)) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
+                        Some(Constant::String(s)) => {
+                            Value::String(tishlang_core::ArcStr::from(s.as_ref()))
+                        }
                         Some(Constant::Bool(b)) => Value::Bool(*b),
                         Some(Constant::Null) => Value::Null,
                         _ => ferr!("Ineligible constant {} in run_framed", idx),
@@ -1559,7 +1632,10 @@ impl Vm {
                         if osr_hot.1 != u32::MAX {
                             osr_hot.1 = osr_hot.1.saturating_add(1);
                             if osr_hot.1 >= OSR_THRESHOLD
-                                && osr_hot.1.saturating_sub(OSR_THRESHOLD).is_multiple_of(OSR_RETRY)
+                                && osr_hot
+                                    .1
+                                    .saturating_sub(OSR_THRESHOLD)
+                                    .is_multiple_of(OSR_RETRY)
                             {
                                 match Self::run_osr(
                                     &cur, header_ip, region_end, &mut slots, slot_base,
@@ -1730,7 +1806,8 @@ impl Vm {
         // active loop changes: entry, exit, or a nested-loop switch). Keeps the per-back-edge cost of a
         // resolved loop to two integer compares.
         #[cfg(not(target_arch = "wasm32"))]
-        let mut osr_counters: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+        let mut osr_counters: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
         #[cfg(not(target_arch = "wasm32"))]
         let mut osr_hot: (usize, u32) = (usize::MAX, 0);
         // Frame-local string builder for `acc += x` on a slot local (Opcode::AppendLocal): keeps the
@@ -1893,8 +1970,7 @@ impl Vm {
                             _ => {
                                 // Non-string (or absent) accumulator: generic `+=` in place,
                                 // identical to LoadLocal; BinOp Add; StoreLocal.
-                                let current =
-                                    slot_locals.get(slot).cloned().unwrap_or(Value::Null);
+                                let current = slot_locals.get(slot).cloned().unwrap_or(Value::Null);
                                 let result = eval_binop(BinOp::Add, &current, &rhs)?;
                                 match slot_locals.get_mut(slot) {
                                     Some(dst) => *dst = result,
@@ -1931,7 +2007,9 @@ impl Vm {
                         .ok_or_else(|| format!("Constant index out of bounds: {}", idx))?;
                     let v = match c {
                         Constant::Number(n) => Value::Number(*n),
-                        Constant::String(s) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
+                        Constant::String(s) => {
+                            Value::String(tishlang_core::ArcStr::from(s.as_ref()))
+                        }
                         Constant::Bool(b) => Value::Bool(*b),
                         Constant::Null => Value::Null,
                         Constant::Closure(nested_idx) => {
@@ -1952,45 +2030,45 @@ impl Vm {
                             // A closure must capture a real scope (even if empty) so that, post-creation,
                             // the parent's name-based locals are visible. Materialise local_scope here.
                             let captured_scope: ScopeMap = ls_get_or_init!().clone();
-                            let enclosing_chain: SharedChain = SharedChain::new(if active_loop_vars.is_empty() {
-                                let mut chain = Vec::with_capacity(self.enclosing.len() + 1);
-                                chain.push(captured_scope.clone());
-                                chain.extend(self.enclosing.iter().cloned());
-                                chain
-                            } else {
-                                // Per-iteration `let`: freeze the loop var(s) into an overlay that
-                                // shadows the still-shared frame scope, then the inherited chain.
-                                let mut overlay = ObjectMap::default();
-                                {
-                                    let ls = captured_scope.borrow();
-                                    for n in &active_loop_vars {
-                                        if let Some(v) = ls.get(n.as_ref()) {
-                                            overlay.insert(Arc::clone(n), v.clone());
+                            let enclosing_chain: SharedChain =
+                                SharedChain::new(if active_loop_vars.is_empty() {
+                                    let mut chain = Vec::with_capacity(self.enclosing.len() + 1);
+                                    chain.push(captured_scope.clone());
+                                    chain.extend(self.enclosing.iter().cloned());
+                                    chain
+                                } else {
+                                    // Per-iteration `let`: freeze the loop var(s) into an overlay that
+                                    // shadows the still-shared frame scope, then the inherited chain.
+                                    let mut overlay = ObjectMap::default();
+                                    {
+                                        let ls = captured_scope.borrow();
+                                        for n in &active_loop_vars {
+                                            if let Some(v) = ls.get(n.as_ref()) {
+                                                overlay.insert(Arc::clone(n), v.clone());
+                                            }
                                         }
                                     }
-                                }
-                                let mut chain = Vec::with_capacity(self.enclosing.len() + 2);
-                                chain.push(VmRef::new(overlay));
-                                chain.push(captured_scope.clone());
-                                chain.extend(self.enclosing.iter().cloned());
-                                chain
-                            });
+                                    let mut chain = Vec::with_capacity(self.enclosing.len() + 2);
+                                    chain.push(VmRef::new(overlay));
+                                    chain.push(captured_scope.clone());
+                                    chain.extend(self.enclosing.iter().cloned());
+                                    chain
+                                });
                             let capabilities = Arc::clone(&self.capabilities);
                             let native_modules = self.native_modules.clone();
                             // Frame-eligibility is an O(chunk) bytecode scan; gate it behind the
                             // (cached) frame-VM flag so the DEFAULT path skips it entirely — flag-off
                             // closure creation pays nothing.
-                            let frameable = Vm::frame_vm_enabled()
-                                && {
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    {
-                                        jit_fn.is_none() && Vm::chunk_frame_eligible(&inner_clone)
-                                    }
-                                    #[cfg(target_arch = "wasm32")]
-                                    {
-                                        Vm::chunk_frame_eligible(&inner_clone)
-                                    }
-                                };
+                            let frameable = Vm::frame_vm_enabled() && {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    jit_fn.is_none() && Vm::chunk_frame_eligible(&inner_clone)
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    Vm::chunk_frame_eligible(&inner_clone)
+                                }
+                            };
                             let vmclosure = VmClosure {
                                 chunk: std::sync::Arc::new(inner_clone),
                                 frameable,
@@ -2042,7 +2120,10 @@ impl Vm {
                         .pop()
                         .ok_or_else(|| "Stack underflow".to_string())?;
                     // Update innermost scope that has the variable (matches interpreter Scope.assign)
-                    if local_scope.as_ref().is_some_and(|ls| ls.borrow().contains_key(name.as_ref())) {
+                    if local_scope
+                        .as_ref()
+                        .is_some_and(|ls| ls.borrow().contains_key(name.as_ref()))
+                    {
                         ls_get_or_init!().borrow_mut().insert(Arc::clone(name), v);
                     } else if let Some(e) = self
                         .enclosing
@@ -2299,7 +2380,9 @@ impl Vm {
                             .unwrap_or(Value::Null)
                     });
                     #[cfg(target_arch = "wasm32")]
-                    let result = vm.run_chunk(chunk, nested, &args, false).unwrap_or(Value::Null);
+                    let result = vm
+                        .run_chunk(chunk, nested, &args, false)
+                        .unwrap_or(Value::Null);
                     tishlang_core::dec_call_depth();
                     if let Some(v) = take_pending_throw() {
                         raise!(v);
@@ -2332,8 +2415,7 @@ impl Vm {
                     let f = match &callee {
                         Value::Function(f) => f.clone(),
                         Value::Object(o) => {
-                            if let Some(Value::Function(call_fn)) =
-                                o.borrow().strings.get("__call")
+                            if let Some(Value::Function(call_fn)) = o.borrow().strings.get("__call")
                             {
                                 call_fn.clone()
                             } else {
@@ -2436,15 +2518,25 @@ impl Vm {
                             if osr_hot.0 != usize::MAX {
                                 osr_counters.insert(osr_hot.0, osr_hot.1);
                             }
-                            osr_hot = (header_ip, osr_counters.get(&header_ip).copied().unwrap_or(0));
+                            osr_hot = (
+                                header_ip,
+                                osr_counters.get(&header_ip).copied().unwrap_or(0),
+                            );
                         }
                         if osr_hot.1 != u32::MAX {
                             osr_hot.1 = osr_hot.1.saturating_add(1);
                             if osr_hot.1 >= OSR_THRESHOLD
-                                && osr_hot.1.saturating_sub(OSR_THRESHOLD).is_multiple_of(OSR_RETRY)
+                                && osr_hot
+                                    .1
+                                    .saturating_sub(OSR_THRESHOLD)
+                                    .is_multiple_of(OSR_RETRY)
                             {
                                 match Self::run_osr(
-                                    chunk, header_ip, region_end, &mut slot_locals, 0,
+                                    chunk,
+                                    header_ip,
+                                    region_end,
+                                    &mut slot_locals,
+                                    0,
                                 ) {
                                     OsrResult::Compiled(exit_ip) => {
                                         ip = exit_ip;
@@ -2590,8 +2682,12 @@ impl Vm {
                         if let Some(nums) = elems.iter().try_fold(
                             Vec::<f64>::with_capacity(elems.len()),
                             |mut acc, v| {
-                                if let Value::Number(n) = v { acc.push(*n); Some(acc) }
-                                else { None }
+                                if let Value::Number(n) = v {
+                                    acc.push(*n);
+                                    Some(acc)
+                                } else {
+                                    None
+                                }
                             },
                         ) {
                             self.stack.push(Value::number_array(nums));
@@ -2614,10 +2710,8 @@ impl Vm {
                     let base = self.stack.len() - 2 * n;
                     let mut map = PropMap::with_capacity(n);
                     for i in 0..n {
-                        let key_val =
-                            std::mem::replace(&mut self.stack[base + 2 * i], Value::Null);
-                        let val =
-                            std::mem::replace(&mut self.stack[base + 2 * i + 1], Value::Null);
+                        let key_val = std::mem::replace(&mut self.stack[base + 2 * i], Value::Null);
+                        let val = std::mem::replace(&mut self.stack[base + 2 * i + 1], Value::Null);
                         let key: Arc<str> = key_val.to_display_string().into();
                         map.insert(key, val);
                     }
@@ -2773,13 +2867,25 @@ impl Vm {
                                 .iter()
                                 .map(|&n| {
                                     let elem = Value::Number(n);
-                                    let (l, r) = if param_left { (elem, const_val.clone()) } else { (const_val.clone(), elem) };
+                                    let (l, r) = if param_left {
+                                        (elem, const_val.clone())
+                                    } else {
+                                        (const_val.clone(), elem)
+                                    };
                                     eval_binop(binop, &l, &r).unwrap_or(Value::Null)
                                 })
                                 .collect();
                             // If every result is numeric, stay packed (the common case for x*2, x+1, etc).
                             if mapped.iter().all(|v| matches!(v, Value::Number(_))) {
-                                Value::number_array(mapped.into_iter().map(|v| match v { Value::Number(n) => n, _ => unreachable!() }).collect())
+                                Value::number_array(
+                                    mapped
+                                        .into_iter()
+                                        .map(|v| match v {
+                                            Value::Number(n) => n,
+                                            _ => unreachable!(),
+                                        })
+                                        .collect(),
+                                )
                             } else {
                                 Value::Array(VmRef::new(mapped))
                             }
@@ -2789,8 +2895,16 @@ impl Vm {
                             let mapped: Vec<Value> = arr_borrow
                                 .iter()
                                 .map(|v| {
-                                    let l: Value = if param_left { (*v).clone() } else { const_val.clone() };
-                                    let r: Value = if param_left { const_val.clone() } else { (*v).clone() };
+                                    let l: Value = if param_left {
+                                        (*v).clone()
+                                    } else {
+                                        const_val.clone()
+                                    };
+                                    let r: Value = if param_left {
+                                        const_val.clone()
+                                    } else {
+                                        (*v).clone()
+                                    };
                                     eval_binop(binop, &l, &r).unwrap_or(Value::Null)
                                 })
                                 .collect();
@@ -2824,7 +2938,11 @@ impl Vm {
                                 .iter()
                                 .filter(|&&n| {
                                     let elem = Value::Number(n);
-                                    let (l, r) = if param_left { (elem, const_val.clone()) } else { (const_val.clone(), elem) };
+                                    let (l, r) = if param_left {
+                                        (elem, const_val.clone())
+                                    } else {
+                                        (const_val.clone(), elem)
+                                    };
                                     eval_binop(binop, &l, &r).unwrap_or(Value::Null).is_truthy()
                                 })
                                 .copied()
@@ -2836,7 +2954,11 @@ impl Vm {
                             let filtered: Vec<Value> = arr_borrow
                                 .iter()
                                 .filter(|v| {
-                                    let (l, r) = if param_left { ((*v).clone(), const_val.clone()) } else { (const_val.clone(), (*v).clone()) };
+                                    let (l, r) = if param_left {
+                                        ((*v).clone(), const_val.clone())
+                                    } else {
+                                        (const_val.clone(), (*v).clone())
+                                    };
                                     eval_binop(binop, &l, &r).unwrap_or(Value::Null).is_truthy()
                                 })
                                 .cloned()
@@ -2906,15 +3028,14 @@ impl Vm {
                     // on the cranelift / llvm backends that want to expose
                     // `cargo:…` Rust crates should register the module's
                     // exports map before calling `vm.run(chunk)`.
-                    let from_registry: Option<Value> = if spec.starts_with("cargo:")
-                        || spec.starts_with("ffi:")
-                    {
-                        let regs = self.native_modules.borrow();
-                        regs.get(spec)
-                            .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())
-                    } else {
-                        None
-                    };
+                    let from_registry: Option<Value> =
+                        if spec.starts_with("cargo:") || spec.starts_with("ffi:") {
+                            let regs = self.native_modules.borrow();
+                            regs.get(spec)
+                                .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())
+                        } else {
+                            None
+                        };
                     let v = from_registry
                         .or_else(|| get_builtin_export(self.capabilities.as_ref(), spec, export_name))
                         .ok_or_else(|| {
@@ -3097,7 +3218,12 @@ fn eval_unary(op: UnaryOp, o: &Value) -> Result<Value, String> {
 /// error), refilling the cache when the object *does* have the property. Result-equivalent to
 /// `get_member` — the cache only skips the lookup; the shape uniquely fixes the slot for a property.
 #[inline]
-fn ic_get_member(chunk: &Chunk, name_idx: u16, obj: &Value, key: &Arc<str>) -> Result<Value, String> {
+fn ic_get_member(
+    chunk: &Chunk,
+    name_idx: u16,
+    obj: &Value,
+    key: &Arc<str>,
+) -> Result<Value, String> {
     use std::sync::atomic::Ordering::Relaxed;
     if let Value::Object(od) = obj {
         let b = od.borrow();
@@ -3178,13 +3304,21 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             let map = m.borrow();
             // Reading a missing own property returns `null` (tish's nullish value), matching
             // JS object semantics and the tree-walk interpreter — not a thrown error (#66).
-            Ok(map.strings.get(key.as_ref()).cloned().unwrap_or(Value::Null))
+            Ok(map
+                .strings
+                .get(key.as_ref())
+                .cloned()
+                .unwrap_or(Value::Null))
         }
         Value::NumberArray(a) => {
             let key_s = key.as_ref();
             // Numeric index fast path.
             if let Ok(idx) = key_s.parse::<usize>() {
-                return Ok(a.borrow().get(idx).map(|&n| Value::Number(n)).unwrap_or(Value::Null));
+                return Ok(a
+                    .borrow()
+                    .get(idx)
+                    .map(|&n| Value::Number(n))
+                    .unwrap_or(Value::Null));
             }
             if key_s == "length" {
                 return Ok(Value::Number(a.borrow().len() as f64));
@@ -3205,19 +3339,38 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     Value::Number(arr.len() as f64)
                 }),
                 "pop" => make_native_fn(move |_: &[Value]| {
-                    a_clone.borrow_mut().pop()
-                        .map(|n| if n.is_nan() { Value::Null } else { Value::Number(n) })
+                    a_clone
+                        .borrow_mut()
+                        .pop()
+                        .map(|n| {
+                            if n.is_nan() {
+                                Value::Null
+                            } else {
+                                Value::Number(n)
+                            }
+                        })
                         .unwrap_or(Value::Null)
                 }),
                 "shift" => make_native_fn(move |_: &[Value]| {
                     let mut arr = a_clone.borrow_mut();
-                    if arr.is_empty() { Value::Null }
-                    else { let n = arr.remove(0); if n.is_nan() { Value::Null } else { Value::Number(n) } }
+                    if arr.is_empty() {
+                        Value::Null
+                    } else {
+                        let n = arr.remove(0);
+                        if n.is_nan() {
+                            Value::Null
+                        } else {
+                            Value::Number(n)
+                        }
+                    }
                 }),
                 "unshift" => make_native_fn(move |args: &[Value]| {
                     let mut arr = a_clone.borrow_mut();
                     for (i, v) in args.iter().enumerate() {
-                        let n = match v { Value::Number(n) => *n, _ => f64::NAN };
+                        let n = match v {
+                            Value::Number(n) => *n,
+                            _ => f64::NAN,
+                        };
                         arr.insert(i, n);
                     }
                     Value::Number(arr.len() as f64)
@@ -3230,7 +3383,10 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let a2 = a_clone.clone();
                     make_native_fn(move |args: &[Value]| {
                         // Check if there are non-numeric items to insert (args[2..]).
-                        let has_non_numeric = args.get(2..).unwrap_or(&[]).iter()
+                        let has_non_numeric = args
+                            .get(2..)
+                            .unwrap_or(&[])
+                            .iter()
                             .any(|v| !matches!(v, Value::Number(_)));
                         if has_non_numeric {
                             // Deopt: materialise, splice on the boxed array, then write numeric
@@ -3238,18 +3394,37 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                             // identity for subsequent accesses. The array may have non-numeric
                             // elements after this splice — they become NaN holes in the VmRef.
                             let boxed = Value::materialize_number_array(&a2);
-                            let result = arr_builtins::splice(&boxed, args.first().unwrap_or(&Value::Null), args.get(1), args.get(2..).unwrap_or(&[]));
+                            let result = arr_builtins::splice(
+                                &boxed,
+                                args.first().unwrap_or(&Value::Null),
+                                args.get(1),
+                                args.get(2..).unwrap_or(&[]),
+                            );
                             // Sync the modified boxed Vec back into the original VmRef.
                             if let Value::Array(boxed_vmref) = &boxed {
                                 let mut packed = a2.borrow_mut();
-                                *packed = boxed_vmref.borrow().iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect();
+                                *packed = boxed_vmref
+                                    .borrow()
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Number(n) => *n,
+                                        _ => f64::NAN,
+                                    })
+                                    .collect();
                             }
                             result
                         } else {
                             let mut arr = a2.borrow_mut();
                             let len = arr.len() as i64;
                             let start = match args.first() {
-                                Some(Value::Number(n)) => { let s = *n as i64; if s < 0 { (len + s).max(0) as usize } else { (s as usize).min(arr.len()) } }
+                                Some(Value::Number(n)) => {
+                                    let s = *n as i64;
+                                    if s < 0 {
+                                        (len + s).max(0) as usize
+                                    } else {
+                                        (s as usize).min(arr.len())
+                                    }
+                                }
                                 _ => 0,
                             };
                             let del = match args.get(1) {
@@ -3257,8 +3432,17 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                                 _ => arr.len().saturating_sub(start),
                             };
                             let del = del.min(arr.len().saturating_sub(start));
-                            let new_nums: Vec<f64> = args.get(2..).unwrap_or(&[]).iter().map(|v| match v { Value::Number(n) => *n, _ => f64::NAN }).collect();
-                            let removed: Vec<f64> = arr.splice(start..start + del, new_nums).collect();
+                            let new_nums: Vec<f64> = args
+                                .get(2..)
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|v| match v {
+                                    Value::Number(n) => *n,
+                                    _ => f64::NAN,
+                                })
+                                .collect();
+                            let removed: Vec<f64> =
+                                arr.splice(start..start + del, new_nums).collect();
                             Value::number_array(removed)
                         }
                     })
@@ -3281,29 +3465,93 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let boxed = Value::materialize_number_array(&a_clone);
                     let bv = boxed.clone();
                     match key_s {
-                        "map"       => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::map(&bv, &cb) }),
-                        "filter"    => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::filter(&bv, &cb) }),
-                        "reduce"    => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); let init = args.get(1).cloned().unwrap_or(Value::Null); arr_builtins::reduce(&bv, &cb, &init) }),
-                        "forEach"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::for_each(&bv, &cb) }),
-                        "find"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find(&bv, &cb) }),
-                        "findIndex" => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_index(&bv, &cb) }),
-                        "findLast"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_last(&bv, &cb) }),
-                        "findLastIndex" => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::find_last_index(&bv, &cb) }),
-                        "at"        => make_native_fn(move |args| { let i = args.first().cloned().unwrap_or(Value::Null); arr_builtins::at(&bv, &i) }),
-                        "some"      => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::some(&bv, &cb) }),
-                        "every"     => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::every(&bv, &cb) }),
-                        "join"      => make_native_fn(move |args| { let sep = args.first().cloned().unwrap_or(Value::Null); arr_builtins::join(&bv, &sep) }),
-                        "flat"      => make_native_fn(move |args| { let d = args.first().cloned().unwrap_or(Value::Number(1.0)); arr_builtins::flat(&bv, &d) }),
-                        "flatMap"   => make_native_fn(move |args| { let cb = args.first().cloned().unwrap_or(Value::Null); arr_builtins::flat_map(&bv, &cb) }),
-                        "reverse"   => make_native_fn(move |_| arr_builtins::reverse(&bv)),
-                        "fill"      => make_native_fn(move |args| { let v = args.first().cloned().unwrap_or(Value::Null); let s = args.get(1).cloned().unwrap_or(Value::Null); let e = args.get(2).cloned().unwrap_or(Value::Null); arr_builtins::fill(&bv, &v, &s, &e) }),
-                        "slice"     => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let e = args.get(1).cloned().unwrap_or(Value::Null); arr_builtins::slice(&bv, &s, &e) }),
-                        "concat"    => make_native_fn(move |args| arr_builtins::concat(&bv, args)),
-                        "indexOf"   => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); arr_builtins::index_of(&bv, &s) }),
-                        "includes"  => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let f = args.get(1).cloned(); arr_builtins::includes(&bv, &s, f.as_ref()) }),
-                        "unshift"   => make_native_fn(move |args| arr_builtins::unshift(&bv, args)),
-                        "shift"     => make_native_fn(move |_| arr_builtins::shift(&bv)),
-                        "splice"    => make_native_fn(move |args| { let s = args.first().cloned().unwrap_or(Value::Null); let dc = args.get(1).cloned(); let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec(); arr_builtins::splice(&bv, &s, dc.as_ref(), &items) }),
+                        "map" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::map(&bv, &cb)
+                        }),
+                        "filter" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::filter(&bv, &cb)
+                        }),
+                        "reduce" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            let init = args.get(1).cloned().unwrap_or(Value::Null);
+                            arr_builtins::reduce(&bv, &cb, &init)
+                        }),
+                        "forEach" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::for_each(&bv, &cb)
+                        }),
+                        "find" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::find(&bv, &cb)
+                        }),
+                        "findIndex" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::find_index(&bv, &cb)
+                        }),
+                        "findLast" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::find_last(&bv, &cb)
+                        }),
+                        "findLastIndex" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::find_last_index(&bv, &cb)
+                        }),
+                        "at" => make_native_fn(move |args| {
+                            let i = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::at(&bv, &i)
+                        }),
+                        "some" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::some(&bv, &cb)
+                        }),
+                        "every" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::every(&bv, &cb)
+                        }),
+                        "join" => make_native_fn(move |args| {
+                            let sep = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::join(&bv, &sep)
+                        }),
+                        "flat" => make_native_fn(move |args| {
+                            let d = args.first().cloned().unwrap_or(Value::Number(1.0));
+                            arr_builtins::flat(&bv, &d)
+                        }),
+                        "flatMap" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::flat_map(&bv, &cb)
+                        }),
+                        "reverse" => make_native_fn(move |_| arr_builtins::reverse(&bv)),
+                        "fill" => make_native_fn(move |args| {
+                            let v = args.first().cloned().unwrap_or(Value::Null);
+                            let s = args.get(1).cloned().unwrap_or(Value::Null);
+                            let e = args.get(2).cloned().unwrap_or(Value::Null);
+                            arr_builtins::fill(&bv, &v, &s, &e)
+                        }),
+                        "slice" => make_native_fn(move |args| {
+                            let s = args.first().cloned().unwrap_or(Value::Null);
+                            let e = args.get(1).cloned().unwrap_or(Value::Null);
+                            arr_builtins::slice(&bv, &s, &e)
+                        }),
+                        "concat" => make_native_fn(move |args| arr_builtins::concat(&bv, args)),
+                        "indexOf" => make_native_fn(move |args| {
+                            let s = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::index_of(&bv, &s)
+                        }),
+                        "includes" => make_native_fn(move |args| {
+                            let s = args.first().cloned().unwrap_or(Value::Null);
+                            let f = args.get(1).cloned();
+                            arr_builtins::includes(&bv, &s, f.as_ref())
+                        }),
+                        "unshift" => make_native_fn(move |args| arr_builtins::unshift(&bv, args)),
+                        "shift" => make_native_fn(move |_| arr_builtins::shift(&bv)),
+                        "splice" => make_native_fn(move |args| {
+                            let s = args.first().cloned().unwrap_or(Value::Null);
+                            let dc = args.get(1).cloned();
+                            let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
+                            arr_builtins::splice(&bv, &s, dc.as_ref(), &items)
+                        }),
                         _ => return Err(format!("Property '{}' not found", key)),
                     }
                 }
@@ -3469,11 +3717,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "lastIndexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let position = args.get(1).cloned().unwrap_or(Value::Number(f64::INFINITY));
-                    str_builtins::last_index_of(
-                        &Value::String(s_clone.clone()),
-                        search,
-                        &position,
-                    )
+                    str_builtins::last_index_of(&Value::String(s_clone.clone()), search, &position)
                 }),
                 "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
@@ -3546,11 +3790,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "replaceAll" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     let replacement = args.get(1).unwrap_or(&Value::Null);
-                    str_builtins::replace_all(
-                        &Value::String(s_clone.clone()),
-                        search,
-                        replacement,
-                    )
+                    str_builtins::replace_all(&Value::String(s_clone.clone()), search, replacement)
                 }),
                 #[cfg(feature = "regex")]
                 "match" => make_native_fn(move |args: &[Value]| {
@@ -3715,10 +3955,24 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
         Value::NumberArray(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
-                _ => return Err(format!("Array index must be number, got {}", idx.type_name())),
+                _ => {
+                    return Err(format!(
+                        "Array index must be number, got {}",
+                        idx.type_name()
+                    ))
+                }
             };
             // NaN is used as the hole marker (sparse-array positions); reads return Null.
-            Ok(a.borrow().get(i).map(|&n| if n.is_nan() { Value::Null } else { Value::Number(n) }).unwrap_or(Value::Null))
+            Ok(a.borrow()
+                .get(i)
+                .map(|&n| {
+                    if n.is_nan() {
+                        Value::Null
+                    } else {
+                        Value::Number(n)
+                    }
+                })
+                .unwrap_or(Value::Null))
         }
         Value::Array(a) => {
             let i = match idx {
@@ -3730,11 +3984,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                     ));
                 }
             };
-            Ok(a
-                .borrow()
-                .get(i)
-                .cloned()
-                .unwrap_or(Value::Null))
+            Ok(a.borrow().get(i).cloned().unwrap_or(Value::Null))
         }
         Value::String(s) => {
             let i = match idx {
@@ -3777,7 +4027,7 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 }
             };
             get_member(obj, &key_arc)
-        },
+        }
         _ => Err(format!(
             "Cannot read property '{}' of {}",
             idx.to_display_string(),
@@ -3819,7 +4069,12 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
         Value::NumberArray(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
-                _ => return Err(format!("Array index must be number, got {}", idx.type_name())),
+                _ => {
+                    return Err(format!(
+                        "Array index must be number, got {}",
+                        idx.type_name()
+                    ))
+                }
             };
             // In-bounds numeric assignment stays packed.
             // Out-of-bounds or non-numeric falls through to the Array path by returning
@@ -3830,7 +4085,9 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
                 Value::Number(n) => {
                     let mut arr = a.borrow_mut();
                     // Extend with NaN "holes" if needed (NaN = sparse hole; read back as Null).
-                    while arr.len() <= i { arr.push(f64::NAN); }
+                    while arr.len() <= i {
+                        arr.push(f64::NAN);
+                    }
                     arr[i] = n;
                 }
                 // Non-numeric set: the Vec<f64> can't represent this type. Extend with NaN holes
@@ -3840,7 +4097,9 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
                 // numeric elements and Null for the NaN holes.
                 _ => {
                     let mut arr = a.borrow_mut();
-                    while arr.len() <= i { arr.push(f64::NAN); }
+                    while arr.len() <= i {
+                        arr.push(f64::NAN);
+                    }
                     // arr[i] is already NaN (hole); we can't store the non-numeric value — acceptable
                     // for the experimental TISH_PACKED_ARRAYS path.
                 }
@@ -3903,7 +4162,10 @@ mod recursion_limit_tests_381 {
                    ok";
         let out = run_src(src);
         set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
-        assert!(out.is_ok(), "deep recursion must be catchable, not abort/error: {out:?}");
+        assert!(
+            out.is_ok(),
+            "deep recursion must be catchable, not abort/error: {out:?}"
+        );
     }
 
     #[test]
@@ -3912,15 +4174,23 @@ mod recursion_limit_tests_381 {
         set_max_call_depth_for_test(300);
         let out = run_src("fn rec(n) { return { v: rec(n + 1) } }\nrec(0)");
         set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
-        assert!(out.is_err(), "uncaught deep recursion must return an error, got {out:?}");
+        assert!(
+            out.is_err(),
+            "uncaught deep recursion must return an error, got {out:?}"
+        );
     }
 
     #[test]
     fn normal_recursion_is_unaffected() {
         set_max_call_depth_for_test(20_000);
-        let out = run_src("fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(15)");
+        let out = run_src(
+            "fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(15)",
+        );
         set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
-        assert!(out.is_ok(), "normal recursion must not be affected: {out:?}");
+        assert!(
+            out.is_ok(),
+            "normal recursion must not be affected: {out:?}"
+        );
     }
 
     // The core of #381 for the JIT tier: a pure-numeric self-recursive function JIT-compiles and
@@ -3949,6 +4219,9 @@ mod recursion_limit_tests_381 {
         let surfaced = handle
             .join()
             .expect("thread must not abort — the guard must catch the overflow");
-        assert!(surfaced, "uncaught JIT deep recursion must surface as a RangeError, not abort");
+        assert!(
+            surfaced,
+            "uncaught JIT deep recursion must surface as a RangeError, not abort"
+        );
     }
 }

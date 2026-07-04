@@ -25,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::types;
 use cranelift::prelude::{
-    AbiParam, Block, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder, IntCC, MemFlags,
-    Value as ClifValue, Variable,
+    AbiParam, Block, FloatCC, FunctionBuilder, FunctionBuilderContext, InstBuilder, IntCC,
+    MemFlags, Value as ClifValue, Variable,
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -98,6 +98,10 @@ pub struct NumericFn {
     /// (the recursion-depth bail, #381). Such a function must be invoked via [`NumericFn::call_guarded`];
     /// non-recursive functions keep the plain ABI and [`NumericFn::call`] (zero overhead).
     recur_guarded: bool,
+    /// True when this function has JIT'd local `f64` arrays (#189). It uses the plain register-`f64`
+    /// [`NumericFn::call`] ABI; an out-of-bounds array access (or a non-numeric return) sets a
+    /// per-thread deopt flag ([`jv_take_deopt`]) and the caller discards the result + re-interprets.
+    jv: bool,
 }
 
 /// A flat numeric array handed to an array-mode JIT function: a raw `f64` slice (`ptr`, `len`).
@@ -136,7 +140,24 @@ pub struct RecurGuard {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn jit_arrays_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("TISH_JIT_ARRAYS").map(|v| v != "0").unwrap_or(true))
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_ARRAYS")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// JIT-compiled function-LOCAL `f64` arrays via the `tish_jv_*` runtime (#189). **Default ON**;
+/// `TISH_JIT_JV=0` disables it (escape hatch). Additive: a function whose arrays don't fit the
+/// non-escaping-JV shape just runs interpreted, and any out-of-bounds access deopts to the interpreter.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn jit_jv_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_JV")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// The self-recursion stack guard (#381). **Default ON**; `TISH_JIT_RECUR_GUARD=0` disables it.
@@ -154,8 +175,11 @@ pub fn jit_arrays_enabled() -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn jit_recur_guard_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("TISH_JIT_RECUR_GUARD").map(|v| v != "0").unwrap_or(true))
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_RECUR_GUARD")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 // SAFETY: `ptr` references immutable executable code in a module that is never
@@ -214,12 +238,16 @@ impl NumericFn {
                 7 => {
                     let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 =
                         std::mem::transmute(self.ptr);
-                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+                    f(
+                        args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                    )
                 }
                 8 => {
                     let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 =
                         std::mem::transmute(self.ptr);
-                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+                    f(
+                        args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                    )
                 }
                 _ => f64::NAN,
             }
@@ -242,7 +270,8 @@ impl NumericFn {
         unsafe {
             match self.arity {
                 1 => {
-                    let f: extern "C" fn(f64, *mut RecurGuard) -> f64 = std::mem::transmute(self.ptr);
+                    let f: extern "C" fn(f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
                     f(args[0], guard)
                 }
                 2 => {
@@ -271,9 +300,19 @@ impl NumericFn {
                     f(args[0], args[1], args[2], args[3], args[4], args[5], guard)
                 }
                 7 => {
-                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, *mut RecurGuard) -> f64 =
-                        std::mem::transmute(self.ptr);
-                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], guard)
+                    let f: extern "C" fn(
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        *mut RecurGuard,
+                    ) -> f64 = std::mem::transmute(self.ptr);
+                    f(
+                        args[0], args[1], args[2], args[3], args[4], args[5], args[6], guard,
+                    )
                 }
                 8 => {
                     let f: extern "C" fn(
@@ -288,12 +327,21 @@ impl NumericFn {
                         *mut RecurGuard,
                     ) -> f64 = std::mem::transmute(self.ptr);
                     f(
-                        args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], guard,
+                        args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                        guard,
                     )
                 }
                 _ => f64::NAN,
             }
         }
+    }
+
+    /// Whether this function has JIT'd local arrays (#189). Such a function uses the ordinary
+    /// register-`f64` [`call`] ABI — its OOB/deopt signal is the per-thread flag (see
+    /// [`jv_reset_deopt`] / [`jv_take_deopt`]), not a trailing pointer param.
+    #[inline]
+    pub fn is_jv(&self) -> bool {
+        self.jv
     }
 
     /// Bit k set ⇒ param k is an array param (read via `arr[i]`). `0` ⇒ pure-numeric (use [`call`]).
@@ -350,6 +398,8 @@ struct JitGlobal {
     /// `FuncId` of the imported `tish_math_call` host fn (#186), declared once at module init and
     /// re-imported into each compiled function via `declare_func_in_func`.
     math_call_id: cranelift_module::FuncId,
+    /// `FuncId`s of the imported `tish_jv_*` vector runtime (#189).
+    jv_fns: JvFns,
 }
 
 // SAFETY: `JITModule` is `!Send`, but the single instance lives behind the
@@ -358,6 +408,158 @@ struct JitGlobal {
 unsafe impl Send for JitGlobal {}
 
 static JIT: OnceLock<Option<Mutex<JitGlobal>>> = OnceLock::new();
+
+// #189 — a minimal C-ABI `f64` vector runtime for JIT-compiled function-LOCAL arrays that never
+// escape the frame. A qualifying local slot (only def = empty `[]`, only uses = push / `[i]` /
+// `[i]=v` / `.length`) is addressed by a `u64` HANDLE into a per-thread arena instead of a boxed
+// `Value::Array`, so its index math is a bounds-checked slab lookup, not a per-op bound-method
+// alloc — and, because the arena is a plain `Vec<Vec<f64>>` behind a `RefCell`, the host fns need
+// NO `unsafe` (no raw-pointer deref). SOUND because such arrays never escape: no `Value` ever
+// references a `Vec`, so an out-of-bounds access can set the deopt flag, let the (about-to-be-
+// discarded) native run finish, and re-run the interpreter with no observable state change. Handle
+// `0` is the null sentinel (a JV slot inits to 0); every exit frees every live slot back to the
+// free list, so the arena is bounded by a function's peak live-array count, not total allocations.
+#[cfg(not(target_arch = "wasm32"))]
+struct JvArena {
+    vecs: Vec<Vec<f64>>,
+    free: Vec<usize>,
+    deopt: bool,
+}
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static JV_ARENA: std::cell::RefCell<JvArena> = const {
+        std::cell::RefCell::new(JvArena { vecs: Vec::new(), free: Vec::new(), deopt: false })
+    };
+}
+/// `handle` (1-based, `0` = null) → arena index, or `None` for the null handle.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn jv_index(handle: u64) -> Option<usize> {
+    handle.checked_sub(1).map(|i| i as usize)
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_new(cap: u64) -> u64 {
+    JV_ARENA.with(|c| {
+        let mut a = c.borrow_mut();
+        let v = Vec::with_capacity(cap as usize);
+        let idx = match a.free.pop() {
+            Some(i) => {
+                a.vecs[i] = v;
+                i
+            }
+            None => {
+                a.vecs.push(v);
+                a.vecs.len() - 1
+            }
+        };
+        idx as u64 + 1 // handle = index + 1 (0 stays reserved for null)
+    })
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_push(handle: u64, x: f64) {
+    if let Some(idx) = jv_index(handle) {
+        JV_ARENA.with(|c| {
+            if let Some(v) = c.borrow_mut().vecs.get_mut(idx) {
+                v.push(x);
+            }
+        });
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_get(handle: u64, i: u64) -> f64 {
+    JV_ARENA.with(|c| {
+        let mut a = c.borrow_mut();
+        match jv_index(handle)
+            .and_then(|idx| a.vecs.get(idx))
+            .and_then(|v| v.get(i as usize))
+        {
+            Some(&x) => x,
+            None => {
+                a.deopt = true; // OOB (or null): caller discards the result + re-interprets
+                f64::NAN
+            }
+        }
+    })
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_set(handle: u64, i: u64, x: f64) {
+    JV_ARENA.with(|c| {
+        let mut a = c.borrow_mut();
+        match jv_index(handle)
+            .and_then(|idx| a.vecs.get_mut(idx))
+            .and_then(|v| v.get_mut(i as usize))
+        {
+            Some(p) => *p = x,
+            None => a.deopt = true, // OOB (or null) → deopt (no store performed)
+        }
+    })
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_len(handle: u64) -> u64 {
+    JV_ARENA.with(|c| {
+        jv_index(handle)
+            .and_then(|idx| c.borrow().vecs.get(idx).map(|v| v.len() as u64))
+            .unwrap_or(0)
+    })
+}
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_free(handle: u64) {
+    if let Some(idx) = jv_index(handle) {
+        JV_ARENA.with(|c| {
+            let mut a = c.borrow_mut();
+            if let Some(v) = a.vecs.get_mut(idx) {
+                v.clear(); // keep capacity; the slot is returned to the free list for reuse
+                a.free.push(idx);
+            }
+        });
+    }
+}
+/// Signal a deopt from JIT'd code that can't produce an `f64` result (a non-numeric `return`, e.g. the
+/// dead `return null` epilogue after a `while (true)`); the wrapper then re-interprets. #189
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn tish_jv_deopt() {
+    JV_ARENA.with(|c| c.borrow_mut().deopt = true);
+}
+/// Clear the per-thread deopt flag before entering a JV function. #189
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn jv_reset_deopt() {
+    JV_ARENA.with(|c| c.borrow_mut().deopt = false);
+}
+/// Read and clear the deopt flag after a JV function returns; `true` ⇒ discard its result + interpret.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn jv_take_deopt() -> bool {
+    JV_ARENA.with(|c| {
+        let mut a = c.borrow_mut();
+        std::mem::replace(&mut a.deopt, false)
+    })
+}
+
+/// Imported `FuncId`s of the `tish_jv_*` vector runtime (#189), declared once at module init.
+#[derive(Clone, Copy)]
+struct JvFns {
+    new: cranelift_module::FuncId,
+    push: cranelift_module::FuncId,
+    get: cranelift_module::FuncId,
+    set: cranelift_module::FuncId,
+    len: cranelift_module::FuncId,
+    free: cranelift_module::FuncId,
+    deopt: cranelift_module::FuncId,
+}
+
+/// Per-function-build handles for JV local arrays (#189): the `tish_jv_*` `FuncRef`s imported into
+/// *this* function, plus the set of slots classified as JV arrays. Passed to [`build_body_cfg`].
+/// The deopt flag lives in the per-thread arena (set by `get`/`set`/`deopt`), so — unlike array
+/// mode — the JV function ABI carries no trailing deopt pointer.
+struct JvCtx<'a> {
+    new: cranelift::codegen::ir::FuncRef,
+    push: cranelift::codegen::ir::FuncRef,
+    get: cranelift::codegen::ir::FuncRef,
+    set: cranelift::codegen::ir::FuncRef,
+    len: cranelift::codegen::ir::FuncRef,
+    free: cranelift::codegen::ir::FuncRef,
+    deopt: cranelift::codegen::ir::FuncRef,
+    slots: &'a std::collections::HashSet<usize>,
+}
 
 /// Host entry point the JIT calls for `Math.<fn>` intrinsics it doesn't lower to a native op (#186):
 /// sin/cos/tan/exp/log/round/sign/… The single source of truth is [`MathUnaryFn::apply`], so JIT ≡
@@ -370,8 +572,9 @@ extern "C" fn tish_math_call(id: i32, x: f64) -> f64 {
     }
 }
 
-/// Build the JIT module and declare the imported `tish_math_call` host function, returning both.
-fn new_module() -> Option<(JITModule, cranelift_module::FuncId)> {
+/// Build the JIT module and declare the imported host functions (`tish_math_call` #186, the
+/// `tish_jv_*` vector runtime #189), returning the module + their `FuncId`s.
+fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
     let mut flag_builder = settings::builder();
     // JIT code is loaded at a fixed address; no PIC / colocated libcalls needed.
     flag_builder.set("use_colocated_libcalls", "false").ok()?;
@@ -383,27 +586,79 @@ fn new_module() -> Option<(JITModule, cranelift_module::FuncId)> {
         .ok()?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("tish_math_call", tish_math_call as *const u8);
+    builder.symbol("tish_jv_new", tish_jv_new as *const u8);
+    builder.symbol("tish_jv_push", tish_jv_push as *const u8);
+    builder.symbol("tish_jv_get", tish_jv_get as *const u8);
+    builder.symbol("tish_jv_set", tish_jv_set as *const u8);
+    builder.symbol("tish_jv_len", tish_jv_len as *const u8);
+    builder.symbol("tish_jv_free", tish_jv_free as *const u8);
+    builder.symbol("tish_jv_deopt", tish_jv_deopt as *const u8);
     let mut module = JITModule::new(builder);
-    // Import signature: `(i32 fn-id, f64 x) -> f64`.
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I32));
-    sig.params.push(AbiParam::new(types::F64));
-    sig.returns.push(AbiParam::new(types::F64));
+
+    // `tish_math_call(i32 fn-id, f64 x) -> f64`.
+    let mut msig = module.make_signature();
+    msig.params.push(AbiParam::new(types::I32));
+    msig.params.push(AbiParam::new(types::F64));
+    msig.returns.push(AbiParam::new(types::F64));
     let math_id = module
-        .declare_function("tish_math_call", Linkage::Import, &sig)
+        .declare_function("tish_math_call", Linkage::Import, &msig)
         .ok()?;
-    Some((module, math_id))
+
+    // Helper to declare a `tish_jv_*` import from param/return abi lists.
+    let mut declare = |name: &str, params: &[AbiParam], rets: &[AbiParam]| {
+        let mut s = module.make_signature();
+        s.params.extend_from_slice(params);
+        s.returns.extend_from_slice(rets);
+        module.declare_function(name, Linkage::Import, &s).ok()
+    };
+    // A JV array is addressed by an `i64` HANDLE (a per-thread arena index; `0` = null), not a raw
+    // pointer. `get`/`set` need no deopt-pointer arg — OOB sets a per-thread flag the wrapper reads.
+    let jv = JvFns {
+        new: declare(
+            "tish_jv_new",
+            &[AbiParam::new(types::I64)],
+            &[AbiParam::new(types::I64)],
+        )?,
+        push: declare(
+            "tish_jv_push",
+            &[AbiParam::new(types::I64), AbiParam::new(types::F64)],
+            &[],
+        )?,
+        get: declare(
+            "tish_jv_get",
+            &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+            &[AbiParam::new(types::F64)],
+        )?,
+        set: declare(
+            "tish_jv_set",
+            &[
+                AbiParam::new(types::I64),
+                AbiParam::new(types::I64),
+                AbiParam::new(types::F64),
+            ],
+            &[],
+        )?,
+        len: declare(
+            "tish_jv_len",
+            &[AbiParam::new(types::I64)],
+            &[AbiParam::new(types::I64)],
+        )?,
+        free: declare("tish_jv_free", &[AbiParam::new(types::I64)], &[])?,
+        deopt: declare("tish_jv_deopt", &[], &[])?,
+    };
+    Some((module, math_id, jv))
 }
 
 fn jit() -> Option<&'static Mutex<JitGlobal>> {
     JIT.get_or_init(|| {
-        new_module().map(|(module, math_call_id)| {
+        new_module().map(|(module, math_call_id, jv_fns)| {
             Mutex::new(JitGlobal {
                 module,
                 cache: HashMap::new(),
                 osr_cache: HashMap::new(),
                 counter: 0,
                 math_call_id,
+                jv_fns,
             })
         })
     })
@@ -571,7 +826,10 @@ fn compile_loop_region(
             },
             Opcode::BinOp => {
                 // Reject non-numeric binops up front (Pow/In/logical) so the scan and the emit agree.
-                match peek_u16(code, ip + 1).map(|r| r as u8).and_then(u8_to_binop)? {
+                match peek_u16(code, ip + 1)
+                    .map(|r| r as u8)
+                    .and_then(u8_to_binop)?
+                {
                     BinOp::And | BinOp::Or | BinOp::Pow | BinOp::In => return None,
                     _ => {}
                 }
@@ -633,7 +891,10 @@ fn compile_loop_region(
 
     let name = format!("tish_osr_{}", g.counter);
     g.counter += 1;
-    let id = g.module.declare_function(&name, Linkage::Export, &sig).ok()?;
+    let id = g
+        .module
+        .declare_function(&name, Linkage::Export, &sig)
+        .ok()?;
 
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
@@ -693,15 +954,13 @@ fn build_loop_region_body(
     let num_slots = chunk.num_slots as usize;
     let mut bcx = FunctionBuilder::new(func, fbctx);
 
-    let blocks: HashMap<usize, Block> =
-        leaders.iter().map(|&o| (o, bcx.create_block())).collect();
+    let blocks: HashMap<usize, Block> = leaders.iter().map(|&o| (o, bcx.create_block())).collect();
     let exit_blocks: HashMap<usize, Block> =
         exit_id.keys().map(|&t| (t, bcx.create_block())).collect();
 
     // A jump target is either an in-region leader or a loop-exit target (the scan proved it is one).
-    let target_block = |t: usize| -> Option<Block> {
-        blocks.get(&t).or_else(|| exit_blocks.get(&t)).copied()
-    };
+    let target_block =
+        |t: usize| -> Option<Block> { blocks.get(&t).or_else(|| exit_blocks.get(&t)).copied() };
 
     // Entry: load the live-in slots from the buffer, then jump into the loop header.
     let entry = bcx.create_block();
@@ -709,7 +968,9 @@ fn build_loop_region_body(
     bcx.switch_to_block(entry);
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
     let slots_ptr = params[0]; // params[1] = deopt flag, reserved (v1 never writes it)
-    let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
+    let vars: Vec<Variable> = (0..num_slots)
+        .map(|_| bcx.declare_var(types::F64))
+        .collect();
     for (slot, &var) in vars.iter().enumerate() {
         // Live slots load from their buffer position; slots the region never touches init to 0 (dead).
         let init = if let Some(&p) = buf_pos.get(&(slot as u16)) {
@@ -990,13 +1251,29 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     // guard's per-call cost for raw speed — see [`jit_recur_guard_enabled`].
     let recur_guard = jit_recur_guard_enabled() && chunk_has_self_call(chunk);
 
+    // #189: function-local `f64` arrays. Mutually exclusive with `recur_guard` (both would claim the
+    // trailing param slot); a self-recursive array function just isn't JV-compiled. `None` from the
+    // classifier (an array the JIT can't handle) → empty set → the scan bails on `NewArray` → interpret.
+    #[cfg(not(target_arch = "wasm32"))]
+    let jv_slots = if !recur_guard && jit_jv_enabled() {
+        classify_jv_slots(chunk).unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let jv_slots: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let is_jv = !jv_slots.is_empty();
+
     let mut sig = g.module.make_signature();
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::F64));
     }
     if recur_guard {
-        sig.params.push(AbiParam::new(g.module.target_config().pointer_type())); // *mut RecurGuard
+        sig.params
+            .push(AbiParam::new(g.module.target_config().pointer_type())); // *mut RecurGuard
     }
+    // #189: a JV function keeps the plain register-`f64` ABI — its deopt flag lives in the per-thread
+    // arena (set by `tish_jv_{get,set,deopt}`), not a trailing pointer param.
     sig.returns.push(AbiParam::new(types::F64));
 
     // Declare the function FIRST so its own `FuncRef` is available while building the body — that is
@@ -1015,6 +1292,21 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     ctx.func.signature = sig.clone();
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
+    // #189: import the `tish_jv_*` FuncRefs into this function when it has local arrays.
+    let jv_ctx = if is_jv {
+        Some(JvCtx {
+            new: g.module.declare_func_in_func(g.jv_fns.new, &mut ctx.func),
+            push: g.module.declare_func_in_func(g.jv_fns.push, &mut ctx.func),
+            get: g.module.declare_func_in_func(g.jv_fns.get, &mut ctx.func),
+            set: g.module.declare_func_in_func(g.jv_fns.set, &mut ctx.func),
+            len: g.module.declare_func_in_func(g.jv_fns.len, &mut ctx.func),
+            free: g.module.declare_func_in_func(g.jv_fns.free, &mut ctx.func),
+            deopt: g.module.declare_func_in_func(g.jv_fns.deopt, &mut ctx.func),
+            slots: &jv_slots,
+        })
+    } else {
+        None
+    };
     let mut fbctx = FunctionBuilderContext::new();
     let result_bool = match build_body_cfg(
         &mut ctx.func,
@@ -1025,8 +1317,15 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         0,
         recur_guard,
         math_fref,
+        jv_ctx.as_ref(),
     ) {
         Some(b) => b,
+        // A JV function has no straight-line fallback (its ABI has the deopt param `build_body`
+        // doesn't emit), so a `build_body_cfg` bail means "don't JIT" → interpret.
+        None if is_jv => {
+            g.module.clear_context(&mut ctx);
+            return None;
+        }
         None => {
             g.module.clear_context(&mut ctx);
             ctx = g.module.make_context();
@@ -1058,6 +1357,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         result_bool,
         array_param_mask: 0,
         recur_guarded: recur_guard,
+        jv: is_jv,
     })
 }
 
@@ -1141,7 +1441,12 @@ fn classify_params(chunk: &Chunk, arity: usize) -> u8 {
 /// reads set `*deopt` and bail (the caller re-runs the interpreter); non-numeric arrays never reach
 /// here (the VM wrapper only calls this when every element is a `Value::Number`).
 #[cfg(not(target_arch = "wasm32"))]
-fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8) -> Option<NumericFn> {
+fn compile_chunk_arrays(
+    g: &mut JitGlobal,
+    chunk: &Chunk,
+    arity: usize,
+    mask: u8,
+) -> Option<NumericFn> {
     let ptr_ty = g.module.target_config().pointer_type();
     let mut sig = g.module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // numeric_ptr
@@ -1151,14 +1456,29 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
 
     let name = format!("tish_arr_{}", g.counter);
     g.counter += 1;
-    let id = g.module.declare_function(&name, Linkage::Export, &sig).ok()?;
+    let id = g
+        .module
+        .declare_function(&name, Linkage::Export, &sig)
+        .ok()?;
 
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     // No self-call in array mode (recursive call would need the array signature) → pass None.
-    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask, false, math_fref).is_none()
+    // No JV local arrays in array-param mode either → pass None for the JV context.
+    if build_body_cfg(
+        &mut ctx.func,
+        &mut fbctx,
+        chunk,
+        arity,
+        None,
+        mask,
+        false,
+        math_fref,
+        None,
+    )
+    .is_none()
     {
         g.module.clear_context(&mut ctx);
         return None;
@@ -1178,13 +1498,15 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
         result_bool: false,
         array_param_mask: mask,
         recur_guarded: false,
+        jv: false,
     })
 }
 
 /// Outcome of trying to emit one *straight-line* numeric opcode.
 enum SimpleOp {
     /// Handled: bytecode consumed, IR emitted, `bool` flags a comparison/`!` result.
-    #[allow(dead_code)] // reserved: the flag will carry a comparison/`!` result; currently always false
+    #[allow(dead_code)]
+    // reserved: the flag will carry a comparison/`!` result; currently always false
     Handled(bool),
     /// The opcode is control flow / `Return` / non-numeric — NOT consumed; caller decides.
     NotSimple,
@@ -1256,8 +1578,14 @@ fn emit_simple_op(
             let (l, _) = stack.pop().unwrap();
             let is_cmp = matches!(
                 bop,
-                BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
-                    | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::StrictEq
+                    | BinOp::StrictNe
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
             );
             let v = match bop {
                 BinOp::Add => bcx.ins().fadd(l, r),
@@ -1404,6 +1732,60 @@ fn chunk_has_self_call(chunk: &Chunk) -> bool {
     false
 }
 
+/// #189 — identify function-LOCAL slots that hold non-escaping `f64` arrays (JV slots). A slot
+/// qualifies iff its ONLY definition is an empty array literal (`NewArray 0` immediately followed by
+/// `StoreLocal slot`) and it is never stored from anything else (which would alias/escape it). Any
+/// `NewArray` with a non-empty literal, or one not immediately stored to a slot, bails the WHOLE
+/// function (`None`) — such an array can't be JV-compiled and the function has array opcodes the JIT
+/// can't handle anyway. `Some(empty)` = "no local arrays" (the normal numeric path).
+///
+/// This is a cheap pass over STORES only; the [`build_body_cfg`] emission validates USES by bailing
+/// on any misuse of a JV ref (it reaching a numeric op, a return, a call arg, a block boundary, …),
+/// so a mis-shaped use never miscompiles — it just falls back to the interpreter.
+fn classify_jv_slots(chunk: &Chunk) -> Option<std::collections::HashSet<usize>> {
+    let code = &chunk.code;
+    let mut from_newarray: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut from_other: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut has_newarray = false;
+    let mut ip = 0usize;
+    let mut prev_newarray0 = false;
+    while ip < code.len() {
+        let op = Opcode::from_u8(*code.get(ip)?)?;
+        let size = op.instruction_size(code, ip)?;
+        let is_newarray0 = op == Opcode::NewArray && peek_u16(code, ip + 1)? == 0;
+        if op == Opcode::NewArray {
+            has_newarray = true;
+            if peek_u16(code, ip + 1)? != 0 {
+                return None; // non-empty array literal → not JV-compilable
+            }
+            // An empty `[]` must be stored straight into a slot (`let a = []`); anything else means
+            // the fresh array is used inline / escapes → bail.
+            if Opcode::from_u8(*code.get(ip + size)?)? != Opcode::StoreLocal {
+                return None;
+            }
+        }
+        if op == Opcode::StoreLocal {
+            let slot = peek_u16(code, ip + 1)? as usize;
+            if prev_newarray0 {
+                from_newarray.insert(slot);
+            } else {
+                from_other.insert(slot);
+            }
+        }
+        prev_newarray0 = is_newarray0;
+        ip += size;
+    }
+    if !has_newarray {
+        return Some(std::collections::HashSet::new());
+    }
+    // A NewArray-defined slot that is ALSO stored otherwise is aliased/polymorphic — bail the whole
+    // function (its array can't be JV-compiled, and it has `NewArray` the JIT otherwise rejects).
+    if from_newarray.iter().any(|s| from_other.contains(s)) {
+        return None;
+    }
+    Some(from_newarray)
+}
+
 /// Read a big-endian u16 operand at `off` without advancing (matches [`read_u16`]).
 #[inline]
 fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
@@ -1422,6 +1804,7 @@ fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
 /// (→ caller → VM) on any other opcode, a non-empty operand stack at a block boundary, boolean slots,
 /// or a `Call` whose callee is not in `callees`. ADDITIVE: a bail just runs the VM.
 /// Returns `Some(false)` (Number result) on success.
+#[allow(clippy::too_many_arguments)] // each param is a distinct, documented lowering mode/handle
 fn build_body_cfg(
     func: &mut cranelift::codegen::ir::Function,
     fbctx: &mut FunctionBuilderContext,
@@ -1438,6 +1821,10 @@ fn build_body_cfg(
     recur_guard: bool,
     // #186: the imported `tish_math_call` host fn, for lowering `Math.<fn>` (`MathUnary`) intrinsics.
     math_fref: cranelift::codegen::ir::FuncRef,
+    // #189: `Some` when the function has local `f64` arrays — carries the `tish_jv_*` `FuncRef`s + the
+    // JV slot set. Those slots become `i64` handle Variables and their array ops lower to `tish_jv_*`
+    // calls; an out-of-bounds index sets the per-thread deopt flag the wrapper re-interprets on.
+    jv: Option<&JvCtx>,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -1454,7 +1841,14 @@ fn build_body_cfg(
     let mut ip = 0;
     while ip < code.len() {
         let op = Opcode::from_u8(code[ip])?;
-        let size = op_size(op)?;
+        // For a JV function the array opcodes (NewArray/GetMember/GetIndex/SetIndex/Call) are valid
+        // and must be sized via the full instruction table; the translate loop then validates each is
+        // a real JV op (else it bails). Non-JV functions keep the strict `op_size` whitelist.
+        let size = match op_size(op) {
+            Some(s) => s,
+            None if jv.is_some() => op.instruction_size(code, ip)?,
+            None => return None,
+        };
         // A SelfCall whose arity != this function's arity can't be a plain f64-ABI native call → bail.
         if op == Opcode::SelfCall {
             if self_ref.is_none() || peek_u16(code, ip + 1)? as usize != arity {
@@ -1530,8 +1924,18 @@ fn build_body_cfg(
     };
     let body_start = *blocks.get(&0)?; // `entry` normally; `body_block` when guarded
 
-    // 2. A Variable per slot, all defined at entry so every path defines them.
-    let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
+    // 2. A Variable per slot, all defined at entry so every path defines them. A JV slot (#189) holds
+    //    an arena HANDLE (a `u64`, 0 = null) so its Variable is `i64`, not `f64`.
+    let vars: Vec<Variable> = (0..num_slots)
+        .map(|i| {
+            let ty = if jv.is_some_and(|j| j.slots.contains(&i)) {
+                types::I64
+            } else {
+                types::F64
+            };
+            bcx.declare_var(ty)
+        })
+        .collect();
     // Array-mode state: per-array-param `(ptr,len)` loaded from the handles array + the deopt pad.
     let mut array_slots: HashMap<usize, (ClifValue, ClifValue)> = HashMap::new();
     let mut deopt_block: Option<Block> = None;
@@ -1544,7 +1948,8 @@ fn build_body_cfg(
         deopt_ptr = Some(*params.get(2)?);
         let mut numeric_i = 0i32;
         let mut array_i = 0i64;
-        #[allow(clippy::needless_range_loop)] // `slot` drives bit-mask math (`array_mask >> slot`) + map keys, not just indexing
+        #[allow(clippy::needless_range_loop)]
+        // `slot` drives bit-mask math (`array_mask >> slot`) + map keys, not just indexing
         for slot in 0..num_slots {
             let init = if slot < arity && (array_mask >> slot) & 1 == 1 {
                 let base = bcx.ins().iadd_imm(handles_ptr, array_i * 16);
@@ -1567,17 +1972,30 @@ fn build_body_cfg(
         deopt_block = Some(bcx.create_block());
     } else {
         for (i, &v) in vars.iter().enumerate() {
-            let init = if i < arity {
-                params[i]
+            if jv.is_some_and(|j| j.slots.contains(&i)) {
+                // A JV slot starts null (handle 0); its `[]` def stores the real handle. Null-init
+                // makes the free-on-return safe even if a return precedes the def (`tish_jv_free`
+                // treats handle 0 as a no-op).
+                let null = bcx.ins().iconst(types::I64, 0);
+                bcx.def_var(v, null);
             } else {
-                bcx.ins().f64const(0.0)
-            };
-            bcx.def_var(v, init);
+                let init = if i < arity {
+                    params[i]
+                } else {
+                    bcx.ins().f64const(0.0)
+                };
+                bcx.def_var(v, init);
+            }
         }
     }
 
     // 3. Translate. The operand stack is empty at every block boundary (statement-level control flow).
     let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    // #189: JV array handles "in flight" (pushed by `LoadLocal`/`NewArray` of a JV slot, consumed by
+    // the very next `GetIndex`/`SetIndex`/`GetMember`), kept off the f64 `stack`; and a pending
+    // `arr.push` awaiting its arg + `Call`. Both must be empty at every block boundary.
+    let mut jv_pending: Vec<ClifValue> = Vec::new();
+    let mut pending_push: Option<ClifValue> = None;
     let mut cur = body_start;
     let mut terminated = false;
     let mut ip = 0usize;
@@ -1590,6 +2008,10 @@ fn build_body_cfg(
                     }
                     bcx.ins().jump(blk, &[]);
                 }
+                // A JV ref or a pending push must never span a statement boundary.
+                if !jv_pending.is_empty() || pending_push.is_some() {
+                    return None;
+                }
                 bcx.switch_to_block(blk);
                 cur = blk;
                 terminated = false;
@@ -1597,13 +2019,27 @@ fn build_body_cfg(
             }
         }
         if terminated {
-            ip += op_size(Opcode::from_u8(code[ip])?)?; // skip unreachable tail before next leader
+            // Skip the unreachable tail; a JV function may have array opcodes here (size via the full
+            // table).
+            let op = Opcode::from_u8(code[ip])?;
+            ip += match op_size(op) {
+                Some(s) => s,
+                None if jv.is_some() => op.instruction_size(code, ip)?,
+                None => return None,
+            };
             continue;
         }
         let op = Opcode::from_u8(code[ip])?;
         match op {
             Opcode::LoadLocal => {
                 let slot = peek_u16(code, ip + 1)? as usize;
+                // #189: a JV slot's value is its arena HANDLE — push it to `jv_pending` (the next
+                // GetIndex/SetIndex/GetMember consumes it), never onto the f64 stack.
+                if jv.is_some_and(|j| j.slots.contains(&slot)) {
+                    jv_pending.push(bcx.use_var(*vars.get(slot)?));
+                    ip += 3;
+                    continue;
+                }
                 // Array-mode peephole: `LoadLocal(arrayparam) ; (LoadLocal|LoadConst) ; GetIndex` →
                 // a bounds-checked native f64 load; out-of-bounds branches to the deopt pad.
                 if array_mask != 0 && slot < arity && (array_mask >> slot) & 1 == 1 {
@@ -1647,6 +2083,14 @@ fn build_body_cfg(
             }
             Opcode::StoreLocal => {
                 let slot = peek_u16(code, ip + 1)? as usize;
+                // #189: storing a JV array (its `[]` def or a re-store) pops the handle from
+                // `jv_pending` into the slot's i64 Variable.
+                if jv.is_some_and(|j| j.slots.contains(&slot)) {
+                    let ptr = jv_pending.pop()?;
+                    bcx.def_var(*vars.get(slot)?, ptr);
+                    ip += 3;
+                    continue;
+                }
                 let (val, is_bool) = stack.pop()?;
                 if is_bool {
                     return None; // no boolean slots — keeps result boxing simple
@@ -1672,6 +2116,15 @@ fn build_body_cfg(
                 let (v, is_bool) = stack.pop()?;
                 if is_bool {
                     return None;
+                }
+                // #189: free every JV array (return its arena slot to the free list) before leaving
+                // the frame — handle 0 (a slot not yet allocated on this path) is a no-op. This is why
+                // JV arrays must never escape.
+                if let Some(jvc) = jv {
+                    for &slot in jvc.slots {
+                        let handle = bcx.use_var(*vars.get(slot)?);
+                        bcx.ins().call(jvc.free, &[handle]);
+                    }
                 }
                 bcx.ins().return_(&[v]);
                 terminated = true;
@@ -1745,6 +2198,97 @@ fn build_body_cfg(
                 stack.push((r, false));
                 ip += 3;
             }
+            // #189 — local-array ops, only for JV functions (`jv` = `Some`). Each consumes the array
+            // HANDLE from `jv_pending` (its `LoadLocal`/`NewArray` pushed it) and calls `tish_jv_*`.
+            Opcode::NewArray if jv.is_some() => {
+                let jvc = jv?;
+                if peek_u16(code, ip + 1)? != 0 {
+                    return None; // only empty `[]` is JV (classifier already guaranteed this)
+                }
+                let cap = bcx.ins().iconst(types::I64, 0);
+                let call = bcx.ins().call(jvc.new, &[cap]);
+                jv_pending.push(bcx.inst_results(call)[0]);
+                ip += 3;
+            }
+            Opcode::GetIndex if !jv_pending.is_empty() => {
+                let jvc = jv?;
+                let idx = stack.pop()?.0;
+                let handle = jv_pending.pop()?;
+                // `idx as usize` (saturating: NaN/neg → 0), matching the VM's index coercion. OOB sets
+                // the per-thread deopt flag inside `tish_jv_get` and returns NaN.
+                let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
+                let call = bcx.ins().call(jvc.get, &[handle, i]);
+                stack.push((bcx.inst_results(call)[0], false));
+                ip += 1;
+            }
+            Opcode::SetIndex if !jv_pending.is_empty() => {
+                let jvc = jv?;
+                // Stack: [ (array→jv_pending), idx, val, dup_val ]. `Dup` left `dup_val` == `val`.
+                let dup_val = stack.pop()?.0;
+                let _val = stack.pop()?.0;
+                let idx = stack.pop()?.0;
+                let handle = jv_pending.pop()?;
+                let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
+                bcx.ins().call(jvc.set, &[handle, i, dup_val]); // OOB → deopt flag inside tish_jv_set
+                stack.push((dup_val, false)); // assignment yields the value
+                ip += 1;
+            }
+            Opcode::GetMember if !jv_pending.is_empty() => {
+                let jvc = jv?;
+                let name = chunk.names.get(peek_u16(code, ip + 1)? as usize)?;
+                let ptr = jv_pending.pop()?;
+                match name.as_ref() {
+                    "length" => {
+                        let call = bcx.ins().call(jvc.len, &[ptr]);
+                        let len_i = bcx.inst_results(call)[0];
+                        stack.push((bcx.ins().fcvt_from_uint(types::F64, len_i), false));
+                    }
+                    "push" => pending_push = Some(ptr),
+                    _ => return None, // any other member of a JV array → bail
+                }
+                ip += 3;
+            }
+            Opcode::Call if pending_push.is_some() => {
+                let jvc = jv?;
+                if peek_u16(code, ip + 1)? != 1 {
+                    return None; // `push` takes exactly one arg in the JV fast path
+                }
+                let ptr = pending_push.take()?;
+                let arg = stack.pop()?.0;
+                bcx.ins().call(jvc.push, &[ptr, arg]);
+                // `Array.push` returns the new length.
+                let call = bcx.ins().call(jvc.len, &[ptr]);
+                let len_i = bcx.inst_results(call)[0];
+                stack.push((bcx.ins().fcvt_from_uint(types::F64, len_i), false));
+                ip += 3;
+            }
+            // #189: a non-numeric constant load in a JV function — almost always the compiler's
+            // trailing implicit `LoadConst Null; Return` epilogue after a `while (true)` loop. That
+            // epilogue is the loop's never-taken exit edge: statically reachable (so it becomes a
+            // cranelift block that must be filled), dynamically dead. A `null`/string can't live in
+            // an f64 register, so instead of bailing the whole function we emit a deopt here — free
+            // the live arrays, set the flag, and return. If the block truly never runs (infinite loop
+            // with an inner `return`), cranelift keeps a dead branch and the hot path stays native;
+            // if a non-numeric return is ever actually reached, the VM wrapper re-interprets and
+            // produces the correct value. Sound either way, since the deopt path reproduces semantics.
+            Opcode::LoadConst
+                if jv.is_some()
+                    && !matches!(
+                        chunk.constants.get(peek_u16(code, ip + 1)? as usize),
+                        Some(Constant::Number(_)) | Some(Constant::Bool(_))
+                    ) =>
+            {
+                let jvc = jv?;
+                for &slot in jvc.slots {
+                    let handle = bcx.use_var(*vars.get(slot)?);
+                    bcx.ins().call(jvc.free, &[handle]);
+                }
+                bcx.ins().call(jvc.deopt, &[]);
+                let zero = bcx.ins().f64const(0.0);
+                bcx.ins().return_(&[zero]);
+                terminated = true; // the following `Return` (and any dead tail) is now skipped
+                ip += 3;
+            }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
                 SimpleOp::Handled(_) => {}
                 _ => return None, // LoadConst/BinOp/UnaryOp handled; anything else → VM
@@ -1815,8 +2359,9 @@ fn build_body(
                 // THEN arm: straight-line ops until the trailing `Jump`.
                 let mut tip = p;
                 loop {
-                    match emit_simple_op(&mut bcx, chunk, code, &mut tip, &mut stack, &params, arity)
-                    {
+                    match emit_simple_op(
+                        &mut bcx, chunk, code, &mut tip, &mut stack, &params, arity,
+                    ) {
                         SimpleOp::Handled(_) => continue,
                         SimpleOp::Unsupported => return None,
                         SimpleOp::NotSimple => break,
@@ -1837,8 +2382,9 @@ fn build_body(
                 // ELSE arm: straight-line ops from `jp` up to the merge point.
                 let mut eip = jp;
                 while eip < merge_target {
-                    match emit_simple_op(&mut bcx, chunk, code, &mut eip, &mut stack, &params, arity)
-                    {
+                    match emit_simple_op(
+                        &mut bcx, chunk, code, &mut eip, &mut stack, &params, arity,
+                    ) {
                         SimpleOp::Handled(_) => continue,
                         _ => return None, // nested control flow / unsupported → VM
                     }
@@ -1929,6 +2475,116 @@ mod tests {
         find(&chunk).expect("the JIT must compile this arity-2 numeric fn (did it start bailing?)")
     }
 
+    /// #189: compile the first JV (function-local `f64` array) nested fn in `src` via `compile_chunk`,
+    /// bypassing the address-keyed cache (see [`jit_arity2`]). Panics if none compiles JV — so a change
+    /// that makes the classifier or lowering silently stop accepting the target fails loudly.
+    fn jit_jv(src: &str) -> NumericFn {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based
+                || c.rest_param_index != NO_REST_PARAM
+                || c.param_count == 0
+                || c.param_count > 8
+            {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
+        fn find(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if let Some(f) = compile_uncached(n) {
+                    if f.is_jv() {
+                        return Some(f);
+                    }
+                }
+                if let Some(f) = find(n) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&chunk).expect("the JIT must JV-compile this local-array fn (did it start bailing?)")
+    }
+
+    /// #189: the core JV path — a function-local array built with `push`, then read and written by
+    /// index in a loop. `sum_{i=0}^{n-1}(2i+1) == n^2`, so the JIT'd result is checked against a
+    /// closed form (independent of the interpreter) across sizes. `deopt` must stay clear (in-bounds).
+    #[test]
+    fn jit_jv_local_array_sum_matches_closed_form() {
+        let f = jit_jv(
+            "function build(n) {\n\
+             let a = []\n\
+             for (let i = 0; i < n; i = i + 1) { a.push(i * 2) }\n\
+             let s = 0\n\
+             let j = 0\n\
+             while (j < n) { a[j] = a[j] + 1; s = s + a[j]; j = j + 1 }\n\
+             return s\n\
+             }\n\
+             build(0)\n",
+        );
+        assert!(f.is_jv(), "expected a JV-compiled fn");
+        for n in [1.0f64, 5.0, 20.0, 100.0] {
+            jv_reset_deopt();
+            let r = f.call(&[n]);
+            assert!(!jv_take_deopt(), "no OOB expected for n={n}");
+            assert_eq!(r, n * n, "JV local-array sum wrong for n={n}");
+        }
+    }
+
+    /// #189: a `while (true)` whose only exit is an inner `return` — the compiler still emits a trailing
+    /// implicit `LoadConst Null; Return` epilogue (the loop's never-taken exit edge). That epilogue must
+    /// NOT bail JV compilation; it's routed to a deopt. Without the fix this fn falls back to the VM.
+    #[test]
+    fn jit_jv_while_true_epilogue_compiles() {
+        let f = jit_jv(
+            "function f(n) {\n\
+             let a = []\n\
+             a.push(0)\n\
+             let i = 0\n\
+             while (true) {\n\
+               a[0] = a[0] + 1\n\
+               i = i + 1\n\
+               if (i >= n) { return a[0] }\n\
+             }\n\
+             }\n\
+             f(0)\n",
+        );
+        assert!(f.is_jv(), "while(true)+return JV fn must compile, not bail");
+        jv_reset_deopt();
+        assert_eq!(f.call(&[7.0]), 7.0);
+        assert!(!jv_take_deopt());
+    }
+
+    /// #189: an out-of-bounds index makes the host `tish_jv_get` set the deopt flag (and return a
+    /// sentinel); the VM wrapper then discards the result and re-interprets. Sound because JV arrays
+    /// never escape, so the partially-run native attempt mutated nothing observable.
+    #[test]
+    fn jit_jv_oob_read_sets_deopt_flag() {
+        // A loop that reads `a[i]` for `i` in `0..n`, but the array only has 2 elements — so `n > 2`
+        // reads out of bounds. (Needs a loop: the CFG JIT only engages on loop/self-call fns.)
+        let f = jit_jv(
+            "function f(n) {\n\
+             let a = []\n\
+             a.push(10)\n\
+             a.push(20)\n\
+             let s = 0\n\
+             for (let i = 0; i < n; i = i + 1) { s = s + a[i] }\n\
+             return s\n\
+             }\n\
+             f(0)\n",
+        );
+        jv_reset_deopt();
+        assert_eq!(f.call(&[2.0]), 30.0, "a[0]+a[1] == 30");
+        assert!(!jv_take_deopt(), "n=2 stays in bounds");
+        jv_reset_deopt();
+        let _ = f.call(&[5.0]); // reads a[2] (past the 2-element array) → OOB
+        assert!(jv_take_deopt(), "OOB array access must set the deopt flag");
+    }
+
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME
     /// heap `Chunk` (same address = the cache key) with a *different* function — what a long-lived
     /// process (REPL / multi-script embedder) does when a freed chunk address is reused. Before the
@@ -1956,14 +2612,35 @@ mod tests {
         let shr = jit_arity2("const f = (a, b) => a >> b\nf(0, 0)\n");
         let ushr = jit_arity2("const f = (a, b) => a >>> b\nf(0, 0)\n");
         let cases = [
-            (1.0, 4.0), (1.0, 32.0), (1.0, 33.0), (1.0, -1.0), (-8.0, 1.0), (-1.0, 0.0),
-            (-2.0, 1.0), (4294967295.0, 0.0), (3.9, 0.0), (4294967297.0, 0.0),
-            (-123456789.0, 5.0), (65535.0, 16.0),
+            (1.0, 4.0),
+            (1.0, 32.0),
+            (1.0, 33.0),
+            (1.0, -1.0),
+            (-8.0, 1.0),
+            (-1.0, 0.0),
+            (-2.0, 1.0),
+            (4294967295.0, 0.0),
+            (3.9, 0.0),
+            (4294967297.0, 0.0),
+            (-123456789.0, 5.0),
+            (65535.0, 16.0),
         ];
         for (a, b) in cases {
-            assert_eq!(shl.call(&[a, b]), to_int32(a).wrapping_shl(to_uint32(b)) as f64, "<< {a} {b}");
-            assert_eq!(shr.call(&[a, b]), to_int32(a).wrapping_shr(to_uint32(b)) as f64, ">> {a} {b}");
-            assert_eq!(ushr.call(&[a, b]), to_uint32(a).wrapping_shr(to_uint32(b)) as f64, ">>> {a} {b}");
+            assert_eq!(
+                shl.call(&[a, b]),
+                to_int32(a).wrapping_shl(to_uint32(b)) as f64,
+                "<< {a} {b}"
+            );
+            assert_eq!(
+                shr.call(&[a, b]),
+                to_int32(a).wrapping_shr(to_uint32(b)) as f64,
+                ">> {a} {b}"
+            );
+            assert_eq!(
+                ushr.call(&[a, b]),
+                to_uint32(a).wrapping_shr(to_uint32(b)) as f64,
+                ">>> {a} {b}"
+            );
         }
     }
 
@@ -2008,7 +2685,11 @@ mod tests {
         assert_eq!(deopt, 0, "v1 region never sets the deopt flag");
         let mut got = buf.clone();
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(got, vec![10.0, 45.0], "s=45 (sum 0..9), i=10 after the loop");
+        assert_eq!(
+            got,
+            vec![10.0, 45.0],
+            "s=45 (sum 0..9), i=10 after the loop"
+        );
     }
 
     /// #190 — a loop that touches a non-slot value (a general call) is not pure-numeric slot math, so
@@ -2034,7 +2715,8 @@ mod tests {
             "let s = 0.0\nlet i = 0.0\nwhile (i < 20.0) { if (i % 2.0 == 0.0) { s = s + i }; i = i + 1.0 }\n",
         );
         let (header, end) = first_region(&chunk);
-        let lf = try_compile_loop(&chunk, header, end).expect("branchy numeric loop must OSR-compile");
+        let lf =
+            try_compile_loop(&chunk, header, end).expect("branchy numeric loop must OSR-compile");
         let mut buf = vec![0.0f64; lf.used_slots.len()];
         let mut deopt = 0u8;
         lf.call(&mut buf, &mut deopt);
