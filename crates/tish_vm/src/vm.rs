@@ -51,6 +51,27 @@ use tishlang_core::{max_call_depth, stack_overflow_error};
 /// comfortably more than either needs while still far larger than a single f64-ABI recursion frame.
 const RECUR_STACK_MARGIN: usize = 256 * 1024;
 
+/// OSR back-edge count at which a hot top-level loop is first offered to the region JIT (#190). High
+/// enough that the compile + first-attempt cost is amortized over a genuinely hot loop.
+#[cfg(not(target_arch = "wasm32"))]
+const OSR_THRESHOLD: u32 = 10_000;
+/// After the first attempt, retry OSR every this-many back-edges — only relevant to the live-in-miss
+/// path (a numeric loop compiles and consumes itself on the first attempt). Keeps the re-check off the
+/// per-iteration hot path.
+#[cfg(not(target_arch = "wasm32"))]
+const OSR_RETRY: u32 = 50_000;
+
+/// Outcome of an OSR attempt (#190).
+#[cfg(not(target_arch = "wasm32"))]
+enum OsrResult {
+    /// Ran the loop natively; resume interpreting at this chunk `ip` (the loop exit).
+    Compiled(usize),
+    /// A live-in slot is non-numeric; keep interpreting (may become eligible later → retry).
+    LiveInMiss,
+    /// The region is not a pure-numeric slot loop; give up on this loop (negative-cached).
+    NotCompilable,
+}
+
 /// Append the source location of the instruction at `off` to a runtime-error message, e.g.
 /// `Cannot read property 'x' of null (at app.tish:4)` (issue #74). No-ops when the chunk
 /// carries no line table (e.g. deserialized bytecode).
@@ -1312,6 +1333,64 @@ impl Vm {
         true
     }
 
+    /// On-stack replacement (#190): run one hot loop region natively, or report why we can't.
+    ///
+    /// Called from the frame VM's `JumpBack` handler once a loop's back-edge counter trips. Compiles
+    /// (cached) the region `[header_ip, region_end)`; if it is a pure-numeric slot loop AND every live
+    /// slot currently holds a `Number` (else the native f64 math would diverge from the interpreter),
+    /// copies the live-ins into an f64 buffer, runs the whole remaining loop natively, writes the
+    /// live-outs back as `Number`s, and returns the chunk `ip` of the loop exit to resume dispatch at.
+    ///
+    /// Soundness: the v1 region whitelist is pure slot/stack arithmetic — no calls, no member/index,
+    /// no object or array mutation — so nothing observable happens inside the region, and the
+    /// interpreter running the same bytecode from the same numeric live-ins produces bit-identical
+    /// slots (the `emit_simple_op` lowering matches `eval_binop`). A non-numeric live-in is the deopt
+    /// case: we simply don't OSR and keep interpreting, so state is never corrupted.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_osr(
+        chunk: &Chunk,
+        header_ip: usize,
+        region_end: usize,
+        slots: &mut [Value],
+        slot_base: usize,
+    ) -> OsrResult {
+        let loopfn = match crate::jit::try_compile_loop(chunk, header_ip, region_end) {
+            Some(lf) => lf,
+            None => return OsrResult::NotCompilable,
+        };
+        let mut buf: Vec<f64> = Vec::with_capacity(loopfn.used_slots.len());
+        for &slot in &loopfn.used_slots {
+            match slots.get(slot_base + slot as usize) {
+                Some(Value::Number(n)) => buf.push(*n),
+                _ => return OsrResult::LiveInMiss, // a live slot is non-numeric → deopt, keep interpreting
+            }
+        }
+        let mut deopt: u8 = 0;
+        // SAFETY: `buf` is a valid `[f64; used_slots.len()]`; `deopt` is a valid `*mut u8`. The region
+        // was compiled for exactly this chunk+header (fingerprint-checked in the cache).
+        let exit_id = unsafe { loopfn.call(buf.as_mut_ptr(), &mut deopt as *mut u8) };
+        for (p, &slot) in loopfn.used_slots.iter().enumerate() {
+            if let Some(d) = slots.get_mut(slot_base + slot as usize) {
+                *d = Value::Number(buf[p]);
+            }
+        }
+        match loopfn.exits.get(exit_id as usize) {
+            Some(&ip) => OsrResult::Compiled(ip),
+            // Out-of-range exit id is impossible (the region returns an in-range id), but if it ever
+            // happened the slots are already a consistent post-loop state, so re-interpreting the
+            // (now-false) loop header exits correctly.
+            None => OsrResult::LiveInMiss,
+        }
+    }
+
+    /// OSR is **default ON**; `TISH_OSR=0` disables it (escape hatch, mirrors `TISH_JIT_ARRAYS`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn osr_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("TISH_OSR").map(|v| v != "0").unwrap_or(true))
+    }
+
     /// Iterative frame-stack execution of a frame-eligible `VmClosure` (the frame-VM, flag-on).
     /// Returns `None` if the entry chunk is ineligible (caller falls back to `VmClosure::call`).
     /// Calls + recursion run on the heap `frames` stack — no per-call `Vm`, no recursive `run_chunk`
@@ -1331,6 +1410,14 @@ impl Vm {
         let mut slots: Vec<Value> = Vec::new();
         let mut slot_base: usize = 0;
         slots.resize(cur.num_slots as usize, Value::Null);
+        // #190 OSR: per-`(chunk, loop header)` back-edge counters (`u32::MAX` = gave up), with a
+        // single-entry fast slot for the loop currently spinning (see the `run_chunk` copy for the
+        // rationale) so a resolved hot loop stays off the HashMap.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut osr_counters: std::collections::HashMap<(usize, usize), u32> =
+            std::collections::HashMap::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut osr_hot: ((usize, usize), u32) = ((usize::MAX, usize::MAX), 0);
         for i in 0..(cur.param_count as usize) {
             if let Some(v) = args.get(i) {
                 if let Some(d) = slots.get_mut(slot_base + i) {
@@ -1455,6 +1542,38 @@ impl Vm {
                 }
                 Opcode::JumpBack => {
                     let dist = Self::read_u16(code, &mut ip) as usize;
+                    // #190 OSR: `ip` now points just past the JumpBack (region end); the loop header is
+                    // `region_end - dist`. Once a loop is hot, try to run its remaining iterations in
+                    // native code (numeric slot loops only; anything else falls straight through).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if Self::osr_enabled() {
+                        let region_end = ip;
+                        let header_ip = ip.saturating_sub(dist);
+                        let key = (Arc::as_ptr(&cur) as usize, header_ip);
+                        if key != osr_hot.0 {
+                            if osr_hot.0 .0 != usize::MAX {
+                                osr_counters.insert(osr_hot.0, osr_hot.1);
+                            }
+                            osr_hot = (key, osr_counters.get(&key).copied().unwrap_or(0));
+                        }
+                        if osr_hot.1 != u32::MAX {
+                            osr_hot.1 = osr_hot.1.saturating_add(1);
+                            if osr_hot.1 >= OSR_THRESHOLD
+                                && (osr_hot.1 - OSR_THRESHOLD) % OSR_RETRY == 0
+                            {
+                                match Self::run_osr(
+                                    &cur, header_ip, region_end, &mut slots, slot_base,
+                                ) {
+                                    OsrResult::Compiled(exit_ip) => {
+                                        ip = exit_ip;
+                                        continue;
+                                    }
+                                    OsrResult::LiveInMiss => {}
+                                    OsrResult::NotCompilable => osr_hot.1 = u32::MAX,
+                                }
+                            }
+                        }
+                    }
                     ip = ip.saturating_sub(dist);
                 }
                 Opcode::Pop => {
@@ -1605,6 +1724,15 @@ impl Vm {
         // frame indexed by slot — no per-call hashmap, no name lookups. Args bind
         // to slots 0..param_count. Empty for name-based chunks.
         let mut slot_locals: Vec<Value> = Vec::new();
+        // #190 OSR: per-loop-header back-edge counters for this frame (`u32::MAX` = gave up). `osr_hot`
+        // is a single-entry fast slot for the loop currently spinning — its header is constant across
+        // iterations, so the common hot loop never touches the HashMap (which is hit only when the
+        // active loop changes: entry, exit, or a nested-loop switch). Keeps the per-back-edge cost of a
+        // resolved loop to two integer compares.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut osr_counters: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut osr_hot: (usize, u32) = (usize::MAX, 0);
         // Frame-local string builder for `acc += x` on a slot local (Opcode::AppendLocal): keeps the
         // accumulator in a growable `sb_buf` so appends are amortized O(1) instead of reallocating the
         // whole string each time. `sb_slot` is the slot currently buffered (at most one). The slot's
@@ -2281,6 +2409,39 @@ impl Vm {
                 }
                 Opcode::JumpBack => {
                     let dist = Self::read_u16(code, &mut ip) as usize;
+                    // #190 OSR: on a hot back-edge, try to finish the loop natively. Slot-based frames
+                    // only (`slot_locals` is the live frame); non-slot / non-numeric loops fail the
+                    // whitelist or the live-in check and fall straight through to the interpreter.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if chunk.slot_based && Self::osr_enabled() {
+                        let region_end = ip;
+                        let header_ip = ip.saturating_sub(dist);
+                        // Switch the fast slot only when the active loop changes: stash the old count,
+                        // load this header's (default 0). The hot loop keeps `header_ip == osr_hot.0`.
+                        if header_ip != osr_hot.0 {
+                            if osr_hot.0 != usize::MAX {
+                                osr_counters.insert(osr_hot.0, osr_hot.1);
+                            }
+                            osr_hot = (header_ip, osr_counters.get(&header_ip).copied().unwrap_or(0));
+                        }
+                        if osr_hot.1 != u32::MAX {
+                            osr_hot.1 = osr_hot.1.saturating_add(1);
+                            if osr_hot.1 >= OSR_THRESHOLD
+                                && (osr_hot.1 - OSR_THRESHOLD) % OSR_RETRY == 0
+                            {
+                                match Self::run_osr(
+                                    chunk, header_ip, region_end, &mut slot_locals, 0,
+                                ) {
+                                    OsrResult::Compiled(exit_ip) => {
+                                        ip = exit_ip;
+                                        continue;
+                                    }
+                                    OsrResult::LiveInMiss => {}
+                                    OsrResult::NotCompilable => osr_hot.1 = u32::MAX,
+                                }
+                            }
+                        }
+                    }
                     ip = ip.saturating_sub(dist);
                 }
                 Opcode::BinOp => {
