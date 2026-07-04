@@ -160,6 +160,20 @@ pub fn jit_jv_enabled() -> bool {
     })
 }
 
+/// Boolean scalar local slots in the numeric CFG JIT (#187). **Default ON**; `TISH_JIT_BOOL_SLOTS=0`
+/// disables it. A `let flag = false` / `flag = true` / `if (flag)` local is represented as an `f64`
+/// `0.0`/`1.0`; a syntactic pre-pass ([`classify_bool_slots`]) tags the slots, and the equality
+/// guard in [`emit_simple_op`] + the return-of-bool bail keep it sound (a bool never reaches a
+/// diverging `bool === number` compare or a boolean function result). Unblocks e.g. fannkuch.
+pub fn jit_bool_slots_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_BOOL_SLOTS")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 /// The self-recursion stack guard (#381). **Default ON**; `TISH_JIT_RECUR_GUARD=0` disables it.
 ///
 /// A JIT'd self-recursive numeric function recurses on the native stack (SelfCall lowers to a native
@@ -1574,8 +1588,19 @@ fn emit_simple_op(
             if stack.len() < 2 {
                 return SimpleOp::Unsupported;
             }
-            let (r, _) = stack.pop().unwrap();
-            let (l, _) = stack.pop().unwrap();
+            let (r, r_bool) = stack.pop().unwrap();
+            let (l, l_bool) = stack.pop().unwrap();
+            // #187: a bool value (from a bool slot or a `LoadConst Bool`) can't take part in an
+            // EQUALITY compare here — the JIT compares the `f64` 0/1 bits, but JS `===`/`!==` (and
+            // strict `==`/`!=`) treat `0 === false` as FALSE across types. Bail so the interpreter
+            // decides. Relational (`<`/`>`/…) coerces bool→0/1 in both, so those stay JIT'd.
+            let is_eq = matches!(
+                bop,
+                BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
+            );
+            if is_eq && (l_bool || r_bool) {
+                return SimpleOp::Unsupported;
+            }
             let is_cmp = matches!(
                 bop,
                 BinOp::Eq
@@ -1740,6 +1765,65 @@ fn chunk_has_self_call(chunk: &Chunk) -> bool {
 /// can't handle anyway. `Some(empty)` = "no local arrays" (the normal numeric path).
 ///
 /// This is a cheap pass over STORES only; the [`build_body_cfg`] emission validates USES by bailing
+/// #187: slots that ever receive a BOOLEAN value, so the numeric JIT can represent them as `f64`
+/// `0.0`/`1.0` instead of bailing at `StoreLocal`. Purely syntactic: a slot is tagged when a
+/// `StoreLocal(slot)` is immediately preceded by an op that pushes a bool — `LoadConst(Bool)`, a
+/// comparison `BinOp` (`==`/`!=`/`===`/`!==`/`<`/`<=`/`>`/`>=`), or `UnaryOp !`. Over-tagging is safe:
+/// a tagged slot only makes its `LoadLocal`s carry `is_bool`, which at worst forces a diverging
+/// `bool === number` compare or a `return bool` to bail to the interpreter (never a miscompile). A
+/// bytecode decode failure stops the scan early (→ fewer tags → more conservative), never a panic.
+fn classify_bool_slots(chunk: &Chunk) -> std::collections::HashSet<usize> {
+    let code = &chunk.code;
+    let mut set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut ip = 0usize;
+    let mut prev_pushes_bool = false;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let size = match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+        if op == Opcode::StoreLocal && prev_pushes_bool {
+            if let Some(s) = peek_u16(code, ip + 1) {
+                set.insert(s as usize);
+            }
+        }
+        prev_pushes_bool = match op {
+            Opcode::LoadConst => matches!(
+                peek_u16(code, ip + 1).and_then(|i| chunk.constants.get(i as usize)),
+                Some(Constant::Bool(_))
+            ),
+            Opcode::BinOp => matches!(
+                peek_u16(code, ip + 1)
+                    .map(|r| r as u8)
+                    .and_then(u8_to_binop),
+                Some(
+                    BinOp::Eq
+                        | BinOp::Ne
+                        | BinOp::StrictEq
+                        | BinOp::StrictNe
+                        | BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                )
+            ),
+            Opcode::UnaryOp => matches!(
+                peek_u16(code, ip + 1)
+                    .map(|r| r as u8)
+                    .and_then(u8_to_unaryop),
+                Some(UnaryOp::Not)
+            ),
+            _ => false,
+        };
+        ip += size;
+    }
+    set
+}
+
 /// on any misuse of a JV ref (it reaching a numeric op, a return, a call arg, a block boundary, …),
 /// so a mis-shaped use never miscompiles — it just falls back to the interpreter.
 fn classify_jv_slots(chunk: &Chunk) -> Option<std::collections::HashSet<usize>> {
@@ -1831,6 +1915,13 @@ fn build_body_cfg(
     if num_slots == 0 || num_slots > 256 {
         return None;
     }
+    // #187: slots that hold a boolean (represented as `f64` 0/1). A `LoadLocal` of one carries
+    // `is_bool` so a diverging `bool === number` compare or a `return bool` bails to the interpreter.
+    let bool_slots = if jit_bool_slots_enabled() {
+        classify_bool_slots(chunk)
+    } else {
+        std::collections::HashSet::new()
+    };
 
     // 1. Validate every opcode is supported + collect block leaders (jump targets, the fall-through
     //    after each branch, entry). Bail on any unsupported opcode (so we never mis-size the scan).
@@ -2078,7 +2169,9 @@ fn build_body_cfg(
                     continue;
                 }
                 let v = *vars.get(slot)?;
-                stack.push((bcx.use_var(v), false));
+                // #187: a bool slot's `f64` 0/1 value carries `is_bool` so downstream equality/return
+                // guards fire; a plain numeric slot pushes `false`.
+                stack.push((bcx.use_var(v), bool_slots.contains(&slot)));
                 ip += 3;
             }
             Opcode::StoreLocal => {
@@ -2092,8 +2185,12 @@ fn build_body_cfg(
                     continue;
                 }
                 let (val, is_bool) = stack.pop()?;
-                if is_bool {
-                    return None; // no boolean slots — keeps result boxing simple
+                // #187: a boolean value may be stored only into a slot the pre-pass tagged as a bool
+                // slot (represented as `f64` 0/1). Any other bool store → bail (keeps unknown shapes
+                // on the interpreter). A numeric store into a bool-tagged slot is fine — the slot is
+                // still an `f64`; its `LoadLocal`s just carry `is_bool` (conservatively).
+                if is_bool && !bool_slots.contains(&slot) {
+                    return None;
                 }
                 let v = *vars.get(slot)?;
                 bcx.def_var(v, val);
@@ -2583,6 +2680,112 @@ mod tests {
         jv_reset_deopt();
         let _ = f.call(&[5.0]); // reads a[2] (past the 2-element array) → OOB
         assert!(jv_take_deopt(), "OOB array access must set the deopt flag");
+    }
+
+    /// #187: compile the first arity-1 plain-numeric (non-JV, non-array) fn in `src` via `compile_chunk`.
+    fn jit_numeric1(src: &str) -> NumericFn {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn compile_uncached(c: &Chunk) -> Option<NumericFn> {
+            if !c.slot_based || c.rest_param_index != NO_REST_PARAM || c.param_count != 1 {
+                return None;
+            }
+            let lock = jit()?;
+            let mut g = lock.lock().ok()?;
+            compile_chunk(&mut g, c)
+        }
+        fn find(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if let Some(f) = compile_uncached(n) {
+                    if !f.is_jv() && f.array_param_mask() == 0 {
+                        return Some(f);
+                    }
+                }
+                if let Some(f) = find(n) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&chunk).expect("the JIT must compile this arity-1 numeric fn (did it start bailing?)")
+    }
+
+    /// #187: a boolean SCALAR local (`let done = false; … done = true; if (done) …`) must JIT — the
+    /// bool is represented as an `f64` 0/1 and drives `if (done)` via the falsy check. Result is the
+    /// numeric accumulator, checked against a closed form (`sum_{i<n} i == n(n-1)/2`), independent of
+    /// the interpreter. Without bool slots this fn bails at the `done = false` StoreLocal → interprets.
+    #[test]
+    fn jit_bool_scalar_slot_flips_and_matches() {
+        // Bounded loop (not `while(true)`) so this exercises the bool slot in isolation — a bool slot
+        // `done` set inside a branch, then driving `if (done)`. `sum_{i<n} i == n(n-1)/2` for all n≥0.
+        let f = jit_numeric1(
+            "function f(n) {\n\
+             let done = false\n\
+             let acc = 0\n\
+             for (let i = 0; i < n; i = i + 1) {\n\
+               acc = acc + i\n\
+               if (i + 1 >= n) { done = true }\n\
+             }\n\
+             if (done) { return acc }\n\
+             return 0\n\
+             }\n\
+             f(0)\n",
+        );
+        for n in [0i64, 1, 2, 10, 100, 1000] {
+            let expect = (n * (n - 1) / 2) as f64;
+            assert_eq!(
+                f.call(&[n as f64]),
+                expect,
+                "bool-slot loop wrong for n={n}"
+            );
+        }
+    }
+
+    /// #187 soundness: a `bool === number` compare must NOT be JIT'd to an `f64` compare (JS says
+    /// `0 === false` / `true === 1` is FALSE across types, but the bits `1.0 === 1.0` are equal). The
+    /// equality guard in `emit_simple_op` bails such a function to the interpreter. This uses a LOOP so
+    /// it reaches the CFG JIT (+ the guard); WITHOUT the guard it would compile and wrongly count every
+    /// iteration (returning n), so the closed-form assertion catches a regression. WITH the guard it
+    /// bails (no `NumericFn`), and the assertion is vacuously satisfied — either way it never miscompiles.
+    #[test]
+    fn jit_bool_eq_number_never_miscompiles() {
+        let src = "function g(n) {\n\
+                   let flag = false\n\
+                   let hits = 0\n\
+                   for (let i = 0; i < n; i = i + 1) {\n\
+                     flag = i >= 0\n\
+                     if (flag === 1) { hits = hits + 1 }\n\
+                   }\n\
+                   return hits\n\
+                   }\n\
+                   g(0)\n";
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        fn first_num1(c: &Chunk) -> Option<NumericFn> {
+            for n in &c.nested {
+                if n.slot_based && n.param_count == 1 {
+                    if let Some(g) =
+                        jit().and_then(|l| l.lock().ok().and_then(|mut g| compile_chunk(&mut g, n)))
+                    {
+                        return Some(g);
+                    }
+                }
+                if let Some(g) = first_num1(n) {
+                    return Some(g);
+                }
+            }
+            None
+        }
+        if let Some(g) = first_num1(&chunk) {
+            // `(i>=0) === 1` is always FALSE in JS, so `hits` must stay 0 — never `n`.
+            assert_eq!(
+                g.call(&[5.0]),
+                0.0,
+                "`bool === 1` must be false → hits stays 0"
+            );
+        }
     }
 
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME
