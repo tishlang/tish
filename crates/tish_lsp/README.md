@@ -15,7 +15,8 @@ Binary: `target/release/tish-lsp` (stdio LSP).
 - Parse diagnostics + lint warnings (via `tish_lint` **library** — use **`tish-lint`** CLI separately in CI)
 - Document symbols, completion, formatting (via `tish_fmt` **library** — use **`tish-fmt`** CLI separately in CI)
 - Go to definition (same file, relative `./` / `../`, bare `node_modules` packages like Node, and native `tish:` / `@scope/pkg` / `cargo:` → Rust `pub fn` via `syn` + `cargo metadata` where configured)
-- Workspace symbol search (`**/*.tish`)
+- Workspace symbol search (`**/*.{tish,d.tish}`), with `$/cancelRequest` support and work-done progress when the client advertises `window.workDoneProgress`
+- Watches `.tish` / `.d.tish` on disk (`workspace/didChangeWatchedFiles`, registered dynamically) so ambient declaration files refresh without a restart
 
 ## Client configuration
 

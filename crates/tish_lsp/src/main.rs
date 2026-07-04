@@ -2,24 +2,29 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use regex::Regex;
 use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::notification::Progress;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
     CompletionTriggerKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
-    DidChangeTextDocumentParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, Location,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf, Position, Range,
-    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo,
-    SymbolInformation, SymbolKind, SymbolTag, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions, WorkspaceEdit,
-    WorkspaceFoldersChangeEvent, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
-    WorkspaceSymbolParams,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher, GlobPattern,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, MessageType, NumberOrString, OneOf, Position, ProgressParams, ProgressParamsValue,
+    Range, ReferenceParams, Registration, RenameOptions, RenameParams,
+    ServerCapabilities, ServerInfo, SymbolInformation, SymbolKind, SymbolTag,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressEnd, WorkDoneProgressOptions,
+    WorkspaceEdit, WorkspaceFoldersChangeEvent, WorkspaceFoldersServerCapabilities,
+    WorkspaceServerCapabilities, WorkspaceSymbolOptions, WorkspaceSymbolParams,
 };
 use tower_lsp::lsp_types::{PrepareRenameResponse, TextEdit};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -51,6 +56,33 @@ struct Backend {
     /// based on divergent root snapshots. Held only across the (blocking) refresh, off the async
     /// driver (#162).
     symbol_refresh: Arc<Mutex<()>>,
+    /// Whether the client advertised `window.workDoneProgress` at `initialize`. Only then may the
+    /// server emit `$/progress` work-done notifications for long requests; otherwise a compliant
+    /// client would reject them (#164).
+    client_work_done_progress: Arc<RwLock<bool>>,
+}
+
+/// RAII cancel flag for a long-running request. tower-lsp aborts the request handler future on
+/// `$/cancelRequest` (or when the client otherwise drops interest), which drops everything the
+/// handler holds. Dropping this guard flips the shared flag, so blocking work handed to
+/// `spawn_blocking` — which the runtime cannot itself abort — observes the cancellation and bails
+/// early instead of running the whole walk and publishing a now-stale result (#164).
+struct CancelGuard(Arc<AtomicBool>);
+
+impl CancelGuard {
+    fn new() -> Self {
+        CancelGuard(Arc::new(AtomicBool::new(false)))
+    }
+    /// A handle the blocking work polls; stays live after the guard drops.
+    fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// One symbol harvested from a workspace file, with its position pre-resolved so answering a query
@@ -87,6 +119,7 @@ async fn main() {
         tishlang_source_root: Arc::new(RwLock::new(None)),
         symbol_index: Arc::new(RwLock::new(HashMap::new())),
         symbol_refresh: Arc::new(Mutex::new(())),
+        client_work_done_progress: Arc::new(RwLock::new(false)),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
@@ -332,6 +365,18 @@ impl LanguageServer for Backend {
         }
         let mut g = self.tishlang_source_root.write().unwrap();
         *g = src_root.filter(|p| p.is_dir());
+        drop(g);
+
+        // Remember whether the client can display work-done progress. Only then does `symbol` emit
+        // `$/progress` begin/report/end for the (potentially slow) workspace crawl — a client that
+        // did not advertise it would reject the notifications (#164).
+        let supports_progress = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|w| w.work_done_progress)
+            .unwrap_or(false);
+        *self.client_work_done_progress.write().unwrap() = supports_progress;
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -351,7 +396,15 @@ impl LanguageServer for Backend {
                 })),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                workspace_symbol_provider: Some(OneOf::Left(true)),
+                // Advertise work-done progress on workspace/symbol so a capable client sends a
+                // `workDoneToken`; the handler reports crawl progress against it and honors
+                // `$/cancelRequest` mid-walk (#164).
+                workspace_symbol_provider: Some(OneOf::Right(WorkspaceSymbolOptions {
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: Some(true),
+                    },
+                    resolve_provider: None,
+                })),
                 // Ask the client to send didChangeWorkspaceFolders so adding/removing a folder in a
                 // multi-root workspace keeps `roots` (and thus the workspace-symbol index) accurate
                 // instead of being frozen at the set captured by `initialize` (#162).
@@ -372,6 +425,35 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: tower_lsp::lsp_types::InitializedParams) {
+        // Dynamically register for `workspace/didChangeWatchedFiles` over `.tish` and `.d.tish`
+        // files so an externally edited declaration (`.d.tish`) or source file refreshes the
+        // workspace-symbol index without a server restart (#161). The client only delivers these
+        // events for globs the server registers; a `.tish` glob does NOT cover `.d.tish` (it has a
+        // compound extension), so both are registered explicitly.
+        let watchers = |glob: &str| FileSystemWatcher {
+            glob_pattern: GlobPattern::String(glob.to_string()),
+            kind: None, // create | change | delete
+        };
+        let reg = Registration {
+            id: "tish-watch-d-tish".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                watchers: vec![watchers("**/*.tish"), watchers("**/*.d.tish")],
+            })
+            .ok(),
+        };
+        // Best-effort: a client that does not support dynamic watched-file registration returns an
+        // error here, which we log and move on from — the mtime-keyed index still self-heals on the
+        // next `workspace/symbol` query.
+        if let Err(e) = self.client.register_capability(vec![reg]).await {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    format!("tish-lsp: watched-files registration skipped: {e}"),
+                )
+                .await;
+        }
+
         self.client
             .log_message(MessageType::INFO, "tish-lsp ready")
             .await;
@@ -387,6 +469,48 @@ impl LanguageServer for Backend {
         }
         self.client
             .log_message(MessageType::INFO, "tish-lsp: workspace folders updated")
+            .await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // React to on-disk `.tish` / `.d.tish` changes the editor is not buffering (created,
+        // externally edited, or deleted) so cross-file declarations refresh without a restart
+        // (#161). Drop the changed path from the mtime-keyed symbol index: a deleted file is
+        // evicted immediately, and a created/changed one is force-reparsed on the next
+        // `workspace/symbol` walk (its cache entry is gone, so the mtime shortcut can't reuse a
+        // stale parse). `.d.tish` files carry the `tish` extension, so both are handled here.
+        let mut invalidated = 0usize;
+        {
+            let mut idx = self.symbol_index.write().unwrap();
+            for change in &params.changes {
+                if let Ok(path) = change.uri.to_file_path() {
+                    if path.extension().map(|x| x == "tish") == Some(true)
+                        && idx.remove(&path).is_some()
+                    {
+                        invalidated += 1;
+                    }
+                }
+            }
+        }
+        // Re-lint any OPEN buffer whose declarations may now have changed. A `.d.tish` supplies
+        // ambient `declare` bindings other buffers depend on, so a change there can flip
+        // unresolved-name diagnostics; recompute open docs against the new on-disk state.
+        let open: Vec<(Url, String)> = {
+            let docs = self.docs.read().unwrap();
+            docs.iter().map(|(u, t)| (u.clone(), t.clone())).collect()
+        };
+        for (uri, text) in open {
+            publish_parse_and_lint(&self.client, uri, text).await;
+        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "tish-lsp: watched files changed ({} index entr{} invalidated)",
+                    invalidated,
+                    if invalidated == 1 { "y" } else { "ies" }
+                ),
+            )
             .await;
     }
 
@@ -422,13 +546,27 @@ impl LanguageServer for Backend {
             let edit_seq = Arc::clone(&self.edit_seq);
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                // Still the latest edit? (superseded-while-debouncing check.)
+                let is_current = |uri: &Url, seq: u64| {
+                    edit_seq.read().unwrap().get(uri).copied() == Some(seq)
+                };
                 // Superseded by a newer edit while we waited — drop this stale recompute.
-                if edit_seq.read().unwrap().get(&uri).copied() != Some(seq) {
+                if !is_current(&uri, seq) {
                     return;
                 }
                 let text = docs.read().unwrap().get(&uri).cloned();
                 if let Some(text) = text {
-                    publish_parse_and_lint(&client, uri, text).await;
+                    // Compute off the async driver, then re-check the sequence: analysis is O(file
+                    // size) and a keystroke can land while it runs, so publishing unconditionally
+                    // would show diagnostics for text the user has already moved past (#164). Bail
+                    // before publishing if this recompute is no longer the latest.
+                    let diags = tokio::task::spawn_blocking(move || compute_diagnostics(&text))
+                        .await
+                        .unwrap_or_default();
+                    if !is_current(&uri, seq) {
+                        return;
+                    }
+                    client.publish_diagnostics(uri, diags, None).await;
                 }
             });
         }
@@ -957,22 +1095,88 @@ impl LanguageServer for Backend {
         let roots_handle = Arc::clone(&self.roots);
         let index = self.symbol_index.clone();
         let refresh = Arc::clone(&self.symbol_refresh);
+
+        // Cancellation (#164). tower-lsp aborts THIS future on `$/cancelRequest`, dropping the guard
+        // and flipping its flag; the flag lives on into the (un-abortable) blocking walk below, which
+        // polls it and bails so we stop burning a blocking thread on a result nobody will read. The
+        // clone kept in this future is what the drop-on-abort sets.
+        let cancel = CancelGuard::new();
+        let cancel_flag = cancel.flag();
+
+        // Work-done progress (#164): only when the client advertised support AND handed us a token to
+        // report against. Bracket the blocking walk with begin/end `$/progress` notifications.
+        let progress_token = params.work_done_progress_params.work_done_token;
+        let show_progress = *self.client_work_done_progress.read().unwrap();
+        let progress_token = progress_token.filter(|_| show_progress);
+        if let Some(ref token) = progress_token {
+            self.send_work_done(
+                token.clone(),
+                WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: "Searching workspace symbols".to_string(),
+                    cancellable: Some(true),
+                    message: Some(format!("query: {query}")),
+                    percentage: None,
+                }),
+            )
+            .await;
+        }
+
         // The crawl + fs-read + parse is CPU/IO-blocking; running it inline stalls tower-lsp's shared
         // request driver (it multiplexes requests without a per-request spawn), so hover/completion
         // in flight would freeze for its duration. Hand it to a blocking thread, and answer from the
         // mtime-keyed index so repeated keystrokes don't re-walk and re-parse the tree (#135).
-        let syms = tokio::task::spawn_blocking(move || {
+        let walk_flag = Arc::clone(&cancel_flag);
+        let result = tokio::task::spawn_blocking(move || {
             // Serialize refreshes and read `roots` fresh under that lock (#162): folders can now
             // change mid-session, and the index's global retain would otherwise let a query carrying
             // a stale/smaller root snapshot evict another concurrent query's still-valid entries.
             // One walk at a time, each over the current roots, makes that impossible.
             let _refresh_guard = refresh.lock().unwrap_or_else(|e| e.into_inner());
             let roots = roots_handle.read().unwrap().clone();
-            refresh_and_query_symbols(&roots, &index, &query)
+            refresh_and_query_symbols(&roots, &index, &query, &walk_flag)
         })
         .await
-        .unwrap_or_default();
-        Ok(Some(syms))
+        .unwrap_or(WalkOutcome::Cancelled);
+
+        if let Some(ref token) = progress_token {
+            self.send_work_done(
+                token.clone(),
+                WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(match &result {
+                        WalkOutcome::Completed(s) => format!("{} symbol(s)", s.len()),
+                        WalkOutcome::Cancelled => "cancelled".to_string(),
+                    }),
+                }),
+            )
+            .await;
+        }
+
+        // Explicitly consume the guard here so it lives across the whole request (not dropped early
+        // by NLL); if we were aborted, this line never runs and the guard's Drop already fired.
+        drop(cancel);
+
+        match result {
+            WalkOutcome::Completed(syms) => Ok(Some(syms)),
+            // The walk saw the cancel flag and stopped early: report cancellation rather than an
+            // empty/partial list the client might cache as authoritative (#164).
+            WalkOutcome::Cancelled => Err(tower_lsp::jsonrpc::Error::request_cancelled()),
+        }
+    }
+}
+
+impl Backend {
+    /// Send a single `$/progress` work-done notification against a client-provided token.
+    async fn send_work_done(
+        &self,
+        token: tower_lsp::lsp_types::ProgressToken,
+        value: WorkDoneProgress,
+    ) {
+        self.client
+            .send_notification::<Progress>(ProgressParams {
+                token,
+                value: ProgressParamsValue::WorkDone(value),
+            })
+            .await;
     }
 }
 
@@ -988,14 +1192,29 @@ fn ws_prune_dir(e: &walkdir::DirEntry) -> bool {
     name == "node_modules" || name == "target" || name.starts_with('.')
 }
 
+/// Outcome of a workspace-symbol walk: the completed result set, or an early cancellation when the
+/// request was aborted mid-crawl (#164). Kept distinct so `symbol` can answer a cancelled walk with
+/// `RequestCancelled` rather than a partial list the client might treat as authoritative.
+#[derive(Debug)]
+enum WalkOutcome {
+    Completed(Vec<SymbolInformation>),
+    Cancelled,
+}
+
 /// Refresh the mtime-keyed symbol index for `roots` (re-parsing only changed/new files, evicting
 /// deleted ones) and return the symbols whose lowercased name contains `query`. Runs on a blocking
 /// thread. Factored out as a free function so it is unit-testable without a live `Backend` (#135).
+///
+/// `cancel` is polled at each directory entry and before the (comparatively cheap) final scan; when
+/// it flips (the request was cancelled — see [`CancelGuard`]) the walk stops early and returns
+/// [`WalkOutcome::Cancelled`] instead of running the whole tree and building a stale result (#164).
+/// Any files already re-parsed before the abort stay cached, so the work is not wasted.
 fn refresh_and_query_symbols(
     roots: &[PathBuf],
     index: &RwLock<HashMap<PathBuf, CachedFile>>,
     query: &str,
-) -> Vec<SymbolInformation> {
+    cancel: &AtomicBool,
+) -> WalkOutcome {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for root in roots {
         for e in WalkDir::new(root)
@@ -1003,6 +1222,11 @@ fn refresh_and_query_symbols(
             .filter_entry(|e| !ws_prune_dir(e))
             .filter_map(|e| e.ok())
         {
+            // Bail as soon as the client cancels: on a large tree the remaining walk+parse is pure
+            // waste once nobody is waiting for the answer.
+            if cancel.load(Ordering::Relaxed) {
+                return WalkOutcome::Cancelled;
+            }
             if !e.file_type().is_file()
                 || e.path().extension().map(|x| x == "tish") != Some(true)
             {
@@ -1035,7 +1259,14 @@ fn refresh_and_query_symbols(
             index.write().unwrap().insert(path, CachedFile { mtime, uri, symbols });
         }
     }
-    // Evict files that vanished from the tree so deleted symbols don't linger in results.
+    // A cancel that lands right as the walk finishes must not run the eviction below: `seen` is only
+    // complete because every root was fully visited, but the caller no longer wants a result, so
+    // stop before mutating the shared index on its behalf.
+    if cancel.load(Ordering::Relaxed) {
+        return WalkOutcome::Cancelled;
+    }
+    // Evict files that vanished from the tree so deleted symbols don't linger in results. Only safe
+    // because the loop above ran to completion (no early cancel), so `seen` is the full file set.
     index.write().unwrap().retain(|p, _| seen.contains(p));
 
     // Answer the query from the now-fresh index.
@@ -1057,7 +1288,7 @@ fn refresh_and_query_symbols(
             }
         }
     }
-    out
+    WalkOutcome::Completed(out)
 }
 
 /// Harvest every top-level (and exported / block-nested) named declaration from a statement into the
@@ -2086,6 +2317,7 @@ mod jsonrpc_integration_tests {
             tishlang_source_root: Arc::new(RwLock::new(None)),
             symbol_index: Arc::new(RwLock::new(HashMap::new())),
             symbol_refresh: Arc::new(Mutex::new(())),
+            client_work_done_progress: Arc::new(RwLock::new(false)),
         });
         service
     }
@@ -2340,6 +2572,83 @@ mod jsonrpc_integration_tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    fn did_change_watched_files(uris: &[&str]) -> Request {
+        // FileChangeType::CHANGED == 2 in the LSP wire encoding.
+        let changes: Vec<serde_json::Value> = uris
+            .iter()
+            .map(|u| serde_json::json!({ "uri": u, "type": 2 }))
+            .collect();
+        Request::build("workspace/didChangeWatchedFiles")
+            .params(serde_json::json!({ "changes": changes }))
+            .finish()
+    }
+
+    // #164: with `window.workDoneProgress` advertised, the server must offer work-done progress on
+    // workspace/symbol so the client sends a `workDoneToken` the handler can report/cancel against.
+    #[tokio::test]
+    async fn initialize_advertises_workspace_symbol_work_done_progress() {
+        let mut service = new_service();
+        let init = Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "capabilities": { "window": { "workDoneProgress": true } }
+            }))
+            .finish();
+        let result = call(&mut service, init).await.expect("initialize must return a result");
+        assert_eq!(
+            result["capabilities"]["workspaceSymbolProvider"]["workDoneProgress"],
+            serde_json::json!(true),
+            "workspace/symbol must advertise workDoneProgress, got {}",
+            result["capabilities"]["workspaceSymbolProvider"]
+        );
+    }
+
+    // #161 end-to-end: after a `.d.tish` is indexed, an on-disk edit delivered via
+    // didChangeWatchedFiles must be reflected on the next workspace/symbol query — the handler
+    // invalidates the cached parse so a fresh one is picked up without a restart. `.d.tish` carries
+    // the `tish` extension, so this also proves declaration files are walked at all.
+    #[tokio::test]
+    async fn did_change_watched_files_refreshes_d_tish_declaration() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+
+        let dir = crate::test_fs::unique_temp_dir("dtish_watch");
+        let decl = dir.join("ambient.d.tish");
+        std::fs::write(&decl, "declare fn oldAmbient(): void\n").unwrap();
+        let folder_uri = Url::from_file_path(&dir).unwrap().to_string();
+        let file_uri = Url::from_file_path(&decl).unwrap().to_string();
+
+        // Register the folder and index the initial declaration.
+        let _ = call(&mut service, did_change_workspace_folders(&[&folder_uri], &[])).await;
+        let before = call(&mut service, symbol_request("oldAmbient")).await.expect("symbol result");
+        assert_eq!(
+            before.as_array().unwrap().len(),
+            1,
+            "the declaration in the .d.tish is indexed, got {before}"
+        );
+
+        // Rewrite the declaration file on disk (distinct mtime) and notify via the watcher.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&decl, "declare fn newAmbient(): void\n").unwrap();
+        let _ = call(&mut service, did_change_watched_files(&[&file_uri])).await;
+
+        // The new declaration is now searchable and the old one is gone — proof the watched-file
+        // change forced a re-parse rather than serving the stale cached symbols.
+        let new_hit = call(&mut service, symbol_request("newAmbient")).await.expect("symbol result");
+        assert_eq!(
+            new_hit.as_array().unwrap().len(),
+            1,
+            "the changed .d.tish declaration is re-indexed, got {new_hit}"
+        );
+        let old_gone = call(&mut service, symbol_request("oldAmbient")).await.expect("symbol result");
+        assert!(
+            old_gone.as_array().unwrap().is_empty(),
+            "the stale declaration must be gone after the watched-file change, got {old_gone}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]
@@ -2431,6 +2740,20 @@ mod workspace_symbol_tests {
         syms.iter().map(|s| s.name.as_str()).collect()
     }
 
+    /// Run a (never-cancelled) walk and unwrap the completed symbol list. Panics if the walk somehow
+    /// reports cancellation, which cannot happen with an always-false flag.
+    fn query(
+        roots: &[PathBuf],
+        index: &RwLock<HashMap<PathBuf, CachedFile>>,
+        q: &str,
+    ) -> Vec<SymbolInformation> {
+        let never = AtomicBool::new(false);
+        match refresh_and_query_symbols(roots, index, q, &never) {
+            WalkOutcome::Completed(s) => s,
+            WalkOutcome::Cancelled => panic!("uncancelled walk must complete"),
+        }
+    }
+
     #[test]
     fn indexes_queries_and_prunes_heavy_dirs() {
         let dir = unique_temp_dir("idx");
@@ -2444,11 +2767,11 @@ mod workspace_symbol_tests {
         let index = RwLock::new(HashMap::new());
         let roots = [dir.clone()];
 
-        let alpha = refresh_and_query_symbols(&roots, &index, "alpha");
+        let alpha = query(&roots, &index, "alpha");
         assert_eq!(names(&alpha), ["alphaFn"], "alphaFn matched; alphaDep pruned under node_modules");
         // case-insensitive substring across kinds
-        assert_eq!(names(&refresh_and_query_symbols(&roots, &index, "beta")), ["betaVar"]);
-        assert_eq!(names(&refresh_and_query_symbols(&roots, &index, "gamma")), ["GammaType"]);
+        assert_eq!(names(&query(&roots, &index, "beta")), ["betaVar"]);
+        assert_eq!(names(&query(&roots, &index, "gamma")), ["GammaType"]);
         // The cache holds exactly the two real workspace files, not the node_modules one.
         assert_eq!(index.read().unwrap().len(), 2, "two .tish files indexed, node_modules pruned");
 
@@ -2463,20 +2786,44 @@ mod workspace_symbol_tests {
         let index = RwLock::new(HashMap::new());
         let roots = [dir.clone()];
 
-        assert_eq!(refresh_and_query_symbols(&roots, &index, "first").len(), 1);
-        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 0);
+        assert_eq!(query(&roots, &index, "first").len(), 1);
+        assert_eq!(query(&roots, &index, "second").len(), 0);
 
         // Rewrite with new content; the newer mtime must invalidate the cached parse. A short sleep
         // guarantees a distinct mtime even on coarse-resolution clocks.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&f, "fn second() {}\n").unwrap();
-        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 1, "re-parsed after edit");
-        assert_eq!(refresh_and_query_symbols(&roots, &index, "first").len(), 0, "stale symbol gone");
+        assert_eq!(query(&roots, &index, "second").len(), 1, "re-parsed after edit");
+        assert_eq!(query(&roots, &index, "first").len(), 0, "stale symbol gone");
 
         // Deleting the file must evict it from the index.
         std::fs::remove_file(&f).unwrap();
-        assert_eq!(refresh_and_query_symbols(&roots, &index, "second").len(), 0, "deleted file evicted");
+        assert_eq!(query(&roots, &index, "second").len(), 0, "deleted file evicted");
         assert!(index.read().unwrap().is_empty(), "index empty after the only file is removed");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // #164: a pre-set cancel flag makes the walk bail before it scans/evicts, returning
+    // `Cancelled` — the signal `symbol` turns into a `RequestCancelled` response instead of a
+    // partial list, and (proven here) it leaves the shared index untouched.
+    #[test]
+    fn cancelled_walk_bails_without_mutating_index() {
+        let dir = unique_temp_dir("cancel");
+        std::fs::write(dir.join("c.tish"), "fn deltaSym() { return 1 }\n").unwrap();
+        let index = RwLock::new(HashMap::new());
+        let roots = [dir.clone()];
+
+        let cancelled = AtomicBool::new(true);
+        let outcome = refresh_and_query_symbols(&roots, &index, "delta", &cancelled);
+        assert!(
+            matches!(outcome, WalkOutcome::Cancelled),
+            "a pre-cancelled walk must report Cancelled"
+        );
+        assert!(
+            index.read().unwrap().is_empty(),
+            "a cancelled walk must not populate the index"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
