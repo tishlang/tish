@@ -1559,7 +1559,7 @@ impl Vm {
                         if osr_hot.1 != u32::MAX {
                             osr_hot.1 = osr_hot.1.saturating_add(1);
                             if osr_hot.1 >= OSR_THRESHOLD
-                                && (osr_hot.1 - OSR_THRESHOLD) % OSR_RETRY == 0
+                                && osr_hot.1.saturating_sub(OSR_THRESHOLD).is_multiple_of(OSR_RETRY)
                             {
                                 match Self::run_osr(
                                     &cur, header_ip, region_end, &mut slots, slot_base,
@@ -2427,7 +2427,7 @@ impl Vm {
                         if osr_hot.1 != u32::MAX {
                             osr_hot.1 = osr_hot.1.saturating_add(1);
                             if osr_hot.1 >= OSR_THRESHOLD
-                                && (osr_hot.1 - OSR_THRESHOLD) % OSR_RETRY == 0
+                                && osr_hot.1.saturating_sub(OSR_THRESHOLD).is_multiple_of(OSR_RETRY)
                             {
                                 match Self::run_osr(
                                     chunk, header_ip, region_end, &mut slot_locals, 0,

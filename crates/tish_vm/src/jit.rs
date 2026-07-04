@@ -675,14 +675,15 @@ fn build_loop_region_body(
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
     let slots_ptr = params[0]; // params[1] = deopt flag, reserved (v1 never writes it)
     let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
-    for slot in 0..num_slots {
+    for (slot, &var) in vars.iter().enumerate() {
+        // Live slots load from their buffer position; slots the region never touches init to 0 (dead).
         let init = if let Some(&p) = buf_pos.get(&(slot as u16)) {
             bcx.ins()
                 .load(types::F64, MemFlags::new(), slots_ptr, (p * 8) as i32)
         } else {
             bcx.ins().f64const(0.0)
         };
-        bcx.def_var(vars[slot], init);
+        bcx.def_var(var, init);
     }
     let header_block = match blocks.get(&header_ip) {
         Some(&b) => b,
