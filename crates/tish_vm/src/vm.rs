@@ -1910,6 +1910,20 @@ impl Vm {
                     // Reserved for the linked-frame upvalue model (not emitted yet).
                     return Err("Upvalue opcodes not supported in this VM build".to_string());
                 }
+                Opcode::MathUnary => {
+                    // #186 — `Math.<fn>(x)` on a number. The compiler only emits this when `Math` is
+                    // the global builtin, so it is behaviour-identical to the general call: a number
+                    // maps through `MathUnaryFn::apply`, a non-number coerces to NaN (matching the
+                    // builtin's `extract_num(..).unwrap_or(NaN)`).
+                    let id = Self::read_u16(code, &mut ip);
+                    let x = match self.stack.pop() {
+                        Some(Value::Number(n)) => n,
+                        Some(_) | None => f64::NAN,
+                    };
+                    let mfn = tishlang_bytecode::MathUnaryFn::from_u16(id)
+                        .ok_or_else(|| format!("Bad MathUnary id: {}", id))?;
+                    self.stack.push(Value::Number(mfn.apply(x)));
+                }
                 Opcode::LoadConst => {
                     let idx = Self::read_u16(code, &mut ip);
                     let c = constants

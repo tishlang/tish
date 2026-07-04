@@ -16,5 +16,5 @@ pub use compiler::{
     compile_with_source, CompileError,
 };
 pub use encoding::{binop_to_u8, compound_op_to_u8, u8_to_binop, u8_to_unaryop, unaryop_to_u8};
-pub use opcode::Opcode;
+pub use opcode::{MathUnaryFn, Opcode};
 pub use serialize::{deserialize, serialize};
