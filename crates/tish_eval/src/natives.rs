@@ -411,6 +411,25 @@ pub fn process_exec(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Number(code as f64))
 }
 
+/// `process.execFile(program, [args])` — run a program directly, without a shell, passing each arg
+/// verbatim (the safe, no-`sh -c` counterpart to `exec`). Returns the exit code. #384
+pub fn process_exec_file(args: &[Value]) -> Result<Value, String> {
+    use std::process::Command;
+    let program = args.first().map(|v| v.to_string()).unwrap_or_default();
+    if program.is_empty() {
+        return Ok(Value::Number(0.0));
+    }
+    let argv: Vec<String> = match args.get(1) {
+        Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    let output = Command::new(&program)
+        .args(&argv)
+        .output()
+        .map_err(|e| format!("execFile failed: {}", e))?;
+    Ok(Value::Number(output.status.code().unwrap_or(1) as f64))
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();

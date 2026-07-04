@@ -302,6 +302,9 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "exec" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exec(args)
             })),
+            "execFile" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::process_exec_file(args)
+            })),
             "argv" => Some(Value::Array(VmRef::new(
                 tishlang_core::process_argv().into_iter().map(|s| Value::String(s.into())).collect(),
             ))),
@@ -323,6 +326,10 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 m.insert(
                     "exec".into(),
                     Value::native(|args: &[Value]| tishlang_runtime::process_exec(args)),
+                );
+                m.insert(
+                    "execFile".into(),
+                    Value::native(|args: &[Value]| tishlang_runtime::process_exec_file(args)),
                 );
                 m.insert(
                     "argv".into(),
@@ -823,6 +830,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         process_obj.insert(
             "exec".into(),
             Value::native(|args: &[Value]| tishlang_runtime::process_exec(args)),
+        );
+        process_obj.insert(
+            "execFile".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::process_exec_file(args)),
         );
         process_obj.insert(
             "argv".into(),
