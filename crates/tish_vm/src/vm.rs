@@ -81,6 +81,11 @@ fn stack_overflow_error() -> Value {
     construct_builtin::error_object("RangeError", "Maximum call stack size exceeded")
 }
 
+/// Headroom (bytes) a self-recursive JIT'd function leaves below the real stack bottom before it
+/// bails (#381). Must cover the bail path plus building the `RangeError` back in the VM; 256 KiB is
+/// comfortably more than either needs while still far larger than a single f64-ABI recursion frame.
+const RECUR_STACK_MARGIN: usize = 256 * 1024;
+
 /// Append the source location of the instruction at `off` to a runtime-error message, e.g.
 /// `Cannot read property 'x' of null (at app.tish:4)` (issue #74). No-ops when the chunk
 /// carries no line table (e.g. deserialized bytecode).
@@ -1094,7 +1099,42 @@ impl tishlang_core::Callable for VmClosure {
                             }
                         }
                         if all_numbers {
-                            let res = nf.call(&nums[..arity]);
+                            // #381: a self-recursive JIT'd function carries a RecurGuard so it bails
+                            // (rather than overflowing the native stack) when the recursion nears the
+                            // real remaining stack. On a bail we raise the same catchable RangeError as
+                            // the non-JIT paths — tish's deopt tier producing the throw, not the JIT.
+                            let res = if nf.recur_guarded() {
+                                let anchor = 0u8;
+                                let current_sp = &anchor as *const u8 as usize;
+                                // `stack_limit` = the stack address below which we bail, leaving a
+                                // headroom margin. If the remaining stack is unknown we pass 0 (SP is
+                                // never below 0 → never trips), i.e. behave as before.
+                                let stack_limit = match stacker::remaining_stack() {
+                                    Some(rem) => {
+                                        // Cap the margin at half of what's left: when a JIT'd function
+                                        // is first entered on an already-deep stack (rem < margin),
+                                        // `bottom + margin` would sit ABOVE the current SP and trip on
+                                        // the very first call — a false positive on shallow recursion.
+                                        // Capping keeps the limit strictly below SP for any rem, while
+                                        // still bailing with real headroom to spare.
+                                        let margin = RECUR_STACK_MARGIN.min(rem / 2);
+                                        current_sp.saturating_sub(rem).saturating_add(margin)
+                                    }
+                                    None => 0,
+                                };
+                                let mut guard = crate::jit::RecurGuard {
+                                    stack_limit,
+                                    tripped: 0,
+                                };
+                                let r = nf.call_guarded(&nums[..arity], &mut guard);
+                                if guard.tripped != 0 {
+                                    set_pending_throw(stack_overflow_error());
+                                    return Value::Null;
+                                }
+                                r
+                            } else {
+                                nf.call(&nums[..arity])
+                            };
                             return if nf.result_is_bool() {
                                 Value::Bool(res != 0.0)
                             } else {
@@ -3742,5 +3782,34 @@ mod recursion_limit_tests_381 {
         let out = run_src("fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(15)");
         set_max_call_depth_for_test(DEFAULT_MAX_CALL_DEPTH);
         assert!(out.is_ok(), "normal recursion must not be affected: {out:?}");
+    }
+
+    // The core of #381 for the JIT tier: a pure-numeric self-recursive function JIT-compiles and
+    // recurses on the native stack via SelfCall, BELOW the VM's depth counter (so `set_max_call_depth`
+    // can't bound it). Without the guard this overflows the native stack — an uncatchable SIGSEGV/abort
+    // that would kill the whole process. With it, the entry SP check turns the overflow into a
+    // RangeError which, uncaught, must surface as a returned `Err`. Run on a bounded-stack thread so
+    // the guard (or, on a regression, the overflow) is reached fast: a working guard lets the thread
+    // `join` cleanly with the error flag; a broken one aborts the process (the loud regression signal).
+    #[test]
+    fn jit_deep_recursion_surfaces_error_not_abort() {
+        // `Value` is `!Send` (holds `Rc`), so reduce to a Send bool inside the thread: true iff the
+        // overflow surfaced as the catchable stack-overflow error rather than aborting.
+        let handle = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                matches!(
+                    run_src(
+                        "fn dive(n) { if (n <= 0.0) { return 0.0 } return dive(n - 1.0) + 1.0 }\n\
+                         dive(50000000.0)",
+                    ),
+                    Err(ref e) if e.contains("call stack")
+                )
+            })
+            .expect("spawn");
+        let surfaced = handle
+            .join()
+            .expect("thread must not abort — the guard must catch the overflow");
+        assert!(surfaced, "uncaught JIT deep recursion must surface as a RangeError, not abort");
     }
 }
