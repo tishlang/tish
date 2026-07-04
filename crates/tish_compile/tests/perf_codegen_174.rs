@@ -73,8 +73,12 @@ fn issue_174_fnv_accumulator_still_i32_register_no_regression() {
 
 #[test]
 fn issue_174_range_proven_counter_drops_is_finite_guard() {
-    // A loop counter masked into a bitwise op is range-proven integral, so its ToInt32 drops the
-    // is_finite guard (unchecked truncation) instead of a guarded `to_int32(i)` call.
+    // A loop counter masked into a bitwise op is range-proven integral, so its ToInt32 must not
+    // round-trip through the guarded `to_int32(i)` call. The guard-free lowering is the saturating
+    // `(i) as i64 as i32` cast — #380 (PR #387) replaced the original `to_int_unchecked::<i64>()`
+    // here because `int_valued_locals` proves integrality but not magnitude, making the unchecked
+    // truncation UB on an overflowing accumulator; the saturating cast is defined for all f64 at
+    // the same hot-path cost (fnv_hash/fannkuch/mandelbrot measured at baseline in #387).
     let src = r#"
 let acc = 0
 for (let i = 0; i < 64; i = i + 1) {
@@ -84,9 +88,20 @@ console.log(acc >>> 0)
 "#;
     let rust = compile(&parse(src).unwrap()).unwrap();
     assert!(
-        rust.contains("to_int_unchecked::<i64>()"),
-        "a range-proven counter `i` in `i & 15` must drop the is_finite guard:\n{}",
+        rust.contains("as i64 as i32"),
+        "a range-proven counter `i` in `i & 15` must lower to the guard-free saturating cast:\n{}",
         rust.lines().filter(|l| l.contains("acc") || l.contains("to_int")).take(8).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        !rust.contains("to_int32(i)"),
+        "a range-proven counter must not round-trip through the guarded to_int32 call:\n{}",
+        rust.lines().filter(|l| l.contains("to_int32(")).take(8).collect::<Vec<_>>().join("\n")
+    );
+    // Nothing in this program is the bounded `(h * C) >>> 0` excursion shape, so the UB-prone
+    // unchecked truncation must not appear at all (#380).
+    assert!(
+        !rust.contains("to_int_unchecked"),
+        "no unchecked truncation may appear for an unbounded-magnitude program"
     );
 }
 

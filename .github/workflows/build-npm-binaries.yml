@@ -162,10 +162,13 @@ jobs:
         with:
           tool: nextest,cargo-llvm-cov
 
-      # Restore cache from compile job, then run tests and coverage.
+      # Restore cache from compile job, then run tests and coverage. tishlang_compile is included
+      # explicitly: its generated-Rust text assertions (crates/tish_compile/tests/*) run under no
+      # other package, and PR #387 merged green while breaking one because only tishlang +
+      # tishlang_vm were tested here.
       - name: Run tests and coverage
         run: |
-          ./scripts/ci_build_retry.sh cargo llvm-cov nextest -p tishlang -p tishlang_vm --features full --no-fail-fast --profile ci \
+          ./scripts/ci_build_retry.sh cargo llvm-cov nextest -p tishlang -p tishlang_vm -p tishlang_compile --features full --no-fail-fast --profile ci \
             --lcov --output-path lcov.info
           mkdir -p test-results
           cp target/nextest/ci/junit.xml test-results/junit.xml
