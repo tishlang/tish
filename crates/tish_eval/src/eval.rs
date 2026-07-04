@@ -4109,8 +4109,13 @@ impl Evaluator {
         }
     }
 
-    fn json_stringify_value(v: &Value) -> String {
-        match v {
+    /// #381 — ancestor-guarded like `tishlang_core::json_stringify_into_guarded`: a back-edge to an
+    /// ancestor (`a.self = a`) is a cycle and returns `Err(())` instead of recursing forever (this
+    /// was an unguarded native-stack overflow → uncatchable abort; core's guard from #389 never
+    /// covered the interpreter's own stringifier). Ancestor-path only, not all-visited: a node
+    /// repeated across sibling branches is a legal DAG and must serialize twice.
+    fn json_stringify_value(v: &Value, ancestors: &mut Vec<*const ()>) -> Result<String, ()> {
+        Ok(match v {
             Value::Null => "null".to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Number(n) => {
@@ -4130,28 +4135,39 @@ impl Evaluator {
                     .replace('\t', "\\t")
             ),
             Value::Array(arr) => {
-                let inner: Vec<String> = arr
-                    .borrow()
-                    .iter()
-                    .map(Self::json_stringify_value)
-                    .collect();
+                let ptr = Rc::as_ptr(arr) as *const ();
+                if ancestors.contains(&ptr) {
+                    return Err(());
+                }
+                ancestors.push(ptr);
+                let borrowed = arr.borrow();
+                let mut inner: Vec<String> = Vec::with_capacity(borrowed.len());
+                for item in borrowed.iter() {
+                    inner.push(Self::json_stringify_value(item, ancestors)?);
+                }
+                drop(borrowed);
+                ancestors.pop();
                 format!("[{}]", inner.join(","))
             }
             Value::Object(map) => {
+                let ptr = Rc::as_ptr(map) as *const ();
+                if ancestors.contains(&ptr) {
+                    return Err(());
+                }
+                ancestors.push(ptr);
                 // Insertion order (PropMap is an IndexMap) — matches JS/Node and the
                 // VM/rust backends. No key sort.
-                let entries: Vec<String> = map
-                    .borrow()
-                    .strings
-                    .iter()
-                    .map(|(k, v)| {
-                        format!(
-                            "\"{}\":{}",
-                            k.replace('\\', "\\\\").replace('"', "\\\""),
-                            Self::json_stringify_value(v)
-                        )
-                    })
-                    .collect();
+                let borrowed = map.borrow();
+                let mut entries: Vec<String> = Vec::with_capacity(borrowed.strings.len());
+                for (k, v) in borrowed.strings.iter() {
+                    entries.push(format!(
+                        "\"{}\":{}",
+                        k.replace('\\', "\\\\").replace('"', "\\\""),
+                        Self::json_stringify_value(v, ancestors)?
+                    ));
+                }
+                drop(borrowed);
+                ancestors.pop();
                 format!("{{{}}}", entries.join(","))
             }
             Value::Symbol(_) => "null".to_string(),
@@ -4170,7 +4186,7 @@ impl Evaluator {
             #[cfg(feature = "regex")]
             Value::RegExp(_) => "null".to_string(),
             Value::Opaque(_) | Value::OpaqueMethod(_, _) => "null".to_string(),
-        }
+        })
     }
 
     // Static native wrapper functions (these need to be fn pointers, not closures with &self)
@@ -4181,7 +4197,13 @@ impl Evaluator {
 
     fn json_stringify_native(args: &[Value]) -> Result<Value, String> {
         let v = args.first().cloned().unwrap_or(Value::Null);
-        Ok(Value::String(Self::json_stringify_value(&v).into()))
+        let mut ancestors: Vec<*const ()> = Vec::new();
+        match Self::json_stringify_value(&v, &mut ancestors) {
+            Ok(s) => Ok(Value::String(s.into())),
+            // Surfaced by `call_func` as `EvalError::Error`, which the Try handler boxes as
+            // `{ name: "TypeError", message }` — node-identical for the circular case (#381).
+            Err(()) => Err("Converting circular structure to JSON".to_string()),
+        }
     }
 
     fn object_keys(args: &[Value]) -> Result<Value, String> {
