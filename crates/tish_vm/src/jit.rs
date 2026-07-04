@@ -34,6 +34,48 @@ use cranelift_module::{Linkage, Module};
 use tishlang_ast::{BinOp, UnaryOp};
 use tishlang_bytecode::{u8_to_binop, u8_to_unaryop, Chunk, Constant, Opcode, NO_REST_PARAM};
 
+/// A JIT-compiled hot LOOP REGION for on-stack replacement (#190). Unlike [`NumericFn`] (a whole
+/// function over register-`f64` params), this is native code over a chunk's **numeric slot frame**:
+/// the VM copies the region's live-in slots into an `f64` buffer, calls the region, then copies the
+/// live-outs back. ABI: `extern "C" fn(slots: *mut f64, deopt: *mut u8) -> i32`, returning the EXIT
+/// id (index into [`exits`]). `deopt` is reserved (a `*mut u8` flag): the v1 whitelist is pure numeric
+/// slot math, which cannot deopt mid-run, so it is never set — it keeps the ABI stable for the future
+/// array/property regions that will need a bail path. The pointer is into the never-freed `JITModule`.
+#[derive(Clone)]
+pub struct LoopFn {
+    ptr: usize,
+    /// Slots read or written inside the region — the live set. The `f64` buffer is indexed by
+    /// POSITION here (buffer slot `p` ↔ chunk slot `used_slots[p]`); the emitted code loads/stores at
+    /// that same position, so the VM and the native code agree without threading slot numbers.
+    pub used_slots: Vec<u16>,
+    /// Exit id → the chunk `ip` to resume interpreting at (a loop-exit / `break` target outside the
+    /// region). The region always has ≥1 exit (an exit-less region would be an uninterruptible native
+    /// loop, so compilation bails).
+    pub exits: Vec<usize>,
+}
+
+// SAFETY: identical to `NumericFn` — `ptr` is immutable executable code in the process-global,
+// never-dropped `JITModule`; the slot buffer is caller-owned. Send/Sync so the frame VM (which may
+// run on any thread) can hold a cached `LoopFn`.
+unsafe impl Send for LoopFn {}
+unsafe impl Sync for LoopFn {}
+
+impl LoopFn {
+    /// Run the region. `buf` holds the live-ins (`used_slots.len()` `f64`s), updated in place with the
+    /// live-outs on return. `deopt` is a 1-byte flag (unused in v1). Returns the exit id. Safe wrapper
+    /// — the raw-pointer transmute (same soundness as [`NumericFn::call`]: immutable native code with a
+    /// fixed C ABI) is confined here, so call sites need no `unsafe`.
+    #[inline]
+    pub fn call(&self, buf: &mut [f64], deopt: &mut u8) -> i32 {
+        // SAFETY: `ptr` is immutable executable code compiled for exactly this `(*mut f64, *mut u8)`
+        // ABI; `buf`/`deopt` are valid for the call and the region only touches `buf[0..used_slots]`.
+        unsafe {
+            let f: extern "C" fn(*mut f64, *mut u8) -> i32 = std::mem::transmute(self.ptr);
+            f(buf.as_mut_ptr(), deopt as *mut u8)
+        }
+    }
+}
+
 /// A JIT-compiled numeric function: a pointer to native code plus its arity.
 /// The pointer is into a leaked, never-freed `JITModule`, so it is valid for the
 /// life of the process and safe to call from any thread.
@@ -298,6 +340,10 @@ struct JitGlobal {
     /// reused by a different chunk, so we recompile (and overwrite) instead of returning stale native
     /// code. `None` still caches "not JIT-eligible". See [`chunk_fingerprint`].
     cache: HashMap<usize, (u64, Option<NumericFn>)>,
+    /// OSR loop-region cache (#190), keyed by `(chunk address, loop header ip)` with the same
+    /// fingerprint guard as `cache`. `None` caches "region not compilable" so a loop that fails the
+    /// whitelist is scanned once, not on every back-edge past the trigger threshold.
+    osr_cache: HashMap<(usize, usize), (u64, Option<LoopFn>)>,
     counter: usize,
 }
 
@@ -328,6 +374,7 @@ fn jit() -> Option<&'static Mutex<JitGlobal>> {
             Mutex::new(JitGlobal {
                 module,
                 cache: HashMap::new(),
+                osr_cache: HashMap::new(),
                 counter: 0,
             })
         })
@@ -427,6 +474,399 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
     let result = compile_chunk(&mut g, chunk);
     g.cache.insert(key, (fp, result));
     result
+}
+
+/// Compile the hot loop region `[header_ip, region_end)` of `chunk` to native code (#190 OSR), or
+/// `None` if it is not a pure-numeric slot loop. Cached per `(chunk, header_ip)` with a fingerprint
+/// guard (negative results included, so a non-compilable loop is scanned once). Called from the frame
+/// VM's `JumpBack` handler once a loop's back-edge counter crosses the trigger threshold.
+pub fn try_compile_loop(chunk: &Chunk, header_ip: usize, region_end: usize) -> Option<LoopFn> {
+    let key = (chunk as *const Chunk as usize, header_ip);
+    let fp = chunk_fingerprint(chunk);
+    let lock = jit()?;
+    let mut g = lock.lock().ok()?;
+    if let Some((cached_fp, cached)) = g.osr_cache.get(&key) {
+        if *cached_fp == fp {
+            return cached.clone();
+        }
+    }
+    let result = compile_loop_region(&mut g, chunk, header_ip, region_end);
+    g.osr_cache.insert(key, (fp, result.clone()));
+    result
+}
+
+/// Lower one hot loop region to a `LoopFn`. The region must be pure numeric slot math: the same
+/// opcode whitelist as [`build_body_cfg`] minus everything that touches a non-slot value (calls,
+/// member/index, arrays, objects, `LoadVar`, `Return`). Reuses [`emit_simple_op`] for the arithmetic
+/// so the region is bit-for-bit identical to the interpreter's `eval_binop`. Live-ins are loaded from
+/// the `slots` pointer at entry; each loop-exit target stores the live set back and returns its id.
+fn compile_loop_region(
+    g: &mut JitGlobal,
+    chunk: &Chunk,
+    header_ip: usize,
+    region_end: usize,
+) -> Option<LoopFn> {
+    let code = &chunk.code;
+    let num_slots = chunk.num_slots as usize;
+    if num_slots == 0 || num_slots > 256 || header_ip >= region_end || region_end > code.len() {
+        return None;
+    }
+
+    // 1. Scan the region: validate the whitelist (op_size = None ⇒ bail), collect in-region block
+    //    leaders, the live slot set, and the EXIT targets (jump targets outside the region). A
+    //    JumpBack must stay inside the region (its own loop, possibly nested); one leaving the region
+    //    is not a structured single-region loop → bail.
+    let mut leaders: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    leaders.insert(header_ip);
+    let mut used: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+    let mut exit_targets: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut ip = header_ip;
+    while ip < region_end {
+        let op = Opcode::from_u8(*code.get(ip)?)?;
+        match op {
+            // Pure slot / stack / arithmetic / structured control flow — the region vocabulary.
+            Opcode::Nop
+            | Opcode::Pop
+            | Opcode::Dup
+            | Opcode::EnterBlock
+            | Opcode::ExitBlock
+            | Opcode::LoopVarsEnd
+            | Opcode::LoopVarsBegin
+            | Opcode::UnaryOp => {}
+            Opcode::LoadLocal | Opcode::StoreLocal => {
+                used.insert(peek_u16(code, ip + 1)?);
+            }
+            Opcode::LoadConst => match chunk.constants.get(peek_u16(code, ip + 1)? as usize) {
+                Some(Constant::Number(_)) | Some(Constant::Bool(_)) => {}
+                _ => return None, // a String/Null/Closure const is not numeric slot math
+            },
+            Opcode::BinOp => {
+                // Reject non-numeric binops up front (Pow/In/logical) so the scan and the emit agree.
+                match peek_u16(code, ip + 1).map(|r| r as u8).and_then(u8_to_binop)? {
+                    BinOp::And | BinOp::Or | BinOp::Pow | BinOp::In => return None,
+                    _ => {}
+                }
+            }
+            Opcode::Jump => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                let t = ((ip + 3) as isize + off).max(0) as usize;
+                if t < header_ip || t >= region_end {
+                    exit_targets.insert(t);
+                } else {
+                    leaders.insert(t);
+                }
+            }
+            Opcode::JumpIfFalse => {
+                let off = peek_u16(code, ip + 1)? as i16 as isize;
+                let t = ((ip + 3) as isize + off).max(0) as usize;
+                if t < header_ip || t >= region_end {
+                    exit_targets.insert(t);
+                } else {
+                    leaders.insert(t);
+                }
+                leaders.insert(ip + 3); // fall-through
+            }
+            Opcode::JumpBack => {
+                let dist = peek_u16(code, ip + 1)? as usize;
+                let t = (ip + 3).checked_sub(dist)?;
+                if t < header_ip || t >= region_end {
+                    return None; // back-edge leaving the region — not a single structured region
+                }
+                leaders.insert(t);
+            }
+            // Everything else (Call, SelfCall, LoadVar, GetIndex, member/object/array, Return, …)
+            // reads or writes a non-slot Value the f64 buffer can't carry → not OSR-eligible.
+            _ => return None,
+        }
+        ip += op_size(op)?;
+    }
+    // An exit-less region would compile to an uninterruptible native infinite loop — never OSR it.
+    if exit_targets.is_empty() {
+        return None;
+    }
+
+    // buffer position of each live slot (both the emitted loads/stores and the VM copy use this).
+    let used_slots: Vec<u16> = used.iter().copied().collect();
+    let buf_pos: HashMap<u16, usize> = used_slots
+        .iter()
+        .enumerate()
+        .map(|(p, &s)| (s, p))
+        .collect();
+    let exits: Vec<usize> = exit_targets.iter().copied().collect();
+    let exit_id: HashMap<usize, usize> = exits.iter().enumerate().map(|(i, &t)| (t, i)).collect();
+
+    // 2. Build the region function. Signature: (slots: i64 ptr, deopt: i64 ptr) -> i32 exit id.
+    let ptr_ty = g.module.target_config().pointer_type();
+    let mut sig = g.module.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // slots buffer
+    sig.params.push(AbiParam::new(ptr_ty)); // deopt flag (reserved)
+    sig.returns.push(AbiParam::new(types::I32));
+
+    let name = format!("tish_osr_{}", g.counter);
+    g.counter += 1;
+    let id = g.module.declare_function(&name, Linkage::Export, &sig).ok()?;
+
+    let mut ctx = g.module.make_context();
+    ctx.func.signature = sig.clone();
+    let mut fbctx = FunctionBuilderContext::new();
+    let built = build_loop_region_body(
+        &mut ctx.func,
+        &mut fbctx,
+        chunk,
+        header_ip,
+        region_end,
+        &leaders,
+        &used_slots,
+        &buf_pos,
+        &exit_id,
+    );
+    if !built {
+        g.module.clear_context(&mut ctx);
+        return None;
+    }
+    if g.module.define_function(id, &mut ctx).is_err() {
+        g.module.clear_context(&mut ctx);
+        return None;
+    }
+    g.module.clear_context(&mut ctx);
+    if g.module.finalize_definitions().is_err() {
+        return None;
+    }
+    let fptr = g.module.get_finalized_function(id);
+    Some(LoopFn {
+        ptr: fptr as usize,
+        used_slots,
+        exits,
+    })
+}
+
+/// Emit the CLIF body of a loop region (#190). `true` on success; `false` on any shape the emitter
+/// can't lower (the caller then negative-caches the region). Structure mirrors [`build_body_cfg`]'s
+/// translate loop, but: slots load from / store to the `slots` pointer instead of register params,
+/// and a jump/branch to an EXIT target lands in an exit block that writes the live set back and
+/// returns the exit id. No self-call, no arrays, no `Return` (all rejected in the scan).
+#[allow(clippy::too_many_arguments)]
+fn build_loop_region_body(
+    func: &mut cranelift::codegen::ir::Function,
+    fbctx: &mut FunctionBuilderContext,
+    chunk: &Chunk,
+    header_ip: usize,
+    region_end: usize,
+    leaders: &std::collections::BTreeSet<usize>,
+    used_slots: &[u16],
+    buf_pos: &HashMap<u16, usize>,
+    exit_id: &HashMap<usize, usize>,
+) -> bool {
+    let code = &chunk.code;
+    let num_slots = chunk.num_slots as usize;
+    let mut bcx = FunctionBuilder::new(func, fbctx);
+
+    let blocks: HashMap<usize, Block> =
+        leaders.iter().map(|&o| (o, bcx.create_block())).collect();
+    let exit_blocks: HashMap<usize, Block> =
+        exit_id.keys().map(|&t| (t, bcx.create_block())).collect();
+
+    // A jump target is either an in-region leader or a loop-exit target (the scan proved it is one).
+    let target_block = |t: usize| -> Option<Block> {
+        blocks.get(&t).or_else(|| exit_blocks.get(&t)).copied()
+    };
+
+    // Entry: load the live-in slots from the buffer, then jump into the loop header.
+    let entry = bcx.create_block();
+    bcx.append_block_params_for_function_params(entry);
+    bcx.switch_to_block(entry);
+    let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
+    let slots_ptr = params[0]; // params[1] = deopt flag, reserved (v1 never writes it)
+    let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
+    for (slot, &var) in vars.iter().enumerate() {
+        // Live slots load from their buffer position; slots the region never touches init to 0 (dead).
+        let init = if let Some(&p) = buf_pos.get(&(slot as u16)) {
+            bcx.ins()
+                .load(types::F64, MemFlags::new(), slots_ptr, (p * 8) as i32)
+        } else {
+            bcx.ins().f64const(0.0)
+        };
+        bcx.def_var(var, init);
+    }
+    let header_block = match blocks.get(&header_ip) {
+        Some(&b) => b,
+        None => return false,
+    };
+    bcx.ins().jump(header_block, &[]);
+
+    // Translate the region. Operand stack is empty at every block boundary (statement-level flow).
+    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    bcx.switch_to_block(header_block);
+    let mut cur = header_block;
+    let mut terminated = false;
+    let mut ip = header_ip;
+    while ip < region_end {
+        if let Some(&blk) = blocks.get(&ip) {
+            if blk != cur {
+                if !terminated {
+                    if !stack.is_empty() {
+                        return false;
+                    }
+                    bcx.ins().jump(blk, &[]);
+                }
+                bcx.switch_to_block(blk);
+                cur = blk;
+                terminated = false;
+                stack.clear();
+            }
+        }
+        let op = match Opcode::from_u8(code[ip]).zip(op_size_at(code, ip)) {
+            Some((o, _)) => o,
+            None => return false,
+        };
+        if terminated {
+            ip += match op_size(op) {
+                Some(s) => s,
+                None => return false,
+            };
+            continue;
+        }
+        match op {
+            Opcode::LoadLocal => {
+                let slot = match peek_u16(code, ip + 1) {
+                    Some(s) => s as usize,
+                    None => return false,
+                };
+                let v = match vars.get(slot) {
+                    Some(v) => *v,
+                    None => return false,
+                };
+                stack.push((bcx.use_var(v), false));
+                ip += 3;
+            }
+            Opcode::StoreLocal => {
+                let slot = match peek_u16(code, ip + 1) {
+                    Some(s) => s as usize,
+                    None => return false,
+                };
+                let (val, is_bool) = match stack.pop() {
+                    Some(x) => x,
+                    None => return false,
+                };
+                if is_bool {
+                    return false; // no boolean slots (keeps the number/bool distinction clean)
+                }
+                let v = match vars.get(slot) {
+                    Some(v) => *v,
+                    None => return false,
+                };
+                bcx.def_var(v, val);
+                ip += 3;
+            }
+            Opcode::Pop => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+                ip += 1;
+            }
+            Opcode::Dup => {
+                let top = match stack.last() {
+                    Some(x) => *x,
+                    None => return false,
+                };
+                stack.push(top);
+                ip += 1;
+            }
+            Opcode::Nop | Opcode::EnterBlock | Opcode::ExitBlock | Opcode::LoopVarsEnd => ip += 1,
+            Opcode::LoopVarsBegin => ip += 3,
+            Opcode::Jump => {
+                let off = match peek_u16(code, ip + 1) {
+                    Some(o) => o as i16 as isize,
+                    None => return false,
+                };
+                let t = ((ip + 3) as isize + off).max(0) as usize;
+                let blk = match target_block(t) {
+                    Some(b) => b,
+                    None => return false,
+                };
+                if !stack.is_empty() {
+                    return false;
+                }
+                bcx.ins().jump(blk, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            Opcode::JumpBack => {
+                let dist = match peek_u16(code, ip + 1) {
+                    Some(d) => d as usize,
+                    None => return false,
+                };
+                let t = match (ip + 3).checked_sub(dist) {
+                    Some(t) => t,
+                    None => return false,
+                };
+                let blk = match blocks.get(&t) {
+                    Some(&b) => b,
+                    None => return false,
+                };
+                if !stack.is_empty() {
+                    return false;
+                }
+                bcx.ins().jump(blk, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            Opcode::JumpIfFalse => {
+                let off = match peek_u16(code, ip + 1) {
+                    Some(o) => o as i16 as isize,
+                    None => return false,
+                };
+                let (cond, _) = match stack.pop() {
+                    Some(x) => x,
+                    None => return false,
+                };
+                if !stack.is_empty() {
+                    return false;
+                }
+                let falsy = falsy_flag(&mut bcx, cond);
+                let t = ((ip + 3) as isize + off).max(0) as usize;
+                let target = match target_block(t) {
+                    Some(b) => b,
+                    None => return false,
+                };
+                let fallthrough = match blocks.get(&(ip + 3)) {
+                    Some(&b) => b,
+                    None => return false,
+                };
+                bcx.ins().brif(falsy, target, &[], fallthrough, &[]);
+                terminated = true;
+                ip += 3;
+            }
+            _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &[], 0) {
+                SimpleOp::Handled(_) => {}
+                _ => return false, // LoadConst/BinOp/UnaryOp handled; anything else → keep interpreting
+            },
+        }
+    }
+    if !terminated {
+        return false; // the region must end on its back-edge (a terminator)
+    }
+
+    // Exit blocks: flush the live set back through the slots pointer and return the exit id.
+    for (&t, &blk) in &exit_blocks {
+        bcx.switch_to_block(blk);
+        for (p, &slot) in used_slots.iter().enumerate() {
+            let v = bcx.use_var(vars[slot as usize]);
+            bcx.ins()
+                .store(MemFlags::new(), v, slots_ptr, (p * 8) as i32);
+        }
+        let id = bcx.ins().iconst(types::I32, exit_id[&t] as i64);
+        bcx.ins().return_(&[id]);
+    }
+
+    bcx.seal_all_blocks();
+    bcx.finalize();
+    true
+}
+
+/// `op_size` of the opcode at `off`, or `None` if the byte is not a known opcode.
+fn op_size_at(code: &[u8], off: usize) -> Option<usize> {
+    op_size(Opcode::from_u8(*code.get(off)?)?)
 }
 
 /// Lower `f64` comparison to `1.0`/`0.0` (JS boolean-in-number form).
@@ -1435,5 +1875,80 @@ mod tests {
             assert_eq!(shr.call(&[a, b]), to_int32(a).wrapping_shr(to_uint32(b)) as f64, ">> {a} {b}");
             assert_eq!(ushr.call(&[a, b]), to_uint32(a).wrapping_shr(to_uint32(b)) as f64, ">>> {a} {b}");
         }
+    }
+
+    /// Top-level chunk of compiled `src` (where hot loops live) — #190 OSR targets these.
+    fn top_chunk(src: &str) -> Chunk {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        tishlang_bytecode::compile(&opt).expect("compile")
+    }
+
+    /// `(header_ip, region_end)` of the FIRST loop in `chunk` — its first `JumpBack` names the region
+    /// the OSR trigger would compile.
+    fn first_region(chunk: &Chunk) -> (usize, usize) {
+        let code = &chunk.code;
+        let mut ip = 0;
+        while ip < code.len() {
+            let op = Opcode::from_u8(code[ip]).expect("op");
+            if op == Opcode::JumpBack {
+                let dist = peek_u16(code, ip + 1).unwrap() as usize;
+                let region_end = ip + 3;
+                return (region_end - dist, region_end);
+            }
+            ip += op.instruction_size(code, ip).unwrap_or(1);
+        }
+        panic!("no JumpBack (loop) in chunk");
+    }
+
+    /// #190 — the region compiler + `LoopFn` ABI run a real numeric loop end-to-end (independent of
+    /// the VM dispatch loop): `while (i < 10) { s = s + i; i = i + 1 }` from all-zero live-ins must
+    /// leave `s = 45`, `i = 10` in the live slots and return an in-range exit id, without deopting.
+    #[test]
+    fn osr_region_runs_numeric_loop() {
+        let chunk =
+            top_chunk("let s = 0.0\nlet i = 0.0\nwhile (i < 10.0) { s = s + i; i = i + 1.0 }\n");
+        let (header, end) = first_region(&chunk);
+        let lf = try_compile_loop(&chunk, header, end).expect("pure-numeric loop must OSR-compile");
+        assert!(!lf.used_slots.is_empty() && !lf.exits.is_empty());
+        let mut buf = vec![0.0f64; lf.used_slots.len()];
+        let mut deopt = 0u8;
+        let exit = lf.call(&mut buf, &mut deopt);
+        assert!((exit as usize) < lf.exits.len(), "exit id in range");
+        assert_eq!(deopt, 0, "v1 region never sets the deopt flag");
+        let mut got = buf.clone();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, vec![10.0, 45.0], "s=45 (sum 0..9), i=10 after the loop");
+    }
+
+    /// #190 — a loop that touches a non-slot value (a call) is not pure-numeric slot math, so the
+    /// region must be rejected (negative-cached) and the VM keeps interpreting.
+    #[test]
+    fn osr_region_rejects_calls() {
+        let chunk = top_chunk(
+            "let a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + Math.floor(i / 2.0) }\n",
+        );
+        let (header, end) = first_region(&chunk);
+        assert!(
+            try_compile_loop(&chunk, header, end).is_none(),
+            "a loop containing a call must not OSR-compile"
+        );
+    }
+
+    /// #190 — a loop with nested branches compiles and computes correctly through multiple blocks:
+    /// `while (i < 20) { if (i % 2 == 0) s = s + i; i = i + 1 }` → s = sum of evens in 0..19 = 90.
+    #[test]
+    fn osr_region_handles_branches() {
+        let chunk = top_chunk(
+            "let s = 0.0\nlet i = 0.0\nwhile (i < 20.0) { if (i % 2.0 == 0.0) { s = s + i }; i = i + 1.0 }\n",
+        );
+        let (header, end) = first_region(&chunk);
+        let lf = try_compile_loop(&chunk, header, end).expect("branchy numeric loop must OSR-compile");
+        let mut buf = vec![0.0f64; lf.used_slots.len()];
+        let mut deopt = 0u8;
+        lf.call(&mut buf, &mut deopt);
+        let mut got = buf.clone();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, vec![20.0, 90.0], "s=90 (0+2+…+18), i=20");
     }
 }
