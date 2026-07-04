@@ -207,18 +207,13 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),
-            Value::Array(arr) => {
-                let inner: Vec<String> = arr.borrow().iter().map(|v| v.to_string()).collect();
-                write!(f, "[{}]", inner.join(", "))
-            }
-            Value::Object(obj) => {
-                let inner: Vec<String> = obj
-                    .borrow()
-                    .strings
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k.as_ref(), v))
-                    .collect();
-                write!(f, "{{{}}}", inner.join(", "))
+            // #381 — containers render through the cycle-guarded walker: a self-referential
+            // array/object (`a.self = a`) previously recursed forever here (uncatchable native
+            // stack overflow from any `console.log`/interpolation). Mirrors
+            // `tishlang_core::Value::to_display_string_guarded` so interp output (`[Circular]`)
+            // matches the VM/native backends.
+            Value::Array(_) | Value::Object(_) => {
+                write!(f, "{}", self.to_display_string_guarded(&mut Vec::new()))
             }
             Value::Symbol(s) => {
                 if let Some(d) = &s.description {
@@ -272,16 +267,76 @@ impl Value {
     /// elements elide to `""`. Mirrors `tishlang_core::Value::to_js_string` so interp output matches
     /// the VM/rust/cranelift/wasi backends (and Node) for join/coercion.
     pub fn to_js_string(&self) -> String {
+        self.to_js_string_guarded(&mut Vec::new())
+    }
+
+    /// Cycle-safe inspect walker (#381): `ancestors` holds the current path's container pointers, so
+    /// a self-referential array/object renders `[Circular]` (matching the VM/native backends via
+    /// `tishlang_core::Value::to_display_string_guarded`) instead of recursing forever. Non-container
+    /// leaves defer to `Display`, whose container arms route back here — with a fresh path — only
+    /// for values this match already proved are not containers, so the guard cannot be bypassed.
+    fn to_display_string_guarded(&self, ancestors: &mut Vec<*const ()>) -> String {
         match self {
-            Value::Array(arr) => arr
-                .borrow()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => String::new(),
-                    other => other.to_js_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(","),
+            Value::Array(arr) => {
+                let ptr = Rc::as_ptr(arr) as *const ();
+                if ancestors.contains(&ptr) {
+                    return "[Circular]".to_string();
+                }
+                ancestors.push(ptr);
+                let inner: Vec<String> = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| v.to_display_string_guarded(ancestors))
+                    .collect();
+                ancestors.pop();
+                format!("[{}]", inner.join(", "))
+            }
+            Value::Object(obj) => {
+                let ptr = Rc::as_ptr(obj) as *const ();
+                if ancestors.contains(&ptr) {
+                    return "[Circular]".to_string();
+                }
+                ancestors.push(ptr);
+                let inner: Vec<String> = obj
+                    .borrow()
+                    .strings
+                    .iter()
+                    .map(|(k, v)| {
+                        format!("{}: {}", k.as_ref(), v.to_display_string_guarded(ancestors))
+                    })
+                    .collect();
+                ancestors.pop();
+                format!("{{{}}}", inner.join(", "))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    /// Cycle-safe `ToString` (#381): only arrays recurse here, so a cyclic array via `"" + a` would
+    /// otherwise overflow the native stack (uncatchable abort). A back-reference joins as `""` —
+    /// matching V8's `Array.prototype.join` and `tishlang_core::Value::to_js_string_guarded`, so
+    /// interp coercion output matches the VM/native backends. Ancestor-path only: a node repeated
+    /// across sibling branches is a legal DAG and still stringifies in full.
+    fn to_js_string_guarded(&self, ancestors: &mut Vec<*const ()>) -> String {
+        match self {
+            Value::Array(arr) => {
+                let ptr = Rc::as_ptr(arr) as *const ();
+                if ancestors.contains(&ptr) {
+                    return String::new();
+                }
+                ancestors.push(ptr);
+                let s = arr
+                    .borrow()
+                    .iter()
+                    .map(|v| match v {
+                        Value::Null => String::new(),
+                        other => other.to_js_string_guarded(ancestors),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ancestors.pop();
+                s
+            }
             Value::Object(_) => "[object Object]".to_string(),
             // ECMAScript ToString of a number drops `-0`'s sign (`String(-0) === "0"`), distinct
             // from the inspect `Display` above which keeps it. Explicit arm so the `_` fallback to

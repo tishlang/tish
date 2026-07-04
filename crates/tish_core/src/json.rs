@@ -124,15 +124,23 @@ pub fn json_stringify_into(buf: &mut String, value: &Value) {
     json_stringify_into_guarded(buf, value, &mut ancestors);
 }
 
-/// Set the JS "circular structure" TypeError as the pending throw (once) — mirrors the
-/// `{ error: <msg> }` shape `tish_builtins::helpers::make_error_value` produces (that crate sits above
-/// this one, so the shape is reproduced here rather than imported).
+/// Set the JS "circular structure" TypeError as the pending throw (once). The `{ name, message }`
+/// shape matches node (`e.name === "TypeError"`, `e.message === "Converting circular structure to
+/// JSON"`) and tish's own thrown-error convention (`construct_builtin::error_object`, the recursion
+/// `RangeError` from [`crate::stack_overflow_error`]) — the previous `{ error: <msg> }` shape left
+/// `e.name` null in a catch block, diverging from node.
 fn signal_circular_json_throw() {
     if !crate::has_pending_throw() {
-        crate::set_pending_throw(Value::object_from_pairs([(
-            std::sync::Arc::from("error"),
-            Value::String("TypeError: Converting circular structure to JSON".into()),
-        )]));
+        crate::set_pending_throw(Value::object_from_pairs([
+            (
+                std::sync::Arc::from("name"),
+                Value::String("TypeError".into()),
+            ),
+            (
+                std::sync::Arc::from("message"),
+                Value::String("Converting circular structure to JSON".into()),
+            ),
+        ]));
     }
 }
 
