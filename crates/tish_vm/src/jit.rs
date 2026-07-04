@@ -50,6 +50,10 @@ pub struct NumericFn {
     /// array-mode uniform 3-pointer ABI (the [`NumericFn::call_arrays`] path). Kept as a `u8` (arity
     /// ≤ 8) so `NumericFn` stays `Copy`. `TISH_JIT_ARRAYS`-gated; `0` in every default build.
     array_param_mask: u8,
+    /// True when this is a self-recursive function compiled with a trailing `*mut RecurGuard` param
+    /// (the recursion-depth bail, #381). Such a function must be invoked via [`NumericFn::call_guarded`];
+    /// non-recursive functions keep the plain ABI and [`NumericFn::call`] (zero overhead).
+    recur_guarded: bool,
 }
 
 /// A flat numeric array handed to an array-mode JIT function: a raw `f64` slice (`ptr`, `len`).
@@ -63,6 +67,21 @@ pub struct ArrayHandle {
     pub len: usize,
 }
 
+/// Recursion guard handed to a self-recursive JIT'd numeric function (#381). tish's JIT is an
+/// additive, bail-to-interpreter tier, so rather than throw from inside JIT'd code (V8/JSC's model),
+/// a too-deep recursion simply BAILS — exactly the deopt path array-mode already uses for an
+/// out-of-bounds read: the function compares its stack pointer to `stack_limit` at entry, and if it
+/// has crossed it (recursion approaching stack exhaustion) it stores `tripped = 1` and returns a
+/// sentinel instead of recursing further. `VmClosure::call` then raises the catchable `RangeError`
+/// through the normal pending-throw path. A single stack-pointer compare per call, sized from the
+/// REAL remaining stack (`stacker::remaining_stack`) — never a per-call counter, so the hot recursion
+/// (fib/spectral_norm) is untaxed. `#[repr(C)]`: `stack_limit` at offset 0, `tripped` at offset 8.
+#[repr(C)]
+pub struct RecurGuard {
+    pub stack_limit: usize,
+    pub tripped: u8,
+}
+
 /// Array-element reads inside JIT'd loops (`arr[i]`/`arr[const]`). **Default ON**; `TISH_JIT_ARRAYS=0`
 /// disables it (escape hatch). Cached in a `OnceLock` — NEVER read the env var on a hot path (see the
 /// frame-VM regression note in docs/perf.md). Purely ADDITIVE: only numeric-array-reduction functions
@@ -74,6 +93,25 @@ pub struct ArrayHandle {
 pub fn jit_arrays_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("TISH_JIT_ARRAYS").map(|v| v != "0").unwrap_or(true))
+}
+
+/// The self-recursion stack guard (#381). **Default ON**; `TISH_JIT_RECUR_GUARD=0` disables it.
+///
+/// A JIT'd self-recursive numeric function recurses on the native stack (SelfCall lowers to a native
+/// call), bypassing the VM's `inc_call_depth` ceiling. Without a guard, unbounded numeric recursion
+/// overflows the native stack — an uncatchable `SIGSEGV`/abort that takes down the whole worker
+/// process (all in-flight requests on it), the DoS hole #381 exists to close. The guard adds a
+/// trailing `*mut RecurGuard` param whose entry compares the stack pointer to a per-thread limit and
+/// bails (→ a catchable `RangeError`, like the interp/VM paths) before overflow. This is like Go's
+/// per-prologue stack check — cheap safety for a server language — but the extra param must stay live
+/// across the recursive calls, so it costs ~12-34% on hot numeric recursion (worst on trivial bodies
+/// like `fib`). Trusted, provably-bounded hot recursion can opt out for raw speed. Cached in a
+/// `OnceLock`; the env read is off the hot path (compile time only), never per call.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn jit_recur_guard_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("TISH_JIT_RECUR_GUARD").map(|v| v != "0").unwrap_or(true))
 }
 
 // SAFETY: `ptr` references immutable executable code in a module that is never
@@ -138,6 +176,76 @@ impl NumericFn {
                     let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 =
                         std::mem::transmute(self.ptr);
                     f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+                }
+                _ => f64::NAN,
+            }
+        }
+    }
+
+    /// Whether this function was compiled with a `RecurGuard` param (self-recursive). If so it MUST be
+    /// invoked via [`call_guarded`], not [`call`] (the ABI has the trailing pointer param). #381
+    #[inline]
+    pub fn recur_guarded(&self) -> bool {
+        self.recur_guarded
+    }
+
+    /// Call a self-recursive (`recur_guarded`) function, passing the `RecurGuard` as a trailing pointer
+    /// param. On return the caller inspects `guard.tripped`: if set, the recursion hit the stack limit
+    /// and bailed (the numeric result is a discarded sentinel) → raise a catchable `RangeError`. #381
+    #[inline]
+    pub fn call_guarded(&self, args: &[f64], guard: *mut RecurGuard) -> f64 {
+        // Same `extern "C"` f64-register ABI as `call`, plus a trailing pointer arg for the guard.
+        unsafe {
+            match self.arity {
+                1 => {
+                    let f: extern "C" fn(f64, *mut RecurGuard) -> f64 = std::mem::transmute(self.ptr);
+                    f(args[0], guard)
+                }
+                2 => {
+                    let f: extern "C" fn(f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], guard)
+                }
+                3 => {
+                    let f: extern "C" fn(f64, f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], guard)
+                }
+                4 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], guard)
+                }
+                5 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], guard)
+                }
+                6 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5], guard)
+                }
+                7 => {
+                    let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, *mut RecurGuard) -> f64 =
+                        std::mem::transmute(self.ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], guard)
+                }
+                8 => {
+                    let f: extern "C" fn(
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        *mut RecurGuard,
+                    ) -> f64 = std::mem::transmute(self.ptr);
+                    f(
+                        args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], guard,
+                    )
                 }
                 _ => f64::NAN,
             }
@@ -360,9 +468,19 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         }
     }
 
+    // #381: a self-recursive numeric function recurses on the native stack (SelfCall → a native call).
+    // Compile it with a trailing `*mut RecurGuard` param so its entry can bail before the stack
+    // overflows; non-recursive functions keep the plain register-f64 ABI (no param, no overhead).
+    // Gated by `TISH_JIT_RECUR_GUARD` (default ON) so trusted hot-recursion workloads can trade the
+    // guard's per-call cost for raw speed — see [`jit_recur_guard_enabled`].
+    let recur_guard = jit_recur_guard_enabled() && chunk_has_self_call(chunk);
+
     let mut sig = g.module.make_signature();
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::F64));
+    }
+    if recur_guard {
+        sig.params.push(AbiParam::new(g.module.target_config().pointer_type())); // *mut RecurGuard
     }
     sig.returns.push(AbiParam::new(types::F64));
 
@@ -382,8 +500,15 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     ctx.func.signature = sig.clone();
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
-    let result_bool = match build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, Some(self_ref), 0)
-    {
+    let result_bool = match build_body_cfg(
+        &mut ctx.func,
+        &mut fbctx,
+        chunk,
+        arity,
+        Some(self_ref),
+        0,
+        recur_guard,
+    ) {
         Some(b) => b,
         None => {
             g.module.clear_context(&mut ctx);
@@ -415,6 +540,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         arity: arity as u8,
         result_bool,
         array_param_mask: 0,
+        recur_guarded: recur_guard,
     })
 }
 
@@ -514,7 +640,7 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
     ctx.func.signature = sig.clone();
     let mut fbctx = FunctionBuilderContext::new();
     // No self-call in array mode (recursive call would need the array signature) → pass None.
-    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask).is_none() {
+    if build_body_cfg(&mut ctx.func, &mut fbctx, chunk, arity, None, mask, false).is_none() {
         g.module.clear_context(&mut ctx);
         return None;
     }
@@ -532,6 +658,7 @@ fn compile_chunk_arrays(g: &mut JitGlobal, chunk: &Chunk, arity: usize, mask: u8
         arity: arity as u8,
         result_bool: false,
         array_param_mask: mask,
+        recur_guarded: false,
     })
 }
 
@@ -736,6 +863,28 @@ fn op_size(op: Opcode) -> Option<usize> {
     })
 }
 
+/// Cheap pre-scan: does this chunk contain a `SelfCall`? Decided in `compile_chunk` (before the sig is
+/// built) so a self-recursive function gets the `RecurGuard` param. Walks by `op_size`; if a size is
+/// unknown it returns `false`, which is safe: `build_body_cfg` uses the same `op_size` and would itself
+/// bail on that opcode, so the function isn't JIT'd (it runs on the guarded VM instead). #381
+fn chunk_has_self_call(chunk: &Chunk) -> bool {
+    let code = &chunk.code;
+    let mut ip = 0;
+    while ip < code.len() {
+        let Some(op) = Opcode::from_u8(code[ip]) else {
+            return false;
+        };
+        if op == Opcode::SelfCall {
+            return true;
+        }
+        let Some(size) = op_size(op) else {
+            return false;
+        };
+        ip += size;
+    }
+    false
+}
+
 /// Read a big-endian u16 operand at `off` without advancing (matches [`read_u16`]).
 #[inline]
 fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
@@ -764,6 +913,10 @@ fn build_body_cfg(
     // existing caller passes 0, so that path is byte-identical). Nonzero ⇒ the 3-pointer array ABI:
     // params are `[numeric_ptr, handles_ptr, deopt_ptr]` and `arr[i]` lowers to a bounds-checked load.
     array_mask: u8,
+    // #381: when true (self-recursive, plain-numeric path only) the signature has a trailing
+    // `*mut RecurGuard` param, and the function entry emits a stack-pointer check that bails before
+    // the native recursion overflows. `false` for array mode and every non-recursive function.
+    recur_guard: bool,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -820,12 +973,41 @@ fn build_body_cfg(
     }
 
     let mut bcx = FunctionBuilder::new(func, fbctx);
-    let blocks: std::collections::BTreeMap<usize, Block> =
+    let mut blocks: std::collections::BTreeMap<usize, Block> =
         leaders.iter().map(|&o| (o, bcx.create_block())).collect();
     let entry = *blocks.get(&0)?;
     bcx.append_block_params_for_function_params(entry);
     bcx.switch_to_block(entry);
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
+
+    // #381: self-recursive numeric function → `entry` is a stack-pointer bail check (tish's deopt
+    // pattern, not V8's throw-from-JIT): compare SP to the caller-provided `stack_limit`; if the
+    // recursion has driven SP past it, store `tripped = 1` into the RecurGuard and return a sentinel
+    // instead of recursing further. The body then runs in `body_block`; `entry` is the function's real
+    // entry point, so this check runs on every (including recursive) call. Loops jumping back to offset
+    // 0 land in `body_block` (no re-check needed — a loop adds no native frame). Pointer type is I64
+    // (the JIT targets — x86-64 / aarch64 — are all 64-bit; the module is not built on wasm32).
+    let guard_ptr: Option<ClifValue> = if recur_guard && array_mask == 0 {
+        let gp = *params.get(arity)?;
+        let stack_limit = bcx.ins().load(types::I64, MemFlags::new(), gp, 0);
+        let sp = bcx.ins().get_stack_pointer(types::I64);
+        let below = bcx.ins().icmp(IntCC::UnsignedLessThan, sp, stack_limit);
+        let bail = bcx.create_block();
+        let body = bcx.create_block();
+        bcx.ins().brif(below, bail, &[], body, &[]);
+        bcx.switch_to_block(bail);
+        bcx.seal_block(bail);
+        let one = bcx.ins().iconst(types::I8, 1);
+        bcx.ins().store(MemFlags::new(), one, gp, 8); // RecurGuard.tripped (offset 8)
+        let nan = bcx.ins().f64const(f64::NAN);
+        bcx.ins().return_(&[nan]);
+        blocks.insert(0, body); // internal jumps to offset 0 → the body, not the SP check
+        bcx.switch_to_block(body);
+        Some(gp)
+    } else {
+        None
+    };
+    let body_start = *blocks.get(&0)?; // `entry` normally; `body_block` when guarded
 
     // 2. A Variable per slot, all defined at entry so every path defines them.
     let vars: Vec<Variable> = (0..num_slots).map(|_| bcx.declare_var(types::F64)).collect();
@@ -875,7 +1057,7 @@ fn build_body_cfg(
 
     // 3. Translate. The operand stack is empty at every block boundary (statement-level control flow).
     let mut stack: Vec<(ClifValue, bool)> = Vec::new();
-    let mut cur = entry;
+    let mut cur = body_start;
     let mut terminated = false;
     let mut ip = 0usize;
     while ip < code.len() {
@@ -1022,6 +1204,11 @@ fn build_body_cfg(
                         return None; // boolean args don't match the f64 ABI
                     }
                     call_args.push(v);
+                }
+                // #381: thread the RecurGuard pointer through the recursive call so every level
+                // re-checks the stack at its entry. Present iff this function was compiled guarded.
+                if let Some(gp) = guard_ptr {
+                    call_args.push(gp);
                 }
                 let call = bcx.ins().call(sref, &call_args);
                 let result = bcx.inst_results(call)[0];
