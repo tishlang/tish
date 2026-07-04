@@ -18,6 +18,21 @@ enum SimpleMapResult {
     BinOp(BinOp, Constant, bool), // op, constant, param_on_left
 }
 
+/// Provably evaluates to a `String` at runtime — the safety gate for the plain-assign `AppendLocal`
+/// builder fast path (#186). A string literal, a template literal, or an `+` chain containing one
+/// (JS `+` string-coerces the whole expression). Conservative: an unknown/numeric operand returns
+/// `false`, so a numeric accumulator never routes through the builder.
+fn is_string_typed(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal { value: Literal::String(_), .. } => true,
+        Expr::TemplateLiteral { .. } => true,
+        Expr::Binary { left, op: BinOp::Add, right, .. } => {
+            is_string_typed(left) || is_string_typed(right)
+        }
+        _ => false,
+    }
+}
+
 fn literal_to_constant(expr: &Expr) -> Option<Constant> {
     if let Expr::Literal { value, .. } = expr {
         Some(match value {
@@ -1248,6 +1263,24 @@ impl<'a> Compiler<'a> {
                         self.compile_expr(value)?;
                         self.emit_u16(Opcode::AppendLocal, slot);
                         return Ok(());
+                    }
+                }
+                // Same builder fast path for the plain-assign spelling `s = s + <str>` — but ONLY when
+                // the appended operand is PROVABLY a string. A numeric accumulator (`i = i + 1`) must
+                // NOT builder-ize: the VM keeps a single string builder slot, so a second builder-ized
+                // slot flushes the first every iteration → O(n²) (#186). Restricting to string-typed
+                // RHS keeps `s = s + "x"` fast (string_concat) while `i = i + 1` stays a plain store.
+                if let Expr::Assign { name, value, .. } = expr {
+                    if let Expr::Binary { left, op: BinOp::Add, right, .. } = value.as_ref() {
+                        if matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln == name)
+                            && is_string_typed(right)
+                        {
+                            if let Some(slot) = self.resolve_slot(name) {
+                                self.compile_expr(right)?;
+                                self.emit_u16(Opcode::AppendLocal, slot);
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 self.compile_expr(expr)?;
