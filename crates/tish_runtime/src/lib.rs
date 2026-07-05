@@ -1289,6 +1289,15 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             }
             _ => Value::Null,
         },
+        // Reading a property of the nullish value is a JS TypeError. PARK a catchable throw (#425)
+        // and return the null sentinel; it surfaces at the next pending-throw checkpoint. This is the
+        // ONLY receiver that throws — a number/bool/function with no such property reads back `null`
+        // (JS `undefined`), matching the VM/interpreter/node. Free for valid reads: `Object` is matched
+        // first, so this cold arm never runs on the hot path.
+        Value::Null => {
+            tishlang_core::set_pending_throw(tishlang_core::cannot_read_property_error(key));
+            Value::Null
+        }
         _ => Value::Null,
     }
 }
@@ -1329,6 +1338,16 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             Value::String(k) => get_prop(obj, k.as_str()),
             _ => Value::Null,
         },
+        // Indexing the nullish value throws a catchable TypeError (#425), like `get_prop` above —
+        // parked and surfaced at the next checkpoint. Every other receiver reads back `null`.
+        Value::Null => {
+            let key = match index {
+                Value::String(s) => s.to_string(),
+                other => other.to_js_string(),
+            };
+            tishlang_core::set_pending_throw(tishlang_core::cannot_read_property_error(&key));
+            Value::Null
+        }
         _ => Value::Null,
     }
 }
@@ -1904,5 +1923,63 @@ pub fn string_search_regex(s: &Value, regexp: &Value) -> Value {
             Err(_) => Value::Number(-1.0),
         },
         _ => Value::Number(-1.0),
+    }
+}
+
+#[cfg(test)]
+mod null_read_parking_tests_425 {
+    // Reading a property/index of the nullish value PARKS a catchable TypeError (#425) instead of
+    // silently reading back `null` — the native/runtime read paths. The throw surfaces at the caller's
+    // next pending-throw checkpoint. Every other receiver (number/bool/valid object/array) reads back
+    // a value with NO parked throw.
+    use super::{get_index, get_prop};
+    use tishlang_core::{has_pending_throw, take_pending_throw, Value, VmRef};
+
+    fn parked_name() -> Option<String> {
+        take_pending_throw().and_then(|v| {
+            if let Value::Object(o) = v {
+                if let Some(Value::String(s)) = o.borrow().strings.get("name") {
+                    return Some(s.to_string());
+                }
+            }
+            None
+        })
+    }
+
+    #[test]
+    fn get_prop_on_null_parks_type_error() {
+        let _ = take_pending_throw();
+        let r = get_prop(&Value::Null, "length");
+        assert!(matches!(r, Value::Null));
+        assert!(has_pending_throw());
+        assert_eq!(parked_name().as_deref(), Some("TypeError"));
+    }
+
+    #[test]
+    fn get_index_on_null_parks_type_error() {
+        let _ = take_pending_throw();
+        let r = get_index(&Value::Null, &Value::Number(0.0));
+        assert!(matches!(r, Value::Null));
+        assert!(has_pending_throw());
+        assert_eq!(parked_name().as_deref(), Some("TypeError"));
+    }
+
+    #[test]
+    fn valid_reads_do_not_park() {
+        let _ = take_pending_throw();
+        // object property, array index, and array length must NOT park a throw.
+        let obj = Value::object({
+            let mut m = tishlang_core::ObjectMap::default();
+            m.insert(std::sync::Arc::from("a"), Value::Number(42.0));
+            m
+        });
+        assert!(matches!(get_prop(&obj, "a"), Value::Number(n) if n == 42.0));
+        assert!(!has_pending_throw(), "valid property read must not park");
+        let arr = Value::Array(VmRef::new(vec![Value::Number(7.0)]));
+        assert!(matches!(get_index(&arr, &Value::Number(0.0)), Value::Number(n) if n == 7.0));
+        assert!(!has_pending_throw(), "valid index read must not park");
+        // a MISSING object property reads back null WITHOUT parking (JS `undefined`, not a throw).
+        assert!(matches!(get_prop(&obj, "missing"), Value::Null));
+        assert!(!has_pending_throw(), "missing property must not park");
     }
 }
