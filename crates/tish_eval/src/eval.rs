@@ -262,6 +262,7 @@ impl Evaluator {
             math.insert("round".into(), Value::Native(natives::math_round));
             math.insert("random".into(), Value::Native(natives::math_random));
             math.insert("pow".into(), Value::Native(natives::math_pow));
+            math.insert("imul".into(), Value::Native(natives::math_imul));
             math.insert("hypot".into(), Value::Native(natives::math_hypot));
             math.insert("asin".into(), Value::Native(natives::math_asin));
             math.insert("acos".into(), Value::Native(natives::math_acos));

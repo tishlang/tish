@@ -537,6 +537,13 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         "pow".into(),
         Value::native(|args: &[Value]| math_builtins::pow(args)),
     );
+    // `imul` delegates to the shared builtin (ToInt32 + wrapping i32 multiply) so the vm never
+    // diverges from interp/native (#247). Was previously absent from the vm `Math` object, so
+    // `Math.imul(...)` threw "Call of non-function" on the bytecode VM.
+    math.insert(
+        "imul".into(),
+        Value::native(|args: &[Value]| math_builtins::imul(args)),
+    );
     math.insert(
         "sin".into(),
         Value::native(|args: &[Value]| math_builtins::sin(args)),

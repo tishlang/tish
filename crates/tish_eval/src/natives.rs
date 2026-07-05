@@ -226,6 +226,17 @@ pub fn math_pow(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Number(base.powf(exp)))
 }
 
+/// ES6 `Math.imul`: an exact 32-bit integer multiply. Both operands go through JS `ToInt32`
+/// (modulo 2³², NaN/±Infinity → 0), NOT a saturating `as i32` cast, then a wrapping i32 multiply —
+/// bit-for-bit identical to the shared `tishlang_builtins::math::imul`, the vm, the native path, and
+/// V8. Was previously absent from the interpreter's `Math` object, so `Math.imul(...)` threw
+/// "Not a function" in `--backend interp` while working natively (a cross-backend divergence).
+pub fn math_imul(args: &[Value]) -> Result<Value, String> {
+    let a = tishlang_core::to_int32(get_num(args.first().unwrap_or(&Value::Null)));
+    let b = tishlang_core::to_int32(get_num(args.get(1).unwrap_or(&Value::Null)));
+    Ok(Value::Number(a.wrapping_mul(b) as f64))
+}
+
 pub fn math_sin(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Number(
         get_num(args.first().unwrap_or(&Value::Null)).sin(),

@@ -1,7 +1,7 @@
 //! Math builtin functions.
 
 use crate::helpers::extract_num;
-use tishlang_core::Value;
+use tishlang_core::{to_int32, Value};
 
 macro_rules! math_unary {
     ($name:ident, $op:ident) => {
@@ -173,8 +173,13 @@ pub fn hypot(args: &[Value]) -> Value {
 }
 
 /// ES6 `Math.imul`: 32-bit integer multiply (used by xmur3 PRNG in juke-cards).
+///
+/// Operands go through JS `ToInt32` (modulo 2³², NaN/±Infinity → 0), NOT a saturating `as i32`
+/// cast: the latter clamps any argument ≥ 2³¹ (e.g. a full uint32 hash state) to `i32::MAX` and
+/// diverges from ECMAScript / V8 (`Math.imul(3e9, 1)` = -1294967296, not 2147483647). The typed
+/// native path inlines the same ToInt32 + wrapping multiply, so all backends agree.
 pub fn imul(args: &[Value]) -> Value {
-    let a = extract_num(args.first()).unwrap_or(0.0) as i32;
-    let b = extract_num(args.get(1)).unwrap_or(0.0) as i32;
+    let a = to_int32(extract_num(args.first()).unwrap_or(0.0));
+    let b = to_int32(extract_num(args.get(1)).unwrap_or(0.0));
     Value::Number(a.wrapping_mul(b) as f64)
 }
