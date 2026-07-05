@@ -182,20 +182,37 @@ where
     }
     drop(tx);
 
-    // VM-thread dispatcher loop: identical to the tiny_http path.
+    // VM-thread dispatcher loop. Mirrors the tiny_http path (#384): `recv_timeout` rather than a
+    // blocking `recv` so a handler's scheduled timers still FIRE when the server is idle, and
+    // `drain_timers()` runs after every handler call AND on each idle tick. Handler calls all run on
+    // this single VM thread, so the timer registry lives here — without the drain a `setTimeout`
+    // scheduled from a hyper handler would never fire and never be freed.
     let mut count = 0usize;
-    while let Ok((req_prim, resp_tx)) = rx.recv() {
-        let req_value = req_prim.into_value_pub();
-        // `handler` is the generic `F: Fn(&[Value]) -> Value` — call it directly. (`.call(..)` here
-        // would bind the *unstable* `Fn::call` trait method, which takes a tuple, not `&[Value]`.)
-        let response_value = handler(&[req_value]);
-        let resp_prim = ResponsePrimitive::from_value_pub(&response_value);
-        let _ = resp_tx.send(resp_prim);
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok((req_prim, resp_tx)) => {
+                let req_value = req_prim.into_value_pub();
+                // `handler` is the generic `F: Fn(&[Value]) -> Value` — call it directly. (`.call(..)`
+                // here would bind the *unstable* `Fn::call` trait method, which takes a tuple, not
+                // `&[Value]`.)
+                let response_value = handler(&[req_value]);
+                crate::timers::drain_timers();
+                let resp_prim = ResponsePrimitive::from_value_pub(&response_value);
+                let _ = resp_tx.send(resp_prim);
 
-        count += 1;
-        if max_requests.map(|m| count >= m).unwrap_or(false) {
-            stop.store(true, Ordering::Relaxed);
-            break;
+                count += 1;
+                if max_requests.map(|m| count >= m).unwrap_or(false) {
+                    stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                crate::timers::drain_timers();
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 

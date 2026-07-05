@@ -170,12 +170,12 @@ pub fn math_max(args: &[Value]) -> Result<Value, String> {
 }
 
 // hypot/asin/acos/atan/atan2 existed on the vm's Math but not the interpreter's — a direct interp≠vm
-// gap (#247). These are 1:1 with Rust f64 methods (same as the builtins), so compute directly; hypot
-// defaults missing args to 0.0 to match `tishlang_builtins::math::hypot`.
+// gap (#247). asin/acos/atan/atan2 are 1:1 with Rust f64 methods, so compute directly. hypot is
+// VARIADIC in JS and must propagate NaN/Infinity, so it delegates to the shared `hypot_f64` (exactly
+// like min/max) — a 2-arg `x.hypot(y)` gave `Math.hypot(3,4,12)` = 5 instead of 13.
 pub fn math_hypot(args: &[Value]) -> Result<Value, String> {
-    let x = args.first().map(get_num).unwrap_or(0.0);
-    let y = args.get(1).map(get_num).unwrap_or(0.0);
-    Ok(Value::Number(x.hypot(y)))
+    let nums: Vec<f64> = args.iter().map(get_num).collect();
+    Ok(Value::Number(tishlang_builtins::math::hypot_f64(&nums)))
 }
 
 pub fn math_asin(args: &[Value]) -> Result<Value, String> {

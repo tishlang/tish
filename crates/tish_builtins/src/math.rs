@@ -129,10 +129,47 @@ pub fn atan2(args: &[Value]) -> Value {
     Value::Number(y.atan2(x))
 }
 
+/// ECMAScript `Math.hypot(...args)` core: sqrt of the sum of squares, VARIADIC and
+/// NaN/Infinity-correct. Infinity takes precedence over NaN (any ±∞ arg → +∞, even alongside a NaN);
+/// otherwise any NaN → NaN; the finite case is scaled by the max magnitude to avoid intermediate
+/// overflow/underflow (matches V8). `Math.hypot()` (no args) → 0. Shared so interp/vm/native agree
+/// (#247 — the interp/native path was 2-arg only, so `Math.hypot(3,4,12)` gave 5 not 13, and the vm
+/// dropped non-number args instead of propagating NaN).
+pub fn hypot_f64(nums: &[f64]) -> f64 {
+    let mut any_nan = false;
+    let mut max = 0.0_f64;
+    for &n in nums {
+        if n.is_infinite() {
+            return f64::INFINITY;
+        }
+        if n.is_nan() {
+            any_nan = true;
+        }
+        let a = n.abs();
+        if a > max {
+            max = a;
+        }
+    }
+    if any_nan {
+        return f64::NAN;
+    }
+    if max == 0.0 {
+        return 0.0;
+    }
+    let mut sum = 0.0_f64;
+    for &n in nums {
+        let r = n / max;
+        sum += r * r;
+    }
+    max * sum.sqrt()
+}
+
 pub fn hypot(args: &[Value]) -> Value {
-    let x = extract_num(args.first()).unwrap_or(0.0);
-    let y = extract_num(args.get(1)).unwrap_or(0.0);
-    Value::Number(x.hypot(y))
+    let nums: Vec<f64> = args
+        .iter()
+        .map(|v| extract_num(Some(v)).unwrap_or(f64::NAN))
+        .collect();
+    Value::Number(hypot_f64(&nums))
 }
 
 /// ES6 `Math.imul`: 32-bit integer multiply (used by xmur3 PRNG in juke-cards).
