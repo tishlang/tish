@@ -106,7 +106,8 @@ fn stmt_module_source(stmt: &Statement) -> Option<&str> {
     match stmt {
         Statement::Import { from, .. } => Some(&**from),
         Statement::Export { declaration, .. } => match declaration.as_ref() {
-            ExportDeclaration::ReExport { from, .. } => Some(&**from),
+            // A local named export (`export { a }`, from=None) has no module dependency.
+            ExportDeclaration::ReExport { from, .. } => from.as_deref(),
             _ => None,
         },
         _ => None,
@@ -314,7 +315,7 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                     ExportDeclaration::ReExport {
                         specifiers,
                         all,
-                        from,
+                        from: Some(from),
                         ..
                     } => {
                         let dir = parent_dir(&module.path);
@@ -338,6 +339,20 @@ pub fn merge_modules_virtual(modules: Vec<VirtualModule>) -> Result<Program, Str
                                         module_exports[idx].insert(export_name, binding.clone());
                                     }
                                 }
+                            }
+                        }
+                    }
+                    // #415 local named export (no `from`): map each export name to the local binding.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        from: None,
+                        ..
+                    } => {
+                        for spec in specifiers {
+                            if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                let export_name =
+                                    alias.as_deref().unwrap_or(name.as_ref()).to_string();
+                                module_exports[idx].insert(export_name, name.to_string());
                             }
                         }
                     }
