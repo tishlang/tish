@@ -1796,7 +1796,11 @@ impl Evaluator {
                             }
                             "map" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                // #382-style snapshot: own the elements and DROP the array borrow before
+                                // any callback runs, so a callback that mutates the array (via the `array`
+                                // arg or a capture) can't RefCell-panic. `arr_value` is the JS 3rd arg.
+                                let arr_borrow = arr.borrow().clone();
+                                let arr_value = Value::Array(arr.clone());
                                 let mut result = Vec::with_capacity(arr_borrow.len());
                                 // Try fastest path: simple single-expression callbacks
                                 let first_result = self.eval_simple_callback(&callback, &[arr_borrow.first().cloned().unwrap_or(Value::Null)]);
@@ -1813,13 +1817,13 @@ impl Evaluator {
                                 } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     // Reusable scope path
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         result.push(mapped);
                                     }
                                 } else {
                                     // Full call_func path
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         result.push(mapped);
                                     }
                                 }
@@ -1830,11 +1834,12 @@ impl Evaluator {
                                 // propagates via `?` (catchable), matching vm/native/node — previously
                                 // interp lacked flatMap entirely ("Not a function").
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 let mut result: Vec<Value> = Vec::with_capacity(arr_borrow.len());
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let mapped = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         match mapped {
                                             Value::Array(inner) => result.extend(inner.borrow().iter().cloned()),
                                             other => result.push(other),
@@ -1842,7 +1847,7 @@ impl Evaluator {
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let mapped = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         match mapped {
                                             Value::Array(inner) => result.extend(inner.borrow().iter().cloned()),
                                             other => result.push(other),
@@ -1853,7 +1858,8 @@ impl Evaluator {
                             }
                             "filter" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 let mut result = Vec::new();
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
@@ -1869,14 +1875,14 @@ impl Evaluator {
                                     }
                                 } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let keep = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let keep = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if keep.is_truthy() {
                                             result.push(v.clone());
                                         }
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let keep = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let keep = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if keep.is_truthy() {
                                             result.push(v.clone());
                                         }
@@ -1886,7 +1892,8 @@ impl Evaluator {
                             }
                             "reduce" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 4th callback arg
                                 let (mut acc, start_idx) = if arg_vals.len() > 1 {
                                     (arg_vals[1].clone(), 0)
                                 } else if !arr_borrow.is_empty() {
@@ -1896,18 +1903,19 @@ impl Evaluator {
                                 };
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
-                                        acc = self.call_with_scope(&scope, &params, &body, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                        acc = self.call_with_scope(&scope, &params, &body, &[acc, v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate().skip(start_idx) {
-                                        acc = self.call_func(&callback, &[acc, v.clone(), Value::Number(i as f64)])?;
+                                        acc = self.call_func(&callback, &[acc, v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                     }
                                 }
                                 return Ok(acc);
                             }
                             "find" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
                                     self.eval_simple_callback(&callback, &[v.clone()]).is_some()
@@ -1922,14 +1930,14 @@ impl Evaluator {
                                     }
                                 } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if found.is_truthy() {
                                             return Ok(v.clone());
                                         }
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if found.is_truthy() {
                                             return Ok(v.clone());
                                         }
@@ -1939,17 +1947,18 @@ impl Evaluator {
                             }
                             "findIndex" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let found = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if found.is_truthy() {
                                             return Ok(Value::Number(i as f64));
                                         }
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let found = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if found.is_truthy() {
                                             return Ok(Value::Number(i as f64));
                                         }
@@ -1958,13 +1967,14 @@ impl Evaluator {
                                 return Ok(Value::Number(-1.0));
                             }
                             "findLast" => {
-                                // Like find, from the end (#247). Callback gets (value, original index).
+                                // Like find, from the end (#247). Callback gets (value, original index, array).
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 let scoped = self.create_callback_scope(&callback);
                                 for i in (0..arr_borrow.len()).rev() {
                                     let v = arr_borrow[i].clone();
-                                    let args = [v.clone(), Value::Number(i as f64)];
+                                    let args = [v.clone(), Value::Number(i as f64), arr_value.clone()];
                                     let found = match &scoped {
                                         Some((scope, params, body)) => self.call_with_scope(scope, params, body, &args)?,
                                         None => self.call_func(&callback, &args)?,
@@ -1977,10 +1987,11 @@ impl Evaluator {
                             }
                             "findLastIndex" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 let scoped = self.create_callback_scope(&callback);
                                 for i in (0..arr_borrow.len()).rev() {
-                                    let args = [arr_borrow[i].clone(), Value::Number(i as f64)];
+                                    let args = [arr_borrow[i].clone(), Value::Number(i as f64), arr_value.clone()];
                                     let found = match &scoped {
                                         Some((scope, params, body)) => self.call_with_scope(scope, params, body, &args)?,
                                         None => self.call_func(&callback, &args)?,
@@ -2007,21 +2018,23 @@ impl Evaluator {
                             }
                             "forEach" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                     }
                                 }
                                 return Ok(Value::Null);
                             }
                             "some" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
                                     self.eval_simple_callback(&callback, &[v.clone()]).is_some()
@@ -2036,14 +2049,14 @@ impl Evaluator {
                                     }
                                 } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if result.is_truthy() {
                                             return Ok(Value::Bool(true));
                                         }
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if result.is_truthy() {
                                             return Ok(Value::Bool(true));
                                         }
@@ -2053,7 +2066,8 @@ impl Evaluator {
                             }
                             "every" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
-                                let arr_borrow = arr.borrow();
+                                let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
+                                let arr_value = Value::Array(arr.clone()); // JS 3rd callback arg
                                 // Try simple callback fast path
                                 let use_simple = arr_borrow.first().map(|v| {
                                     self.eval_simple_callback(&callback, &[v.clone()]).is_some()
@@ -2068,14 +2082,14 @@ impl Evaluator {
                                     }
                                 } else if let Some((scope, params, body)) = self.create_callback_scope(&callback) {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64)])?;
+                                        let result = self.call_with_scope(&scope, &params, &body, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if !result.is_truthy() {
                                             return Ok(Value::Bool(false));
                                         }
                                     }
                                 } else {
                                     for (i, v) in arr_borrow.iter().enumerate() {
-                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64)])?;
+                                        let result = self.call_func(&callback, &[v.clone(), Value::Number(i as f64), arr_value.clone()])?;
                                         if !result.is_truthy() {
                                             return Ok(Value::Bool(false));
                                         }
@@ -4696,5 +4710,52 @@ mod recursion_limit_tests_381 {
     fn normal_recursion_is_unaffected() {
         let src = "fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(12)";
         assert_eq!(run_with_depth(src, 20000), "144");
+    }
+}
+
+#[cfg(test)]
+mod array_hof_callback_arg_tests {
+    // Array HOFs pass the source array as the trailing callback arg (JS `(element, index, array)`,
+    // reduce `(acc, element, index, array)`). The inline interp loops snapshot the backing store and
+    // drop the borrow before any callback, so a callback that MUTATES the array via the `array` arg
+    // (or a capture) can't RefCell-panic — it iterates the pre-call snapshot, matching JS + the shared
+    // #382 builtins path.
+    use super::Evaluator;
+    use tishlang_parser::parse;
+
+    fn run(src: &str) -> String {
+        let program = parse(src).unwrap();
+        let mut eval = Evaluator::new();
+        eval.eval_program(&program).unwrap().to_string()
+    }
+
+    #[test]
+    fn map_receives_array_as_third_arg() {
+        assert_eq!(run("[5, 3, 8].map((x, i, arr) => arr.length).join(',')"), "3,3,3");
+    }
+
+    #[test]
+    fn reduce_receives_array_as_fourth_arg() {
+        assert_eq!(run("[1, 2, 3].reduce((a, x, i, arr) => a + arr.length, 0)"), "9");
+    }
+
+    #[test]
+    fn callback_may_index_the_array_arg() {
+        assert_eq!(run("[10, 20, 30].map((x, i, arr) => arr[i] * 2).join(',')"), "20,40,60");
+    }
+
+    #[test]
+    fn callback_mutating_the_array_arg_does_not_panic() {
+        // Pre-snapshot this RefCell-panicked (map held the borrow across the loop). Now iteration is
+        // over the snapshot (3 elements); the 3 pushes land on the live array → final length 6, matching
+        // JS forEach semantics (does not visit elements appended during iteration).
+        let src = "let a = [1, 2, 3]\na.forEach((x, i, arr) => { arr.push(x) })\na.length";
+        assert_eq!(run(src), "6");
+    }
+
+    #[test]
+    fn one_and_two_arg_callbacks_unchanged() {
+        assert_eq!(run("[5, 3, 8].map(x => x * 2).join(',')"), "10,6,16");
+        assert_eq!(run("[5, 3, 8].map((x, i) => x + i).join(',')"), "5,4,10");
     }
 }

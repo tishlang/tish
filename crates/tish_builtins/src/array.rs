@@ -345,17 +345,20 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
     // boxed array on the FIRST non-numeric callback result; every element's callback still runs
     // exactly once, in index order (the deopt resumes at `i + 1`).
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        // JS passes `(element, index, array)`; `arr_value` is the receiver, cloned per call (a cheap
+        // VmRef refcount bump). A callback that ignores the 3rd param is unaffected.
+        let arr_value = arr.clone();
         let mut nums: Vec<f64> = Vec::with_capacity(data.len());
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { return packed_or_empty(nums); } // #303
-            match cb.call(&[Value::Number(n), Value::Number(i as f64)]) {
+            match cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]) {
                 Value::Number(r) => nums.push(r),
                 other => {
                     let mut boxed: Vec<Value> = nums.into_iter().map(Value::Number).collect();
                     boxed.push(other);
                     for (j, &m) in data.iter().enumerate().skip(i + 1) {
                         if tishlang_core::has_pending_throw() { break; } // #303
-                        boxed.push(cb.call(&[Value::Number(m), Value::Number(j as f64)]));
+                        boxed.push(cb.call(&[Value::Number(m), Value::Number(j as f64), arr_value.clone()]));
                     }
                     return Value::Array(VmRef::new(boxed));
                 }
@@ -369,11 +372,12 @@ pub fn map(arr: &Value, callback: &Value) -> Value {
         // callback that re-enters this same array (`arr.map(x => arr.length)`) would otherwise
         // deadlock (Mutex, send-values) or panic (RefCell). Matches the packed path's copy semantics.
         let arr_borrow = arr.borrow().clone();
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         // #303: stop on a pending throw from the callback (don't map the rest of the array).
         let mut result: Vec<Value> = Vec::with_capacity(arr_borrow.len());
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; }
-            result.push(cb.call(&[v.clone(), Value::Number(i as f64)]));
+            result.push(cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]));
         }
         Value::Array(VmRef::new(result))
     } else {
@@ -385,10 +389,11 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     // Packed fast path: `filter` keeps a SUBSET of the input f64s, so the result is always numeric —
     // build the packed `Vec<f64>` directly, no boxed intermediate, and hand back a `NumberArray`.
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         let mut out: Vec<f64> = Vec::new();
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 out.push(n);
             }
         }
@@ -397,11 +402,12 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         // #303: stop on a pending throw from the predicate (don't test the rest of the array).
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; }
-            if cb.call(&[v.clone(), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 result.push(v.clone());
             }
         }
@@ -415,6 +421,8 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
     // Packed fast path: fold the `Vec<f64>` snapshot directly. Same no-initial rule as the boxed
     // path (absent init → first element as the seed, scan from index 1).
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        // `reduce` passes `(accumulator, element, index, array)` — the array is the 4th arg.
+        let arr_value = arr.clone();
         let (start_idx, mut acc) = if matches!(initial, Value::Null) && !data.is_empty() {
             (1usize, Value::Number(data[0]))
         } else {
@@ -423,13 +431,14 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
         // `skip(start_idx)` preserves the true element index for the callback's 3rd arg.
         for (i, &x) in data.iter().enumerate().skip(start_idx) {
             if tishlang_core::has_pending_throw() { return acc; } // #303
-            acc = cb.call(&[acc, Value::Number(x), Value::Number(i as f64)]);
+            acc = cb.call(&[acc, Value::Number(x), Value::Number(i as f64), arr_value.clone()]);
         }
         return acc;
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 4th callback arg (JS `array`)
         let len = arr_borrow.len();
         let (start_idx, mut acc) = if matches!(initial, Value::Null) && !arr_borrow.is_empty() {
             // No initial value: use first element as acc, start from index 1
@@ -440,7 +449,7 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
         for i in start_idx..len {
             if tishlang_core::has_pending_throw() { return acc; } // #303
             let v = arr_borrow[i].clone();
-            acc = cb.call(&[acc, v.clone(), Value::Number(i as f64)]);
+            acc = cb.call(&[acc, v.clone(), Value::Number(i as f64), arr_value.clone()]);
         }
         acc
     } else {
@@ -450,18 +459,20 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
 
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { return Value::Null; } // #303
-            cb.call(&[Value::Number(n), Value::Number(i as f64)]);
+            cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]);
         }
         return Value::Null;
     }
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            cb.call(&[v.clone(), Value::Number(i as f64)]);
+            cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
         }
     }
     Value::Null
@@ -469,9 +480,10 @@ pub fn for_each(arr: &Value, callback: &Value) -> Value {
 
 pub fn find(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 return Value::Number(n);
             }
         }
@@ -480,9 +492,10 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
             if result.is_truthy() {
                 return v.clone();
             }
@@ -493,9 +506,10 @@ pub fn find(arr: &Value, callback: &Value) -> Value {
 
 pub fn find_index(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 return Value::Number(i as f64);
             }
         }
@@ -504,9 +518,10 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
             if result.is_truthy() {
                 return Value::Number(i as f64);
             }
@@ -519,10 +534,11 @@ pub fn find_index(arr: &Value, callback: &Value) -> Value {
 /// the original index. Returns `null` (JS `undefined`) when nothing matches. #247
 pub fn find_last(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for i in (0..data.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             if cb
-                .call(&[Value::Number(data[i]), Value::Number(i as f64)])
+                .call(&[Value::Number(data[i]), Value::Number(i as f64), arr_value.clone()])
                 .is_truthy()
             {
                 return Value::Number(data[i]);
@@ -534,10 +550,11 @@ pub fn find_last(arr: &Value, callback: &Value) -> Value {
     let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for i in (0..arr_borrow.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             let v = &arr_borrow[i];
-            if cb.call(&[v.clone(), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 return v.clone();
             }
         }
@@ -548,10 +565,11 @@ pub fn find_last(arr: &Value, callback: &Value) -> Value {
 /// `Array.prototype.findLastIndex` — like [`find_index`] but from the end; `-1` if no match. #247
 pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for i in (0..data.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             if cb
-                .call(&[Value::Number(data[i]), Value::Number(i as f64)])
+                .call(&[Value::Number(data[i]), Value::Number(i as f64), arr_value.clone()])
                 .is_truthy()
             {
                 return Value::Number(i as f64);
@@ -563,10 +581,11 @@ pub fn find_last_index(arr: &Value, callback: &Value) -> Value {
     let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for i in (0..arr_borrow.len()).rev() {
             if tishlang_core::has_pending_throw() { break; } // #303
             if cb
-                .call(&[arr_borrow[i].clone(), Value::Number(i as f64)])
+                .call(&[arr_borrow[i].clone(), Value::Number(i as f64), arr_value.clone()])
                 .is_truthy()
             {
                 return Value::Number(i as f64);
@@ -598,9 +617,10 @@ pub fn at(arr: &Value, index: &Value) -> Value {
 
 pub fn some(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            if cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+            if cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 return Value::Bool(true);
             }
         }
@@ -609,9 +629,10 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
             if result.is_truthy() {
                 return Value::Bool(true);
             }
@@ -622,9 +643,10 @@ pub fn some(arr: &Value, callback: &Value) -> Value {
 
 pub fn every(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
+        let arr_value = arr.clone(); // 3rd callback arg (JS `array`)
         for (i, &n) in data.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            if !cb.call(&[Value::Number(n), Value::Number(i as f64)]).is_truthy() {
+            if !cb.call(&[Value::Number(n), Value::Number(i as f64), arr_value.clone()]).is_truthy() {
                 return Value::Bool(false);
             }
         }
@@ -633,9 +655,10 @@ pub fn every(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            let result = cb.call(&[v.clone(), Value::Number(i as f64)]);
+            let result = cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
             if !result.is_truthy() {
                 return Value::Bool(false);
             }
@@ -650,10 +673,11 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let (Value::Array(arr), Value::Function(cb)) = (arr, callback) {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
+        let arr_value = Value::Array(arr.clone()); // 3rd callback arg (JS `array`)
         let mut result: Vec<Value> = Vec::new();
         for (i, v) in arr_borrow.iter().enumerate() {
             if tishlang_core::has_pending_throw() { break; } // #303
-            let mapped = cb.call(&[v.clone(), Value::Number(i as f64)]);
+            let mapped = cb.call(&[v.clone(), Value::Number(i as f64), arr_value.clone()]);
             if let Value::Array(inner) = mapped {
                 result.extend(inner.borrow().iter().cloned());
             } else {
