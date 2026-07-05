@@ -376,6 +376,19 @@ impl Codegen {
                 self.writeln(&format!("for (const {} of {})", escaped, it));
                 self.emit_js_control_body(body)?;
             }
+            Statement::ForIn {
+                name,
+                object,
+                body,
+                ..
+            } => {
+                // Native JS `for-in` — iterates own enumerable keys (#413). tish objects have no
+                // prototype chain, so this matches the key-enumeration the other backends perform.
+                let escaped = Self::escape_ident(name.as_ref());
+                let obj = self.emit_expr(object)?;
+                self.writeln(&format!("for (const {} in {})", escaped, obj));
+                self.emit_js_control_body(body)?;
+            }
             Statement::Return { value, .. } => {
                 if let Some(v) = value {
                     let e = self.emit_expr(v)?;

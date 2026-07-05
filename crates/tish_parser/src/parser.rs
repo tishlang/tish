@@ -1290,6 +1290,21 @@ impl<'a> Parser<'a> {
                     span: self.span_end(span_start),
                 });
             }
+            // `for (let k in obj)` — after a declared loop variable, `in` is for-in enumeration, not
+            // the binary `in` operator (#413). Iterates the object's own enumerable keys.
+            if matches!(self.peek_kind(), Some(TokenKind::In)) {
+                self.advance();
+                let object = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                let body = Box::new(self.parse_block_or_statement()?);
+                return Ok(Statement::ForIn {
+                    name,
+                    name_span,
+                    object,
+                    body,
+                    span: self.span_end(span_start),
+                });
+            }
             let type_ann = if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
                 self.advance();
                 Some(self.parse_type_annotation()?)

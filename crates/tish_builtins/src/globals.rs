@@ -120,16 +120,28 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
 
 /// Object.keys(obj)
 pub fn object_keys(args: &[Value]) -> Value {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj_borrow = obj.borrow();
-        let keys: Vec<Value> = obj_borrow
-            .strings
-            .keys()
-            .map(|k| Value::String(tishlang_core::ArcStr::from(k.as_ref())))
-            .collect();
-        Value::Array(VmRef::new(keys))
-    } else {
-        Value::Array(VmRef::new(Vec::new()))
+    match args.first() {
+        Some(Value::Object(obj)) => {
+            let obj_borrow = obj.borrow();
+            let keys: Vec<Value> = obj_borrow
+                .strings
+                .keys()
+                .map(|k| Value::String(tishlang_core::ArcStr::from(k.as_ref())))
+                .collect();
+            Value::Array(VmRef::new(keys))
+        }
+        // `Object.keys(array)` yields the index strings "0".."len-1" (an array's own enumerable keys
+        // are its indices, per JS). Previously returned `[]` — a node divergence, and the reason
+        // `for (k in array)` enumerated nothing on the vm/native backends (they lower for-in to
+        // for-of over `Object.keys`).
+        Some(Value::Array(arr)) => {
+            let len = arr.borrow().len();
+            let keys: Vec<Value> = (0..len)
+                .map(|i| Value::String(tishlang_core::ArcStr::from(i.to_string().as_str())))
+                .collect();
+            Value::Array(VmRef::new(keys))
+        }
+        _ => Value::Array(VmRef::new(Vec::new())),
     }
 }
 
