@@ -3634,7 +3634,7 @@ mod tests {
     #[test]
     fn osr_region_handles_branches() {
         let chunk = top_chunk(
-            "let s = 0.0\nlet i = 0.0\nwhile (i < 20.0) { if (i % 2.0 == 0.0) { s = s + i }; i = i + 1.0 }\n",
+            "let s = 0.0\nlet i = 0.0\nwhile (i < 20.0) { if (i % 2.0 === 0.0) { s = s + i }; i = i + 1.0 }\n",
         );
         let (header, end) = first_region(&chunk);
         let lf =

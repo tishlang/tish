@@ -12,13 +12,13 @@ if (!isTTY()) {
   let running = true
   while (running) {
     let ev = read(200)          // poll with a 200ms timeout (non-blocking-ish)
-    if (ev == null) { continue } // nothing this tick
-    if (ev.type == "key") {
+    if (ev === null) { continue } // nothing this tick
+    if (ev.type === "key") {
       console.log("key:", ev.key, "ctrl:", ev.ctrl, "alt:", ev.alt, "shift:", ev.shift)
-      if (ev.key == "q") { running = false }
-      if (ev.ctrl && ev.key == "c") { running = false }
+      if (ev.key === "q") { running = false }
+      if (ev.ctrl && ev.key === "c") { running = false }
     }
-    if (ev.type == "resize") {
+    if (ev.type === "resize") {
       console.log("resize:", ev.cols, "x", ev.rows)
     }
   }

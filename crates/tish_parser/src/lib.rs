@@ -60,6 +60,23 @@ mod tests {
         assert!(parse("fn f() { if (a) { if (b) { return 1 } } }").is_ok());
     }
 
+    /// #244: loose equality `==` / `!=` is rejected uniformly at parse (across every backend), with an
+    /// actionable message pointing at the strict form. `===` / `!==` still parse.
+    #[test]
+    fn loose_equality_is_rejected_at_parse() {
+        let eq = parse("let b = 1 == 1").unwrap_err();
+        assert!(eq.contains("'=='") && eq.contains("'==='"), "got: {eq}");
+        let ne = parse("let b = 1 != 2").unwrap_err();
+        assert!(ne.contains("'!='") && ne.contains("'!=='"), "got: {ne}");
+        // Rejected wherever an expression is parsed, not just at top level.
+        assert!(parse("fn f(x) { if (x == 0) { return 1 } return 0 }").is_err());
+        assert!(parse("let y = a != null && a.b").is_err());
+        // Strict forms are unaffected.
+        assert!(parse("let b = 1 === 1").is_ok());
+        assert!(parse("let b = 1 !== 2").is_ok());
+        assert!(parse("let y = a !== null && a.b").is_ok());
+    }
+
     #[test]
     fn test_async_fn_parse() {
         let program = parse("async fn foo() { }").expect("parse async fn");

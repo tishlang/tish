@@ -4657,7 +4657,7 @@ mod tests {
 
     #[test]
     fn mutual_recursion_not_unresolved_or_unused() {
-        let src = "fn even(n) { if (n == 0) { return true } return odd(n - 1) }\nfn odd(n) { if (n == 0) { return false } return even(n - 1) }\neven(10)\n";
+        let src = "fn even(n) { if (n === 0) { return true } return odd(n - 1) }\nfn odd(n) { if (n === 0) { return false } return even(n - 1) }\neven(10)\n";
         let program = parse(src).expect("parse");
         assert!(
             collect_unresolved_identifiers(&program).is_empty(),
