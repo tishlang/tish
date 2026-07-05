@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tishlang_core::Value;
+use tishlang_core::{ArcStr, Value};
 
 /// Per-property-name inline cache for object access (the JavaScriptCore inline-cache idea), indexed by
 /// the name index that `GetMember`/`SetMember` already carry. Each cell packs
@@ -23,7 +23,10 @@ impl Clone for InlineCaches {
 pub enum Constant {
     /// Primitive literals
     Number(f64),
-    String(Arc<str>),
+    /// String literal, stored as an interned [`ArcStr`]. `LoadConst` clones it into the
+    /// resulting `Value::String` — a refcount bump, no allocation — so a hot literal load
+    /// (object keys, template chunks, repeated comparisons) never re-allocates the bytes.
+    String(ArcStr),
     Bool(bool),
     Null,
     /// Nested function code (index into parent Chunk's nested chunks)
@@ -31,10 +34,18 @@ pub enum Constant {
 }
 
 impl Constant {
+    /// Build a `Constant::String` from anything string-like (`&str`, `String`, `Arc<str>`).
+    /// Interns once into an [`ArcStr`] at compile time; subsequent `LoadConst`s clone it (bump).
+    #[inline]
+    pub fn str_const(s: impl AsRef<str>) -> Constant {
+        Constant::String(ArcStr::from(s.as_ref()))
+    }
+
     pub fn to_value(&self) -> Value {
         match self {
             Constant::Number(n) => Value::Number(*n),
-            Constant::String(s) => Value::String(tishlang_core::ArcStr::from(s.as_ref())),
+            // Clone the interned `ArcStr` (refcount bump) rather than re-allocating the bytes.
+            Constant::String(s) => Value::String(s.clone()),
             Constant::Bool(b) => Value::Bool(*b),
             Constant::Null => Value::Null,
             Constant::Closure(_) => {

@@ -43,7 +43,7 @@ fn literal_to_constant(expr: &Expr) -> Option<Constant> {
     if let Expr::Literal { value, .. } = expr {
         Some(match value {
             Literal::Number(n) => Constant::Number(*n),
-            Literal::String(s) => Constant::String(Arc::clone(s)),
+            Literal::String(s) => Constant::str_const(s),
             Literal::Bool(b) => Constant::Bool(*b),
             Literal::Null => Constant::Null,
         })
@@ -2231,7 +2231,7 @@ impl<'a> Compiler<'a> {
             DestructPattern::Object(props) => {
                 for prop in props {
                     self.emit(Opcode::Dup);
-                    let key_idx = self.constant_idx(Constant::String(Arc::clone(&prop.key)));
+                    let key_idx = self.constant_idx(Constant::str_const(&prop.key));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(key_idx);
                     self.emit(Opcode::GetIndex); // GetIndex pops obj, index and uses get_member
@@ -2271,7 +2271,7 @@ impl<'a> Compiler<'a> {
             Expr::Literal { value, .. } => {
                 let c = match value {
                     Literal::Number(n) => Constant::Number(*n),
-                    Literal::String(s) => Constant::String(Arc::clone(s)),
+                    Literal::String(s) => Constant::str_const(s),
                     Literal::Bool(b) => Constant::Bool(*b),
                     Literal::Null => Constant::Null,
                 };
@@ -2376,7 +2376,7 @@ impl<'a> Compiler<'a> {
                                 Self::detect_property_sort_comparator(cmp_expr)
                             {
                                 self.compile_expr(object)?;
-                                let prop_idx = self.constant_idx(Constant::String(prop));
+                                let prop_idx = self.constant_idx(Constant::str_const(&prop));
                                 self.emit(Opcode::ArraySortByProperty);
                                 self.chunk.write_u16(prop_idx);
                                 self.chunk.write_u16(if ascending { 0 } else { 1 });
@@ -2579,7 +2579,7 @@ impl<'a> Compiler<'a> {
                     for prop in props {
                         match prop {
                             ObjectProp::KeyValue(k, v, _) => {
-                                let idx = self.constant_idx(Constant::String(Arc::clone(k)));
+                                let idx = self.constant_idx(Constant::str_const(k));
                                 self.emit(Opcode::LoadConst);
                                 self.chunk.write_u16(idx);
                                 self.compile_expr(v)?;
@@ -2595,7 +2595,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v, _) = prop {
-                            let idx = self.constant_idx(Constant::String(Arc::clone(k)));
+                            let idx = self.constant_idx(Constant::str_const(k));
                             self.emit(Opcode::LoadConst);
                             self.chunk.write_u16(idx);
                             self.compile_expr(v)?;
@@ -2666,20 +2666,20 @@ impl<'a> Compiler<'a> {
             Expr::TemplateLiteral { quasis, exprs, .. } => {
                 if exprs.is_empty() {
                     let s = quasis[0].to_string();
-                    let idx = self.constant_idx(Constant::String(Arc::from(s)));
+                    let idx = self.constant_idx(Constant::str_const(&s));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 } else {
                     // Interleave quasis and exprs: quasi[0] + expr[0] + quasi[1] + expr[1] + ... + quasi[n]
                     let first = quasis[0].to_string();
-                    let idx = self.constant_idx(Constant::String(Arc::from(first)));
+                    let idx = self.constant_idx(Constant::str_const(&first));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                     for (i, expr) in exprs.iter().enumerate() {
                         self.compile_expr(expr)?;
                         self.emit_u8(Opcode::BinOp, 0); // Add (string concat)
                         let quasi_s = quasis[i + 1].to_string();
-                        let qidx = self.constant_idx(Constant::String(Arc::from(quasi_s)));
+                        let qidx = self.constant_idx(Constant::str_const(&quasi_s));
                         self.emit(Opcode::LoadConst);
                         self.chunk.write_u16(qidx);
                         self.emit_u8(Opcode::BinOp, 0); // Add
@@ -2757,8 +2757,8 @@ impl<'a> Compiler<'a> {
             Expr::NativeModuleLoad {
                 spec, export_name, ..
             } => {
-                let spec_idx = self.constant_idx(Constant::String(Arc::clone(spec)));
-                let export_idx = self.constant_idx(Constant::String(Arc::clone(export_name)));
+                let spec_idx = self.constant_idx(Constant::str_const(spec));
+                let export_idx = self.constant_idx(Constant::str_const(export_name));
                 self.emit(Opcode::LoadNativeExport);
                 self.chunk.write_u16(spec_idx);
                 self.chunk.write_u16(export_idx);
@@ -2790,7 +2790,7 @@ impl<'a> Compiler<'a> {
                         ..
                     } => {
                         self.compile_expr(object)?;
-                        let idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                        let idx = self.constant_idx(Constant::str_const(name));
                         self.emit(Opcode::LoadConst);
                         self.chunk.write_u16(idx);
                         self.emit(Opcode::DeleteIndex);
@@ -2919,7 +2919,7 @@ impl<'a> Compiler<'a> {
             let tag_idx = self.name_idx(tag);
             self.emit_u16(Opcode::LoadGlobal, tag_idx);
         } else {
-            let tag_const = self.constant_idx(Constant::String(Arc::from(tag_str)));
+            let tag_const = self.constant_idx(Constant::str_const(tag_str));
             self.emit(Opcode::LoadConst);
             self.chunk.write_u16(tag_const);
         }
@@ -2955,12 +2955,12 @@ impl<'a> Compiler<'a> {
             for prop in props {
                 match prop {
                     JsxProp::Attr { name, value } => {
-                        let key_idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                        let key_idx = self.constant_idx(Constant::str_const(name));
                         self.emit(Opcode::LoadConst);
                         self.chunk.write_u16(key_idx);
                         match value {
                             JsxAttrValue::String(s) => {
-                                let val_idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                                let val_idx = self.constant_idx(Constant::str_const(s));
                                 self.emit(Opcode::LoadConst);
                                 self.chunk.write_u16(val_idx);
                             }
@@ -2983,12 +2983,12 @@ impl<'a> Compiler<'a> {
         } else {
             for prop in props {
                 if let JsxProp::Attr { name, value } = prop {
-                    let key_idx = self.constant_idx(Constant::String(Arc::clone(name)));
+                    let key_idx = self.constant_idx(Constant::str_const(name));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(key_idx);
                     match value {
                         JsxAttrValue::String(s) => {
-                            let val_idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                            let val_idx = self.constant_idx(Constant::str_const(s));
                             self.emit(Opcode::LoadConst);
                             self.chunk.write_u16(val_idx);
                         }
@@ -3010,7 +3010,7 @@ impl<'a> Compiler<'a> {
         for child in children {
             match child {
                 JsxChild::Text(s) => {
-                    let idx = self.constant_idx(Constant::String(Arc::clone(s)));
+                    let idx = self.constant_idx(Constant::str_const(s));
                     self.emit(Opcode::LoadConst);
                     self.chunk.write_u16(idx);
                 }

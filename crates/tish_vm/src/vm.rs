@@ -1695,9 +1695,8 @@ impl Vm {
                     let idx = Self::read_u16(code, &mut ip) as usize;
                     let v = match cur.constants.get(idx) {
                         Some(Constant::Number(n)) => Value::Number(*n),
-                        Some(Constant::String(s)) => {
-                            Value::String(tishlang_core::ArcStr::from(s.as_ref()))
-                        }
+                        // Clone the interned `ArcStr` (refcount bump), not a fresh allocation.
+                        Some(Constant::String(s)) => Value::String(s.clone()),
                         Some(Constant::Bool(b)) => Value::Bool(*b),
                         Some(Constant::Null) => Value::Null,
                         _ => ferr!("Ineligible constant {} in run_framed", idx),
@@ -2138,9 +2137,8 @@ impl Vm {
                         .ok_or_else(|| format!("Constant index out of bounds: {}", idx))?;
                     let v = match c {
                         Constant::Number(n) => Value::Number(*n),
-                        Constant::String(s) => {
-                            Value::String(tishlang_core::ArcStr::from(s.as_ref()))
-                        }
+                        // Clone the interned `ArcStr` (refcount bump), not a fresh allocation.
+                        Constant::String(s) => Value::String(s.clone()),
                         Constant::Bool(b) => Value::Bool(*b),
                         Constant::Null => Value::Null,
                         Constant::Closure(nested_idx) => {
@@ -2843,7 +2841,14 @@ impl Vm {
                     for i in 0..n {
                         let key_val = std::mem::replace(&mut self.stack[base + 2 * i], Value::Null);
                         let val = std::mem::replace(&mut self.stack[base + 2 * i + 1], Value::Null);
-                        let key: Arc<str> = key_val.to_display_string().into();
+                        // Object-literal keys are string constants in the common case. Take the
+                        // already-materialized string bytes directly (one `Arc<str>` alloc) instead
+                        // of `to_display_string()` → fresh `String` → `Arc<str>` (two allocs). A
+                        // computed/number key still needs the display path (e.g. `{ [1]: v }` → "1").
+                        let key: Arc<str> = match &key_val {
+                            Value::String(s) => Arc::from(s.as_str()),
+                            _ => key_val.to_display_string().into(),
+                        };
                         map.insert(key, val);
                     }
                     self.stack.truncate(base);
@@ -3139,7 +3144,7 @@ impl Vm {
                     let spec_idx = Self::read_u16(code, &mut ip);
                     let export_idx = Self::read_u16(code, &mut ip);
                     let spec = match constants.get(spec_idx as usize) {
-                        Some(Constant::String(s)) => s.as_ref(),
+                        Some(Constant::String(s)) => s.as_str(),
                         _ => {
                             return Err(
                                 "LoadNativeExport: spec constant out of bounds or not string"
@@ -3148,7 +3153,7 @@ impl Vm {
                         }
                     };
                     let export_name = match constants.get(export_idx as usize) {
-                        Some(Constant::String(s)) => s.as_ref(),
+                        Some(Constant::String(s)) => s.as_str(),
                         _ => {
                             return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
                         }

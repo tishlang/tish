@@ -96,7 +96,7 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
                 }
                 let (s_bytes, rest) = data.split_at(str_len);
                 data = rest;
-                Constant::String(Arc::from(String::from_utf8_lossy(s_bytes).into_owned()))
+                Constant::str_const(String::from_utf8_lossy(s_bytes))
             }
             2 => {
                 if data.is_empty() {
