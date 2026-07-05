@@ -176,7 +176,12 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                     span: span_util::oxc_span_to_tish(ctx.1, &*arrow.body),
                 }))
             };
-            Ok(Expr::ArrowFunction { params, body, span })
+            Ok(Expr::ArrowFunction {
+                async_: arrow.r#async,
+                params,
+                body,
+                span,
+            })
         }
         OxcExpr::AwaitExpression(a) => Ok(Expr::Await {
             operand: Box::new(convert_expr(&a.argument, ctx)?),
@@ -229,7 +234,12 @@ pub fn convert_expr(expr: &OxcExpr<'_>, ctx: &Ctx<'_>) -> Result<Expr, ConvertEr
                     }))
                 }
             };
-            Ok(Expr::ArrowFunction { params, body, span })
+            Ok(Expr::ArrowFunction {
+                async_: f.r#async,
+                params,
+                body,
+                span,
+            })
         }
         _ => Err(ConvertError::new(ConvertErrorKind::Unsupported {
             what: format!("expression: {:?}", std::mem::discriminant(expr)),

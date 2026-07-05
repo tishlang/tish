@@ -77,6 +77,30 @@ mod tests {
         assert!(parse("let y = a !== null && a.b").is_ok());
     }
 
+    /// #428: `async` in expression position parses as an async arrow (paren and single-param forms);
+    /// non-async arrows keep `async_: false`.
+    #[test]
+    fn async_arrow_expressions_parse() {
+        use tishlang_ast::Expr;
+        let arrow_async = |src: &str| -> bool {
+            let p = parse(src).expect("parse");
+            let Some(Statement::VarDecl { init: Some(e), .. }) = p.statements.first() else {
+                panic!("expected `let x = <arrow>`");
+            };
+            match e {
+                Expr::ArrowFunction { async_, .. } => *async_,
+                other => panic!("expected ArrowFunction, got {other:?}"),
+            }
+        };
+        assert!(arrow_async("let f = async () => 1"), "async paren arrow");
+        assert!(arrow_async("let g = async x => x + 1"), "async single-param arrow");
+        assert!(arrow_async("let h = async (a, b) => a + b"), "async multi-param arrow");
+        assert!(!arrow_async("let f = () => 1"), "plain arrow is not async");
+        assert!(!arrow_async("let g = x => x"), "plain single-param arrow is not async");
+        // `async` not followed by an arrow in expr position is an error, not a silent identifier.
+        assert!(parse("let x = async 5").is_err());
+    }
+
     #[test]
     fn test_async_fn_parse() {
         let program = parse("async fn foo() { }").expect("parse async fn");

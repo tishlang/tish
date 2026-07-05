@@ -2464,6 +2464,50 @@ impl<'a> Parser<'a> {
                 value: Literal::Null,
                 span,
             }),
+            // `async` in expression position (#428): an async arrow — `async () => …` or
+            // `async x => …`. The body runs in async context (`await` allowed). Async function
+            // expressions / method shorthand need function-expression support, which tish lacks.
+            TokenKind::Async => {
+                if matches!(self.peek_kind(), Some(TokenKind::LParen)) {
+                    self.advance(); // consume `(`
+                    if let Some(arrow) = self.try_parse_arrow_function(&span, true)? {
+                        return Ok(arrow);
+                    }
+                    return Err("Expected an arrow function after `async (`".to_string());
+                }
+                if matches!(
+                    self.peek_kind(),
+                    Some(TokenKind::Ident | TokenKind::Fn | TokenKind::Type)
+                ) {
+                    let name_tok = self.advance().ok_or("Expected parameter name")?;
+                    let name = name_tok.literal.clone().ok_or("Expected parameter name")?;
+                    let name_span = Span {
+                        start: name_tok.span.start,
+                        end: name_tok.span.end,
+                    };
+                    self.expect(TokenKind::Arrow)?;
+                    let body = self.parse_arrow_body()?;
+                    let end = self.previous_span_end();
+                    return Ok(Expr::ArrowFunction {
+                        async_: true,
+                        params: vec![FunParam::Simple(TypedParam {
+                            name,
+                            name_span,
+                            type_ann: None,
+                            default: None,
+                        })],
+                        body,
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
+                    });
+                }
+                Err(
+                    "`async` in expression position must be followed by an arrow function (`async () => …`)"
+                        .to_string(),
+                )
+            }
             // `fn` / `type` as a value reference or single-param arrow head (issue #55).
             // `fn`/`type` function-expressions don't exist and statement-leading decls are
             // handled in parse_statement, so treating them as identifiers here is additive.
@@ -2475,6 +2519,7 @@ impl<'a> Parser<'a> {
                     let body = self.parse_arrow_body()?;
                     let end = self.previous_span_end();
                     return Ok(Expr::ArrowFunction {
+                        async_: false,
                         params: vec![FunParam::Simple(TypedParam {
                             name: name.clone(),
                             name_span: span,
@@ -2492,7 +2537,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 // Check if this is an arrow function: (params) => ...
-                if let Some(arrow_fn) = self.try_parse_arrow_function(&span)? {
+                if let Some(arrow_fn) = self.try_parse_arrow_function(&span, false)? {
                     return Ok(arrow_fn);
                 }
                 // Otherwise it's a grouping expression
@@ -2652,7 +2697,11 @@ impl<'a> Parser<'a> {
 
     /// Try to parse an arrow function starting with '(' already consumed.
     /// Returns Some(Expr) if successful, None if it's not an arrow function.
-    fn try_parse_arrow_function(&mut self, start_span: &Span) -> Result<Option<Expr>, String> {
+    fn try_parse_arrow_function(
+        &mut self,
+        start_span: &Span,
+        async_: bool,
+    ) -> Result<Option<Expr>, String> {
         // Save position for backtracking
         let saved_pos = self.pos;
 
@@ -2706,6 +2755,7 @@ impl<'a> Parser<'a> {
         let end = self.previous_span_end();
 
         Ok(Some(Expr::ArrowFunction {
+            async_,
             params,
             body,
             span: Span {
