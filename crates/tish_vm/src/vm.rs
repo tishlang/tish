@@ -1061,6 +1061,13 @@ fn try_call_array_jit(
     // fully populated so its backing buffers never reallocate out from under a live pointer.
     let mut scratch: Vec<Vec<f64>> = Vec::new();
     let mut array_arg: Vec<usize> = Vec::new(); // the `args` index each scratch buffer came from
+    let mut is_bool_arr: Vec<bool> = Vec::new(); // #187: parallel to `scratch` — was it a Bool array?
+                                                 // #187: track whether ANY arg is a (non-empty) Bool array and whether ANY is a Number array. If both
+                                                 // element types are present the JIT could launder a bool value read from one array into a number
+                                                 // array (or vice versa) — the flattened `f64` writeback would then re-box it wrong — so we bail
+                                                 // (below). queens (all-bool arrays) and spectral_norm (all-number) never mix, so they stay JIT'd.
+    let mut any_bool_arr = false;
+    let mut any_num_arr = false;
     #[allow(clippy::needless_range_loop)]
     // `i` drives bit-mask math (`mask >> i`), not just indexing
     for i in 0..arity {
@@ -1081,16 +1088,33 @@ fn try_call_array_jit(
                             }
                         }
                     }
+                    // #187: accept an all-`Number` OR an all-`Bool` array (bool → `f64` 0/1, e.g.
+                    // queens' `cols`/`diag*`). A MIXED array is ambiguous for the typed writeback → bail.
                     let b = a.borrow();
                     let mut buf: Vec<f64> = Vec::with_capacity(b.len());
+                    let mut seen_bool = false;
+                    let mut seen_num = false;
                     for el in b.iter() {
                         match el {
-                            Value::Number(n) => buf.push(*n),
-                            _ => return None, // non-numeric element → interpreter
+                            Value::Number(n) => {
+                                seen_num = true;
+                                buf.push(*n);
+                            }
+                            Value::Bool(bl) => {
+                                seen_bool = true;
+                                buf.push(if *bl { 1.0 } else { 0.0 });
+                            }
+                            _ => return None, // non-numeric/non-bool element → interpreter
                         }
                     }
+                    if seen_bool && seen_num {
+                        return None; // mixed Bool/Number array → can't type the writeback
+                    }
+                    any_bool_arr |= seen_bool;
+                    any_num_arr |= seen_num;
                     scratch.push(buf);
                     array_arg.push(i);
+                    is_bool_arr.push(seen_bool);
                 }
                 _ => return None, // NumberArray / non-array → interpreter
             }
@@ -1098,6 +1122,27 @@ fn try_call_array_jit(
             match &args[i] {
                 Value::Number(n) => numeric.push(*n),
                 _ => return None,
+            }
+        }
+    }
+    // #187: mixed Bool + Number array args in one call could launder a value across element types (a bool
+    // read from one array stored into a number array, or vice versa) — the flat `f64` writeback can't
+    // re-box that correctly. Bail when both element types are present among the args.
+    if any_bool_arr && any_num_arr {
+        return None;
+    }
+    // #187: the writeback re-boxes a writable array by its ENTRY element type (bool vs number, per
+    // `is_bool_arr`), so the value kind the JIT actually stored must match that type. A function that
+    // writes bool consts (`arr[i] = true`) handed a NUMBER array — or one that writes numbers handed a
+    // BOOL array — would re-box to the wrong type (e.g. `arr[i] = true` on `[0,0,0]` boxing `Number(1)`
+    // where the interpreter stores `Bool(true)`). Bail to the interpreter on any such mismatch. (A single
+    // array with mixed bool + non-bool writes was already rejected at compile time in `classify_params`.)
+    let bool_write_mask = nf.array_bool_write_mask();
+    if writable != 0 {
+        for (k, &entry_bool) in is_bool_arr.iter().enumerate() {
+            let i = array_arg[k];
+            if (writable >> i) & 1 == 1 && entry_bool != ((bool_write_mask >> i) & 1 == 1) {
+                return None;
             }
         }
     }
@@ -1111,27 +1156,63 @@ fn try_call_array_jit(
             len: buf.len(),
         })
         .collect();
-    let (res, deopt) = nf.call_arrays(&numeric, &handles);
+    // #187: a self-recursive array-mode function (queens' `place`) recurses on the NATIVE stack, so
+    // pass a RecurGuard (like #381) — its entry SP-bail turns unbounded recursion into a catchable
+    // RangeError instead of a SIGSEGV. Non-recursive array fns pass a null guard (unchanged ABI).
+    let (res, deopt, tripped) = if nf.recur_guarded() {
+        let anchor = 0u8;
+        let current_sp = &anchor as *const u8 as usize;
+        let stack_limit = match stacker::remaining_stack() {
+            Some(rem) => {
+                let margin = RECUR_STACK_MARGIN.min(rem / 2);
+                current_sp.saturating_sub(rem).saturating_add(margin)
+            }
+            None => 0,
+        };
+        let mut guard = crate::jit::RecurGuard {
+            stack_limit,
+            tripped: 0,
+        };
+        let (res, deopt) = nf.call_arrays_guarded(&numeric, &handles, &mut guard);
+        (res, deopt, guard.tripped != 0)
+    } else {
+        let (res, deopt) = nf.call_arrays(&numeric, &handles);
+        (res, deopt, false)
+    };
     if deopt {
         return None; // OOB access → re-run interpreter (the discarded scratch writes never escaped)
     }
     // #187: copy each WRITTEN array param's (possibly-mutated) scratch back into its `Value::Array`. The
     // length is unchanged (`SetIndex` can't grow; an OOB write deopts above), so this is a same-length
-    // element overwrite. Only reached on a non-deopt return, so partial mutations never leak.
+    // element overwrite. On a normal return this reflects the final state; on a recursion-guard TRIP
+    // (below) it reflects the partial in-place mutations made before the overflow — matching the
+    // interpreter/node, which likewise leak whatever was mutated when a deep recursion throws.
     if writable != 0 {
         for (k, buf) in scratch.iter().enumerate() {
             let i = array_arg[k];
             if (writable >> i) & 1 == 1 {
                 if let Value::Array(a) = &args[i] {
+                    let bool_arr = is_bool_arr[k]; // #187: re-box a bool array's elements as Bool
                     let mut b = a.borrow_mut();
                     for (j, &v) in buf.iter().enumerate() {
                         if let Some(slot) = b.get_mut(j) {
-                            *slot = Value::Number(v);
+                            *slot = if bool_arr {
+                                Value::Bool(v != 0.0)
+                            } else {
+                                Value::Number(v)
+                            };
                         }
                     }
                 }
             }
         }
+    }
+    // #187: a self-recursive array-mode fn that overflowed the native stack raises the same catchable
+    // RangeError as every other tier (#381). The writeback above already flushed the partial mutations,
+    // so the caller's arrays reflect the same "leaked" state the interpreter/node leave on a deep throw.
+    if tripped {
+        set_pending_throw(stack_overflow_error());
+        return Some(Value::Null);
     }
     // #187: a VOID function (side-effect writer, e.g. `multiplyAv`) returns the implicit `null` — its
     // `f64` result is a dummy. Return `Value::Null` to match the interpreter; the real effect is the
