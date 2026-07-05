@@ -1,0 +1,16 @@
+map 10,8,13,6,14
+map-self 50,30,80,10,90
+filter 8,9
+reduce 51
+reduce-noinit 15
+forEach 25
+some true
+every true
+find 9
+findIndex 3
+findLast 1
+findLastIndex 4
+flatMap 5,5,3,5,8,5,1,5,9,5
+one-arg 10,6,16,2,18
+two-arg 5,4,10,4,13
+reduce-2arg 26
