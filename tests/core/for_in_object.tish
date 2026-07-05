@@ -1,0 +1,38 @@
+// #413: `for (let k in obj)` iterates an object's own enumerable keys, in insertion order (JS
+// for-in semantics). This is the primary real-world use — object key enumeration, e.g. copying or
+// transforming an object. Consistent across interp/vm/native/js/node.
+
+let obj = { id: 5, name: "x", active: true }
+
+// Enumerate keys in insertion order.
+let ks = ""
+for (let k in obj) { ks = ks + k + "," }
+console.log("keys:", ks)
+
+// Read each value by key (the #413 repro: build a copy).
+let copy = {}
+for (let k in obj) { copy[k] = obj[k] }
+console.log("copy:", copy.id, copy.name, copy.active)
+
+// break / continue inside a for-in body.
+let seen = ""
+for (let k in obj) {
+  if (k === "name") { continue }
+  if (k === "active") { break }
+  seen = seen + k
+}
+console.log("seen:", seen)
+
+// for-in over a non-object (null) is a no-op — no iterations, no throw (matches JS `for (k in null)`).
+let n = 0
+for (let k in null) { n = n + 1 }
+console.log("null-iterations:", n)
+
+// Nested for-in over two objects.
+let a = { p: 1, q: 2 }
+let b = { r: 3 }
+let pairs = ""
+for (let i in a) {
+  for (let j in b) { pairs = pairs + i + j + " " }
+}
+console.log("nested:", pairs)

@@ -79,7 +79,12 @@ impl UsageAnalyzer {
                 }
                 self.analyze_statement(body);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 self.analyze_expr(iterable);
                 self.analyze_statement(body);
             }
@@ -330,6 +335,7 @@ fn program_uses_async(program: &Program) -> bool {
             Statement::While { body, .. }
             | Statement::For { body, .. }
             | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. }
             | Statement::DoWhile { body, .. } => stmt_has_async(body),
             Statement::Switch {
                 cases,
@@ -464,7 +470,12 @@ fn program_uses_async(program: &Program) -> bool {
                     || update.as_ref().is_some_and(expr_has_await)
                     || stmt_has_await(body)
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 expr_has_await(iterable) || stmt_has_await(body)
             }
             Statement::Return { value, .. } => value.as_ref().is_some_and(expr_has_await),
@@ -1308,6 +1319,7 @@ impl Codegen {
                 }
                 Statement::For { body, .. }
                 | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. }
                 | Statement::While { body, .. }
                 | Statement::DoWhile { body, .. } => {
                     Self::walk_type_aliases(std::slice::from_ref(body.as_ref()), out);
@@ -4805,6 +4817,46 @@ impl Codegen {
                 self.indent -= 1;
                 self.writeln("}");
             }
+            Statement::ForIn {
+                name,
+                name_span,
+                object,
+                body,
+                span,
+            } => {
+                // Lower `for (let k in obj)` to `for (let k of Object.keys(obj))` (#413) and reuse the
+                // native for-of emission. Object.keys yields the own enumerable keys the interpreter
+                // enumerates (insertion order for objects, index strings for arrays, `[]` for a
+                // non-object → `for (k in null)` no-ops).
+                let dummy = Span {
+                    start: (0, 0),
+                    end: (0, 0),
+                };
+                let keys_call = Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Ident {
+                            name: Arc::from("Object"),
+                            span: dummy,
+                        }),
+                        prop: MemberProp::Name {
+                            name: Arc::from("keys"),
+                            span: dummy,
+                        },
+                        optional: false,
+                        span: dummy,
+                    }),
+                    args: vec![CallArg::Expr(object.clone())],
+                    span: dummy,
+                };
+                let lowered = Statement::ForOf {
+                    name: Arc::clone(name),
+                    name_span: *name_span,
+                    iterable: keys_call,
+                    body: body.clone(),
+                    span: *span,
+                };
+                self.emit_statement(&lowered)?;
+            }
             Statement::ForOf {
                 name,
                 iterable,
@@ -8175,7 +8227,12 @@ impl Codegen {
                 }
                 Self::collect_assigned_idents_in_stmt(body, names);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::collect_assigned_idents_in_expr(iterable, names);
                 Self::collect_assigned_idents_in_stmt(body, names);
             }
@@ -8311,7 +8368,12 @@ impl Codegen {
                     || update.as_ref().is_some_and(|u| Self::expr_has_length_changer(u))
                     || Self::stmt_has_length_changer(body)
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::expr_has_length_changer(iterable) || Self::stmt_has_length_changer(body)
             }
             Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
@@ -8448,7 +8510,12 @@ impl Codegen {
                     || update.as_ref().is_some_and(|u| Self::expr_changes_base_len(u, base))
                     || Self::stmt_changes_base_len(body, base)
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::expr_changes_base_len(iterable, base) || Self::stmt_changes_base_len(body, base)
             }
             Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
@@ -8857,7 +8924,12 @@ impl Codegen {
                 }
                 Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::collect_captured_block_vars_from_expr(iterable, block_vars, result);
                 Self::collect_captured_block_vars_from_statements(body, block_vars, result);
             }
@@ -8995,7 +9067,8 @@ impl Codegen {
                 }
                 Self::collect_local_var_names(body, names);
             }
-            Statement::ForOf { body, .. } => Self::collect_local_var_names(body, names),
+            Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::collect_local_var_names(body, names),
             Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
                 Self::collect_local_var_names(body, names);
             }
@@ -9261,7 +9334,12 @@ impl Codegen {
                 }
                 Self::collect_stmt_idents(body, idents);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::collect_expr_idents(iterable, idents);
                 Self::collect_stmt_idents(body, idents);
             }
@@ -12391,6 +12469,7 @@ impl Codegen {
             }
             Statement::For { body, .. }
             | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. }
             | Statement::While { body, .. }
             | Statement::DoWhile { body, .. } => {
                 Self::collect_ordered_assigns_to(body, var, out)
@@ -12415,6 +12494,7 @@ impl Codegen {
             }
             Statement::For { body, .. }
             | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. }
             | Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
             | Statement::FunDecl { body, .. } => f(std::slice::from_ref(body)),
@@ -12480,7 +12560,12 @@ impl Codegen {
                 }
                 Self::for_each_stmt_expr(body, f);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 f(iterable);
                 Self::for_each_stmt_expr(body, f);
             }
@@ -12893,7 +12978,11 @@ impl Codegen {
                         Self::collect_annotated_types(std::slice::from_ref(e), aliases, env);
                     }
                 }
-                Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                // for-in's loop var is always a string key, so it gets no Vec-element type binding —
+                // it behaves like while/do-while here (recurse the body only).
+                Statement::While { body, .. }
+                | Statement::DoWhile { body, .. }
+                | Statement::ForIn { body, .. } => {
                     Self::collect_annotated_types(std::slice::from_ref(body), aliases, env)
                 }
                 Statement::ForOf {
@@ -13037,7 +13126,12 @@ impl Codegen {
                 }
                 Self::collect_reassignments_stmt(body, out);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 Self::collect_reassignments_expr(iterable, out);
                 Self::collect_reassignments_stmt(body, out);
             }
@@ -14124,7 +14218,8 @@ impl Codegen {
                 }
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
-            Statement::ForOf { body, .. } => {
+            Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => {
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
             Statement::Switch {
@@ -14874,7 +14969,8 @@ impl Codegen {
             Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
             | Statement::For { body, .. }
-            | Statement::ForOf { body, .. } => {
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => {
                 Self::walk_stmt_for_global_disqualifiers(body, g, bad);
             }
             Statement::Switch {
@@ -15114,7 +15210,12 @@ impl Codegen {
                 f(cond);
                 Self::for_each_expr_root_stmt(body, f);
             }
-            Statement::ForOf { iterable, body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
                 f(iterable);
                 Self::for_each_expr_root_stmt(body, f);
             }
@@ -18334,7 +18435,8 @@ impl Codegen {
             Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
             | Statement::For { body, .. }
-            | Statement::ForOf { body, .. } => Self::rec_collect_returns(body, out),
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::rec_collect_returns(body, out),
             _ => {}
         }
     }
@@ -18478,7 +18580,8 @@ impl Codegen {
             }
             Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => Self::rec_orch_binds_node(body, builders),
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::rec_orch_binds_node(body, builders),
             Statement::For { init, body, .. } => {
                 init.as_ref()
                     .is_some_and(|i| Self::rec_orch_binds_node(i, builders))
@@ -20562,7 +20665,8 @@ impl Codegen {
             }
             Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => Self::agg_collect_aliases(body, p, out),
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::agg_collect_aliases(body, p, out),
             _ => {}
         }
     }
@@ -20590,7 +20694,8 @@ impl Codegen {
             Statement::For { body, .. }
             | Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => Self::agg_stmt_writes(body, p, aliases),
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::agg_stmt_writes(body, p, aliases),
             _ => false,
         }
     }
@@ -20714,7 +20819,8 @@ impl Codegen {
             Statement::For { body, .. }
             | Statement::While { body, .. }
             | Statement::DoWhile { body, .. }
-            | Statement::ForOf { body, .. } => Self::stmt_returns_value(body),
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. } => Self::stmt_returns_value(body),
             _ => false,
         }
     }

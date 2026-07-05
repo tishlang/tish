@@ -334,10 +334,16 @@ fn stmt_rebinds(s: &Statement, name: &str) -> bool {
         }
         Statement::ForOf {
             name: n,
-            iterable,
+            iterable: e,
             body,
             ..
-        } => n.as_ref() == name || expr_rebinds(iterable, name) || stmt_rebinds(body, name),
+        }
+        | Statement::ForIn {
+            name: n,
+            object: e,
+            body,
+            ..
+        } => n.as_ref() == name || expr_rebinds(e, name) || stmt_rebinds(body, name),
         Statement::Switch {
             expr,
             cases,
@@ -504,10 +510,16 @@ fn name_rebinds_in_stmt(s: &Statement, name: &str) -> bool {
         }
         Statement::ForOf {
             name: n,
-            iterable,
+            iterable: e,
             body,
             ..
-        } => n.as_ref() == name || expr_rebinds(iterable, name) || name_rebinds_in_stmt(body, name),
+        }
+        | Statement::ForIn {
+            name: n,
+            object: e,
+            body,
+            ..
+        } => n.as_ref() == name || expr_rebinds(e, name) || name_rebinds_in_stmt(body, name),
         Statement::Switch {
             expr,
             cases,
@@ -1802,6 +1814,46 @@ impl<'a> Compiler<'a> {
                 }
                 self.emit(Opcode::LoopVarsEnd);
                 self.exit_block_scope();
+            }
+            Statement::ForIn {
+                name,
+                name_span,
+                object,
+                body,
+                span,
+            } => {
+                // Lower `for (let k in obj)` to `for (let k of Object.keys(obj))` (#413): Object.keys
+                // yields exactly the own enumerable keys the interpreter enumerates — insertion order
+                // for objects, index strings for arrays, and `[]` for a non-object (so `for (k in
+                // null)` no-ops). Reuses the whole for-of iteration path.
+                let dummy = Span {
+                    start: (0, 0),
+                    end: (0, 0),
+                };
+                let keys_call = Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Ident {
+                            name: Arc::from("Object"),
+                            span: dummy,
+                        }),
+                        prop: MemberProp::Name {
+                            name: Arc::from("keys"),
+                            span: dummy,
+                        },
+                        optional: false,
+                        span: dummy,
+                    }),
+                    args: vec![CallArg::Expr(object.clone())],
+                    span: dummy,
+                };
+                let lowered = Statement::ForOf {
+                    name: Arc::clone(name),
+                    name_span: *name_span,
+                    iterable: keys_call,
+                    body: body.clone(),
+                    span: *span,
+                };
+                self.compile_statement(&lowered)?;
             }
             Statement::Return { value, .. } => {
                 // Evaluate the return value first (JS order), then run any enclosing `finally`

@@ -188,7 +188,12 @@ fn collect_fun_decl_names_stmt(stmt: &Statement, names: &mut HashSet<String>) {
             }
             collect_fun_decl_names_stmt(body, names);
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             collect_fun_decl_names_expr(iterable, names);
             collect_fun_decl_names_stmt(body, names);
         }
@@ -646,7 +651,12 @@ fn stmt_contains_jsx_fragment(stmt: &tishlang_ast::Statement) -> bool {
                 || update.as_ref().is_some_and(expr_contains_jsx_fragment)
                 || stmt_contains_jsx_fragment(body)
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             expr_contains_jsx_fragment(iterable) || stmt_contains_jsx_fragment(body)
         }
         Statement::Switch {
@@ -827,7 +837,12 @@ fn stmt_contains_jsx(stmt: &tishlang_ast::Statement) -> bool {
                 || update.as_ref().is_some_and(expr_contains_jsx)
                 || stmt_contains_jsx(body)
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             expr_contains_jsx(iterable) || stmt_contains_jsx(body)
         }
         Statement::Switch {

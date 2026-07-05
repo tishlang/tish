@@ -118,6 +118,19 @@ fn optimize_statement(stmt: &Statement) -> Statement {
             body: Box::new(optimize_statement(body)),
             span: *span,
         },
+        Statement::ForIn {
+            name,
+            name_span,
+            object,
+            body,
+            span,
+        } => Statement::ForIn {
+            name: Arc::clone(name),
+            name_span: *name_span,
+            object: optimize_expr(object),
+            body: Box::new(optimize_statement(body)),
+            span: *span,
+        },
         Statement::Return { value, span } => Statement::Return {
             value: value.as_ref().map(optimize_expr),
             span: *span,

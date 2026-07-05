@@ -238,9 +238,12 @@ pub fn program_uses_document(program: &Program) -> bool {
                     || update.as_ref().is_some_and(expr_uses_document)
                     || stmt_uses_document(body)
             }
-            Statement::ForOf { iterable, body, .. } => {
-                expr_uses_document(iterable) || stmt_uses_document(body)
-            }
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => expr_uses_document(iterable) || stmt_uses_document(body),
             Statement::Switch {
                 expr,
                 cases,
@@ -1463,6 +1466,12 @@ pub(crate) fn rewrite_stmt_scope(
         Statement::ForOf {
             name,
             iterable,
+            body,
+            ..
+        }
+        | Statement::ForIn {
+            name,
+            object: iterable,
             body,
             ..
         } => {

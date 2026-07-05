@@ -660,6 +660,51 @@ impl Evaluator {
                 self.scope = outer;
                 ret
             }
+            Statement::ForIn {
+                name,
+                object,
+                body,
+                ..
+            } => {
+                let obj_val = self.eval_expr(object)?;
+                // for-in enumerates OWN ENUMERABLE KEYS as strings (JS semantics): objects yield keys
+                // in insertion order, arrays yield index strings "0".."len-1", and a non-object
+                // (incl. null) yields nothing — a no-op, matching JS `for (k in null)`.
+                let keys: Vec<crate::value::Value> = match &obj_val {
+                    crate::value::Value::Object(obj) => obj
+                        .borrow()
+                        .strings
+                        .keys()
+                        .map(|k| crate::value::Value::String(Arc::clone(k)))
+                        .collect(),
+                    crate::value::Value::Array(arr) => {
+                        let len = arr.borrow().len();
+                        (0..len)
+                            .map(|i| crate::value::Value::String(Arc::from(i.to_string())))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                // Fresh per-iteration binding (ES6 `for (let k in …)`), like the for-of arm above.
+                let outer = Rc::clone(&self.scope);
+                let mut ret = Ok(Value::Null);
+                for key in keys {
+                    let iter_env = Scope::child(Rc::clone(&outer));
+                    iter_env.borrow_mut().set(Arc::clone(name), key, true);
+                    self.scope = Rc::clone(&iter_env);
+                    match self.eval_statement(body) {
+                        Ok(_) => {}
+                        Err(EvalError::Break) => break,
+                        Err(EvalError::Continue) => continue,
+                        Err(e) => {
+                            ret = Err(e);
+                            break;
+                        }
+                    }
+                }
+                self.scope = outer;
+                ret
+            }
             Statement::For {
                 init,
                 cond,
@@ -4229,16 +4274,26 @@ impl Evaluator {
     }
 
     fn object_keys(args: &[Value]) -> Result<Value, String> {
-        if let Some(Value::Object(obj)) = args.first() {
-            let keys: Vec<Value> = obj
-                .borrow()
-                .strings
-                .keys()
-                .map(|k| Value::String(Arc::clone(k)))
-                .collect();
-            Ok(Value::Array(Rc::new(RefCell::new(keys))))
-        } else {
-            Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))))
+        match args.first() {
+            Some(Value::Object(obj)) => {
+                let keys: Vec<Value> = obj
+                    .borrow()
+                    .strings
+                    .keys()
+                    .map(|k| Value::String(Arc::clone(k)))
+                    .collect();
+                Ok(Value::Array(Rc::new(RefCell::new(keys))))
+            }
+            // `Object.keys(array)` → index strings "0".."len-1" (own enumerable keys are the indices),
+            // matching node and the shared builtin.
+            Some(Value::Array(arr)) => {
+                let len = arr.borrow().len();
+                let keys: Vec<Value> = (0..len)
+                    .map(|i| Value::String(Arc::from(i.to_string())))
+                    .collect();
+                Ok(Value::Array(Rc::new(RefCell::new(keys))))
+            }
+            _ => Ok(Value::Array(Rc::new(RefCell::new(Vec::new())))),
         }
     }
 

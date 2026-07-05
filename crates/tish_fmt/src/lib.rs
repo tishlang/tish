@@ -613,6 +613,20 @@ impl Printer {
                 self.buf.push_str(") ");
                 self.stmt_inline_or_block(body, level);
             }
+            Statement::ForIn {
+                name,
+                object,
+                body,
+                ..
+            } => {
+                self.indent(level);
+                self.buf.push_str("for (let ");
+                self.buf.push_str(name);
+                self.buf.push_str(" in ");
+                self.expr(object);
+                self.buf.push_str(") ");
+                self.stmt_inline_or_block(body, level);
+            }
             Statement::Return { value, .. } => {
                 self.indent(level);
                 self.buf.push_str("return");

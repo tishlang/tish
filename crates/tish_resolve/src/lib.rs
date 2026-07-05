@@ -177,6 +177,13 @@ fn collect_stmt(
             iterable,
             body,
             ..
+        }
+        | Statement::ForIn {
+            name,
+            name_span,
+            object: iterable,
+            body,
+            ..
         } => {
             consider(source, lsp_line, lsp_char, name_span, name.clone(), best);
             collect_expr(iterable, source, lsp_line, lsp_char, best);
@@ -939,7 +946,12 @@ fn member_chain_collect_stmt(
             }
             member_chain_collect_stmt(body, source, lsp_line, lsp_char, best);
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             member_chain_collect_expr(iterable, source, lsp_line, lsp_char, best);
             member_chain_collect_stmt(body, source, lsp_line, lsp_char, best);
         }
@@ -1412,6 +1424,13 @@ fn walk_stmt_resolve(
             name,
             name_span,
             iterable,
+            body,
+            ..
+        }
+        | Statement::ForIn {
+            name,
+            name_span,
+            object: iterable,
             body,
             ..
         } => {
@@ -2028,6 +2047,13 @@ fn check_unresolved_stmt(
             iterable,
             body,
             ..
+        }
+        | Statement::ForIn {
+            name,
+            name_span,
+            object: iterable,
+            body,
+            ..
         } => {
             check_unresolved_expr(iterable, scopes, out);
             scopes.push();
@@ -2556,6 +2582,13 @@ fn enumerate_stmt(stmt: &Statement, exported: bool, out: &mut Vec<BindingSite>) 
             iterable,
             body,
             ..
+        }
+        | Statement::ForIn {
+            name,
+            name_span,
+            object: iterable,
+            body,
+            ..
         } => {
             out.push(BindingSite {
                 name: name.clone(),
@@ -2731,7 +2764,12 @@ fn jsx_tags_stmt(s: &Statement, out: &mut std::collections::HashSet<Arc<str>>) {
             }
             jsx_tags_stmt(body, out);
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             jsx_tags_expr(iterable, out);
             jsx_tags_stmt(body, out);
         }
@@ -3052,6 +3090,13 @@ fn collect_block_locals(
             collect_block_locals(body, source, lsp_line, lsp_char, out);
         }
         Statement::ForOf {
+            name,
+            name_span,
+            body,
+            span,
+            ..
+        }
+        | Statement::ForIn {
             name,
             name_span,
             body,
@@ -3426,6 +3471,12 @@ fn walk_stmt_completion(
         Statement::ForOf {
             name,
             iterable,
+            body,
+            ..
+        }
+        | Statement::ForIn {
+            name,
+            object: iterable,
             body,
             ..
         } => {
@@ -3900,7 +3951,12 @@ fn tref_stmt(stmt: &Statement, out: &mut Vec<TypeOcc>) {
             }
             tref_stmt(body, out);
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             tref_expr(iterable, out);
             tref_stmt(body, out);
         }
@@ -4061,7 +4117,12 @@ fn refs_stmt(
             }
             refs_stmt(body, program, source, name, def_span, out);
         }
-        Statement::ForOf { iterable, body, .. } => {
+        Statement::ForOf { iterable, body, .. }
+        | Statement::ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             refs_expr(iterable, program, source, name, def_span, out);
             refs_stmt(body, program, source, name, def_span, out);
         }

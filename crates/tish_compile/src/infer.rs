@@ -1220,7 +1220,7 @@ fn check_returns_numeric(s: &Statement, ctx: &InferCtx, ok: &mut bool) {
                 check_returns_numeric(e, ctx, ok);
             }
         }
-        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             check_returns_numeric(body, ctx, ok);
         }
         For { init, body, .. } => {
@@ -1319,7 +1319,12 @@ fn count_uses_stmt(s: &Statement, f: &str, calls: &mut usize, others: &mut usize
             }
             count_uses_stmt(body, f, calls, others);
         }
-        ForOf { iterable, body, .. } => {
+        ForOf { iterable, body, .. }
+        | ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             count_uses_expr(iterable, f, calls, others);
             count_uses_stmt(body, f, calls, others);
         }
@@ -1522,7 +1527,7 @@ fn stmt_contains_fundecl(s: &Statement) -> bool {
             stmt_contains_fundecl(then_branch)
                 || else_branch.as_ref().is_some_and(|e| stmt_contains_fundecl(e))
         }
-        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } => {
+        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             stmt_contains_fundecl(body)
         }
         Try { body, catch_body, finally_body, .. } => {
@@ -1574,7 +1579,12 @@ fn walk_exprs_stmt_full(s: &Statement, f: &mut impl FnMut(&Expr)) {
             }
             walk_exprs_stmt_full(body, f);
         }
-        ForOf { iterable, body, .. } => {
+        ForOf { iterable, body, .. }
+        | ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             walk_exprs_expr(iterable, f);
             walk_exprs_stmt_full(body, f);
         }
@@ -1639,7 +1649,7 @@ fn count_returns(s: &Statement) -> usize {
             count_returns(then_branch)
                 + else_branch.as_ref().map_or(0, |e| count_returns(e))
         }
-        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } => {
+        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             count_returns(body)
         }
         Try { body, catch_body, finally_body, .. } => {
@@ -2694,7 +2704,7 @@ fn seed_numeric_locals(s: &Statement, hyp: &mut InferCtx) {
             }
             seed_numeric_locals(body, hyp);
         }
-        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             seed_numeric_locals(body, hyp)
         }
         _ => {}
@@ -3649,7 +3659,7 @@ fn collect_return_shapes(
                 }
             }
         }
-        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             if !collect_return_shapes(body, pctx, found, ok) {
                 return false;
             }
@@ -3916,7 +3926,7 @@ fn collect_element_aliases(s: &Statement, p: &str, out: &mut HashSet<String>) {
             }
             collect_element_aliases(body, p, out);
         }
-        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             collect_element_aliases(body, p, out)
         }
         _ => {}
@@ -4241,7 +4251,12 @@ fn walk_exprs_stmt(s: &Statement, f: &mut impl FnMut(&Expr)) {
             }
             walk_exprs_stmt(body, f);
         }
-        ForOf { iterable, body, .. } => {
+        ForOf { iterable, body, .. }
+        | ForIn {
+            object: iterable,
+            body,
+            ..
+        } => {
             walk_exprs_expr(iterable, f);
             walk_exprs_stmt(body, f);
         }
@@ -4354,7 +4369,7 @@ fn collect_body_struct_locals(
                 collect_body_struct_locals(e, analysis, out);
             }
         }
-        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             collect_body_struct_locals(body, analysis, out)
         }
         _ => {}
@@ -4388,7 +4403,7 @@ fn find_array_return(s: &Statement, locals: &HashMap<String, String>) -> Option<
         }
         If { then_branch, else_branch, .. } => find_array_return(then_branch, locals)
             .or_else(|| else_branch.as_ref().and_then(|e| find_array_return(e, locals))),
-        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } => {
+        For { body, .. } | While { body, .. } | DoWhile { body, .. } | ForOf { body, .. } | ForIn { body, .. } => {
             find_array_return(body, locals)
         }
         _ => None,

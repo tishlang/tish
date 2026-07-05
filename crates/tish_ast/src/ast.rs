@@ -231,6 +231,16 @@ pub enum Statement {
         body: Box<Statement>,
         span: Span,
     },
+    /// `for (let k in object)` — iterates the object's own enumerable keys (JS `for-in` semantics).
+    /// Distinct from `ForOf` (which iterates values). Kept as a first-class node so every backend
+    /// enumerates keys consistently and `tish fmt` round-trips `for-in`.
+    ForIn {
+        name: Arc<str>,
+        name_span: Span,
+        object: Expr,
+        body: Box<Statement>,
+        span: Span,
+    },
     Return {
         value: Option<Expr>,
         span: Span,
@@ -653,6 +663,7 @@ impl Statement {
             | Statement::While { span, .. }
             | Statement::For { span, .. }
             | Statement::ForOf { span, .. }
+            | Statement::ForIn { span, .. }
             | Statement::Return { span, .. }
             | Statement::Break { span, .. }
             | Statement::Continue { span, .. }
