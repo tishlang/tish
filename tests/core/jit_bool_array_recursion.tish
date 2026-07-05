@@ -1,0 +1,22 @@
+// #187: boolean-array parameters + a self-recursive array-mode call (queens' `place` shape). `cols`
+// holds booleans, is read (`!cols[col]`), written (`cols[col] = true/false`), and passed to the
+// recursion. `count` permutations = n! here (no diagonal constraint). Identical across all backends.
+function place(n, row, cols) {
+  if (row === n) { return 1 }
+  let count = 0
+  for (let col = 0; col < n; col++) {
+    if (!cols[col]) {
+      cols[col] = true
+      count = count + place(n, row + 1, cols)
+      cols[col] = false
+    }
+  }
+  return count
+}
+function perms(n) {
+  let cols = []
+  for (let i = 0; i < n; i++) { cols.push(false) }
+  return place(n, 0, cols)
+}
+console.log(perms(5))
+console.log(perms(6))

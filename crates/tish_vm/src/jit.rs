@@ -99,6 +99,12 @@ pub struct NumericFn {
     /// `call_arrays`, [`try_call_array_jit`] copies each such scratch buffer back into the caller's
     /// `Value::Array`. `0` ⇒ every array param is read-only (no writeback).
     array_writable_mask: u8,
+    /// #187: subset of `array_writable_mask` whose elements are written with a BOOL const (`arr[i]=true`)
+    /// rather than a number. The JIT flattens elements to `f64`, so the writeback re-boxes by the array's
+    /// ORIGINAL element type — sound only when the WRITTEN kind matches that entry type. `try_call_array_jit`
+    /// bails to the interpreter when a bool-written array is passed a number array (or vice versa); a mix of
+    /// bool + non-bool writes to one array is rejected at compile time (`classify_params` returns `(0,0,0)`).
+    array_bool_write_mask: u8,
     /// True when this is a self-recursive function compiled with a trailing `*mut RecurGuard` param
     /// (the recursion-depth bail, #381). Such a function must be invoked via [`NumericFn::call_guarded`];
     /// non-recursive functions keep the plain ABI and [`NumericFn::call`] (zero overhead).
@@ -385,6 +391,14 @@ impl NumericFn {
         self.array_writable_mask
     }
 
+    /// #187: bit k set ⇒ writable array param k is written with BOOL consts (`arr[i]=true`), not numbers.
+    /// The writeback re-boxes by the entry array's element type, so [`try_call_array_jit`] must bail when
+    /// a bool-written array receives a number array (or a number-written array receives a bool array).
+    #[inline]
+    pub fn array_bool_write_mask(&self) -> u8 {
+        self.array_bool_write_mask
+    }
+
     /// #187: true when this array-mode function is VOID (returns the implicit `null`); its `f64` result
     /// is a dummy, so [`try_call_array_jit`] returns `Value::Null` for it.
     #[inline]
@@ -399,9 +413,22 @@ impl NumericFn {
     /// (OOB reads return `Value::Null` in the VM, whose per-operator coercion the JIT can't replicate).
     #[inline]
     pub fn call_arrays(&self, numeric: &[f64], arrays: &[ArrayHandle]) -> (f64, bool) {
+        self.call_arrays_guarded(numeric, arrays, std::ptr::null_mut())
+    }
+
+    /// #187: array-mode call, optionally passing a trailing `*mut RecurGuard` (non-null iff
+    /// `recur_guarded()` — a self-recursive array fn). On return the caller inspects `guard.tripped`:
+    /// set ⇒ the native recursion hit the stack limit and bailed (result is a sentinel) → RangeError.
+    #[inline]
+    pub fn call_arrays_guarded(
+        &self,
+        numeric: &[f64],
+        arrays: &[ArrayHandle],
+        guard: *mut RecurGuard,
+    ) -> (f64, bool) {
         let mut deopt: u8 = 0;
-        // ONE uniform signature for every array-mode fn: (numeric*, handles*, deopt*) -> f64. Empty
-        // slices pass a dangling-but-aligned non-null ptr (the body only loads indices it uses).
+        // ONE uniform signature for every array-mode fn: (numeric*, handles*, deopt*[, guard*]) -> f64.
+        // Empty slices pass a dangling-but-aligned non-null ptr (the body only loads indices it uses).
         let num_ptr = if numeric.is_empty() {
             std::ptr::NonNull::<f64>::dangling().as_ptr() as *const f64
         } else {
@@ -413,9 +440,19 @@ impl NumericFn {
             arrays.as_ptr()
         };
         let res = unsafe {
-            let f: extern "C" fn(*const f64, *const ArrayHandle, *mut u8) -> f64 =
-                std::mem::transmute(self.ptr);
-            f(num_ptr, arr_ptr, &mut deopt as *mut u8)
+            if guard.is_null() {
+                let f: extern "C" fn(*const f64, *const ArrayHandle, *mut u8) -> f64 =
+                    std::mem::transmute(self.ptr);
+                f(num_ptr, arr_ptr, &mut deopt as *mut u8)
+            } else {
+                let f: extern "C" fn(
+                    *const f64,
+                    *const ArrayHandle,
+                    *mut u8,
+                    *mut RecurGuard,
+                ) -> f64 = std::mem::transmute(self.ptr);
+                f(num_ptr, arr_ptr, &mut deopt as *mut u8, guard)
+            }
         };
         (res, deopt != 0)
     }
@@ -1355,13 +1392,20 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     // 3-pointer array ABI instead of the register-`f64` ABI. mask 0 ⇒ ordinary numeric path below.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let (array_mask, writable_mask) = if jit_arrays_enabled() {
+        let (array_mask, writable_mask, bool_write_mask) = if jit_arrays_enabled() {
             classify_params(chunk, arity)
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
         if array_mask != 0 {
-            return compile_chunk_arrays(g, chunk, arity, array_mask, writable_mask);
+            return compile_chunk_arrays(
+                g,
+                chunk,
+                arity,
+                array_mask,
+                writable_mask,
+                bool_write_mask,
+            );
         }
     }
 
@@ -1498,6 +1542,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         result_bool,
         array_param_mask: 0,
         array_writable_mask: 0,
+        array_bool_write_mask: 0,
         recur_guarded: recur_guard,
         jv: is_jv,
         uses_xcall: !resolved.is_empty(),
@@ -1505,28 +1550,41 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     })
 }
 
-/// Classify each param slot of an array-mode candidate. Returns `(array_mask, writable_mask)`:
-/// **array bit k ⇒ param k is an ARRAY** used only as `arr[i]` (read, `GetIndex`) or `arr[i] = v`
-/// (write, `SetIndex`); **writable bit k ⇒ that array is written**. Returns `(0, 0)` when there are no
-/// array params OR the function is ineligible (a param used as both an array and a number, an index
-/// shape the peephole can't consume, etc.). A `0` is always safe: the caller takes the ordinary
+/// Classify each param slot of an array-mode candidate. Returns `(array_mask, writable_mask,
+/// bool_write_mask)`: **array bit k ⇒ param k is an ARRAY** used only as `arr[i]` (read, `GetIndex`) or
+/// `arr[i] = v` (write, `SetIndex`); **writable bit k ⇒ that array is written**; **bool_write bit k ⇒ a
+/// writable array written with bool consts (`arr[i]=true`)**. Returns `(0, 0, 0)` when there are no
+/// array params OR the function is ineligible (a param used as both an array and a number, a mix of bool
+/// and non-bool writes to one array, an index shape the peephole can't consume, etc.). A `0` mask is
+/// always safe: the caller takes the ordinary
 /// numeric path (which itself bails on `GetIndex`/`SetIndex`), and `try_call_array_jit` re-checks every
 /// arg's runtime type, so a misclassification bails to the interpreter rather than miscompiling.
 #[cfg(not(target_arch = "wasm32"))]
-fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8) {
+fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8, u8) {
     if arity == 0 || arity > 8 || (chunk.num_slots as usize) == 0 {
-        return (0, 0);
+        return (0, 0, 0);
     }
     let code = &chunk.code;
-    let mut used_numeric = [false; 8];
+    // #187: which slots hold a Bool value (`arr[i] = boolLocal` must be classified a BOOL write, not a
+    // number write, so a bool local stored into a NUMBER array is caught by the runtime type guard).
+    // Computed unconditionally — a superset only makes the guard bail more (always sound), never miscompile.
+    let bool_slots = classify_bool_slots(chunk);
+    let mut stored = [false; 8]; // param REASSIGNED via StoreLocal (an array param can't be — bail)
     let mut used_array = [false; 8];
     let mut written = [false; 8];
+    // #187: per writable array param, was it written with a Bool const (`arr[i]=true`) and/or a
+    // non-bool value (`arr[i]=5`)? The JIT flattens every element to f64, so the writeback must re-box
+    // by the ORIGINAL element type; that is only sound when the whole array stays one type. A mix of
+    // bool and non-bool writes to the SAME array can never be re-boxed uniformly ⇒ bail at compile time.
+    // `wrote_bool` also feeds the runtime guard (write-kind must match the entry array's element type).
+    let mut wrote_bool = [false; 8];
+    let mut wrote_nonbool = [false; 8];
     let mut ip = 0usize;
     let simple = |o: Option<Opcode>| matches!(o, Some(Opcode::LoadLocal) | Some(Opcode::LoadConst));
     while ip < code.len() {
         let op = match Opcode::from_u8(code[ip]) {
             Some(o) => o,
-            None => return (0, 0),
+            None => return (0, 0, 0),
         };
         let size = match op_size(op) {
             Some(s) => s,
@@ -1534,13 +1592,13 @@ fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8) {
             // doesn't touch param classification — treat as a sized no-op. `build_body_cfg` is the gate:
             // it lowers the call only if the callee resolves, else the whole function bails to interp.
             None if matches!(op, Opcode::LoadVar | Opcode::Call) => 3,
-            None => return (0, 0), // an opcode the array CFG can't handle ⇒ ineligible
+            None => return (0, 0, 0), // an opcode the array CFG can't handle ⇒ ineligible
         };
         match op {
             Opcode::LoadLocal => {
                 let slot = match peek_u16(code, ip + 1) {
                     Some(s) => s as usize,
-                    None => return (0, 0),
+                    None => return (0, 0, 0),
                 };
                 let at = |off: usize| code.get(ip + off).copied().and_then(Opcode::from_u8);
                 // Read peephole: `LoadLocal(arr) ; (LoadLocal|LoadConst) idx ; GetIndex`.
@@ -1559,43 +1617,81 @@ fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8) {
                 {
                     used_array[slot] = true;
                     written[slot] = true;
+                    // Classify the written VALUE (operand at offset 6) so the runtime writeback re-boxes
+                    // by the right element type. Only a `LoadConst(Bool)` is a *definite* bool write.
+                    // A `LoadLocal(slot)` is trickier: `classify_bool_slots` is a SUPERSET (insert-only —
+                    // it never un-tags a slot that is later reassigned a number, and `build_body_cfg`
+                    // permits `b = n` into a bool-tagged slot), so a bool-tagged slot may actually hold a
+                    // NUMBER at the write site. We can't tell the runtime kind statically, and the flat
+                    // `f64` writeback would re-box it wrong — so bail the whole function. (Numeric-slot
+                    // writes — e.g. spectral_norm's `out[i] = sum` — are fine: not bool-tagged, non-bool.)
+                    let val_is_bool = match at(6) {
+                        Some(Opcode::LoadConst) => matches!(
+                            peek_u16(code, ip + 7).and_then(|ci| chunk.constants.get(ci as usize)),
+                            Some(Constant::Bool(_))
+                        ),
+                        Some(Opcode::LoadLocal)
+                            if peek_u16(code, ip + 7)
+                                .is_some_and(|s| bool_slots.contains(&(s as usize))) =>
+                        {
+                            return (0, 0, 0);
+                        }
+                        _ => false,
+                    };
+                    if val_is_bool {
+                        wrote_bool[slot] = true;
+                    } else {
+                        wrote_nonbool[slot] = true;
+                    }
                     ip += 11;
                     continue;
                 }
-                if slot < arity {
-                    used_numeric[slot] = true;
-                }
+                // Otherwise a bare `LoadLocal(param)` — either a numeric value (fine; a param is an
+                // array iff INDEXED) or a self-recursive array-call argument (build_body_cfg validates +
+                // consumes it, else bails). Neither affects classification.
             }
             Opcode::StoreLocal => {
                 let slot = match peek_u16(code, ip + 1) {
                     Some(s) => s as usize,
-                    None => return (0, 0),
+                    None => return (0, 0, 0),
                 };
                 if slot < arity {
-                    used_numeric[slot] = true; // a written param is numeric-shaped (can't be our array)
+                    stored[slot] = true; // reassigning the binding — an array param can't be (see tail)
                 }
             }
             // Any `GetIndex`/`SetIndex` not consumed by a peephole above ⇒ an index/value shape we don't
             // handle (`arr[i+1]`, `arr[i] = a + b`, `arr[brr[i]]`, …) ⇒ ineligible.
-            Opcode::GetIndex | Opcode::SetIndex => return (0, 0),
+            Opcode::GetIndex | Opcode::SetIndex => return (0, 0, 0),
             _ => {}
         }
         ip += size;
     }
     let mut array_mask = 0u8;
     let mut writable_mask = 0u8;
+    let mut bool_write_mask = 0u8;
     for k in 0..arity {
         if used_array[k] {
-            if used_numeric[k] {
-                return (0, 0); // used as BOTH array and number ⇒ ambiguous ⇒ bail
+            // A REASSIGNED array param (`arr = …`) would break the handle-reuse assumption (esp. the
+            // self-call reusing `handles_ptr`), so bail the whole function. A `arr[i] = v` element write
+            // is `written`, not `stored`, and stays fine.
+            if stored[k] {
+                return (0, 0, 0);
+            }
+            // A single array written with BOTH bool and non-bool values can never be re-boxed uniformly
+            // (the JIT has already flattened everything to f64) ⇒ bail rather than miscompile.
+            if wrote_bool[k] && wrote_nonbool[k] {
+                return (0, 0, 0);
             }
             array_mask |= 1u8 << k;
             if written[k] {
                 writable_mask |= 1u8 << k;
+                if wrote_bool[k] {
+                    bool_write_mask |= 1u8 << k;
+                }
             }
         }
     }
-    (array_mask, writable_mask)
+    (array_mask, writable_mask, bool_write_mask)
 }
 
 /// Compile an array-mode function: numeric params + array params (read as `arr[i]`). Uses ONE uniform
@@ -1610,12 +1706,20 @@ fn compile_chunk_arrays(
     arity: usize,
     mask: u8,
     writable_mask: u8,
+    bool_write_mask: u8,
 ) -> Option<NumericFn> {
+    // #187: a self-recursive array-mode function (queens' `place`) recurses on the native stack, so —
+    // like #381's register-f64 recursion — it gets a trailing `*mut RecurGuard` param + an entry
+    // SP-bail, keeping unbounded recursion a catchable RangeError instead of a SIGSEGV.
+    let recursive = chunk_has_self_call(chunk) && jit_recur_guard_enabled();
     let ptr_ty = g.module.target_config().pointer_type();
     let mut sig = g.module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // numeric_ptr
     sig.params.push(AbiParam::new(ptr_ty)); // handles_ptr
     sig.params.push(AbiParam::new(ptr_ty)); // deopt_ptr
+    if recursive {
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut RecurGuard (#187/#381)
+    }
     sig.returns.push(AbiParam::new(types::F64));
 
     let name = format!("tish_arr_{}", g.counter);
@@ -1627,20 +1731,23 @@ fn compile_chunk_arrays(
 
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
+    // #187: declare this function's own FuncRef so a self-recursive array-mode call (queens' `place`
+    // passing `cols`/`diag1`/`diag2` back to itself) lowers to a native call reusing the same
+    // `handles_ptr`/`deopt_ptr` — only the numeric args are re-marshalled per level.
+    let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
     // #187: array-mode functions (e.g. spectral_norm's multiplyAv) may call a register-f64 callee.
     let resolved = build_resolved_callees(g, chunk, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
-    // No self-call in array mode (recursive call would need the array signature) → pass None.
-    // No JV local arrays in array-param mode either → pass None for the JV context.
+    // No JV local arrays in array-param mode → pass None for the JV context.
     if build_body_cfg(
         &mut ctx.func,
         &mut fbctx,
         chunk,
         arity,
-        None,
+        Some(self_ref),
         mask,
-        false,
+        recursive, // #187: array-mode recursion guard (the entry SP-bail keys off this)
         math_fref,
         None,
         &resolved,
@@ -1665,7 +1772,8 @@ fn compile_chunk_arrays(
         result_bool: false,
         array_param_mask: mask,
         array_writable_mask: writable_mask,
-        recur_guarded: false,
+        array_bool_write_mask: bool_write_mask,
+        recur_guarded: recursive, // #187: array-mode fn has a trailing RecurGuard param → call_arrays passes it
         jv: false,
         uses_xcall: !resolved.is_empty(),
         void_result: chunk_is_void(chunk),
@@ -2089,6 +2197,8 @@ fn read_simple_operand(
             let ci = peek_u16(code, at + 1)? as usize;
             match chunk.constants.get(ci) {
                 Some(Constant::Number(n)) => Some(bcx.ins().f64const(*n)),
+                // #187: a boolean stored into a (bool) array element — `arr[i] = true` — as `f64` 0/1.
+                Some(Constant::Bool(b)) => Some(bcx.ins().f64const(if *b { 1.0 } else { 0.0 })),
                 _ => None,
             }
         }
@@ -2221,8 +2331,13 @@ fn build_body_cfg(
     // entry point, so this check runs on every (including recursive) call. Loops jumping back to offset
     // 0 land in `body_block` (no re-check needed — a loop adds no native frame). Pointer type is I64
     // (the JIT targets — x86-64 / aarch64 — are all 64-bit; the module is not built on wasm32).
-    let guard_ptr: Option<ClifValue> = if recur_guard && array_mask == 0 {
-        let gp = *params.get(arity)?;
+    let guard_ptr: Option<ClifValue> = if recur_guard {
+        // #187: the guard pointer is the LAST param — after the `arity` f64s (register-f64 ABI), or
+        // after `[numeric_ptr, handles_ptr, deopt_ptr]` (array-mode ABI, index 3). Array-mode
+        // self-recursion (queens' `place`) recurses on the native stack just like `fib`, so it needs
+        // the SAME SP-bail to stay a catchable RangeError instead of a SIGSEGV (#381).
+        let gp_idx = if array_mask != 0 { 3 } else { arity };
+        let gp = *params.get(gp_idx)?;
         let stack_limit = bcx.ins().load(types::I64, MemFlags::new(), gp, 0);
         let sp = bcx.ins().get_stack_pointer(types::I64);
         let below = bcx.ins().icmp(IntCC::UnsignedLessThan, sp, stack_limit);
@@ -2318,6 +2433,9 @@ fn build_body_cfg(
     // #187: a resolved callee awaiting its args + `Call` (set by `LoadVar name`, consumed by the very
     // next `Call`). Like the JV pending state, must be empty at every block boundary.
     let mut pending_callee: Option<(cranelift::codegen::ir::FuncRef, u8)> = None;
+    // #187: array-param slots passed as arguments to a self-recursive array-mode call (queens' `place`),
+    // in argument order — pushed by `LoadLocal(array param)`, consumed by the next `SelfCall`.
+    let mut arr_call_pending: Vec<usize> = Vec::new();
     let mut cur = body_start;
     let mut terminated = false;
     let mut ip = 0usize;
@@ -2330,8 +2448,13 @@ fn build_body_cfg(
                     }
                     bcx.ins().jump(blk, &[]);
                 }
-                // A JV ref, a pending push, or a pending callee must never span a statement boundary.
-                if !jv_pending.is_empty() || pending_push.is_some() || pending_callee.is_some() {
+                // A JV ref, a pending push, a pending callee, or a pending array self-call arg must
+                // never span a statement boundary.
+                if !jv_pending.is_empty()
+                    || pending_push.is_some()
+                    || pending_callee.is_some()
+                    || !arr_call_pending.is_empty()
+                {
                     return None;
                 }
                 bcx.switch_to_block(blk);
@@ -2365,16 +2488,28 @@ fn build_body_cfg(
                 // Array-mode peepholes on an array param, both bounds-checked (OOB → the deopt pad):
                 //   READ  `LoadLocal(arr) ; (LoadLocal|LoadConst) idx ; GetIndex`         → native load
                 //   WRITE `LoadLocal(arr) ; idx ; (LoadLocal|LoadConst) val ; Dup ; SetIndex` (#187) → store
+                //   ARG   a bare `LoadLocal(arr)` → an argument to a self-recursive array call (#187)
                 if array_mask != 0 && slot < arity && (array_mask >> slot) & 1 == 1 {
                     let (aptr, alen) = *array_slots.get(&slot)?;
-                    let idx_f64 = read_simple_operand(&mut bcx, code, ip + 3, chunk, &vars)?;
-                    let at6 = Opcode::from_u8(*code.get(ip + 6)?)?;
-                    let is_write = at6 != Opcode::GetIndex
-                        && Opcode::from_u8(*code.get(ip + 9)?)? == Opcode::Dup
-                        && Opcode::from_u8(*code.get(ip + 10)?)? == Opcode::SetIndex;
-                    if at6 != Opcode::GetIndex && !is_write {
-                        return None; // an array-param use we can't peephole (computed idx/val, escape)
+                    // Decide the shape by PEEKING (no cranelift values created yet).
+                    let at3 = code.get(ip + 3).copied().and_then(Opcode::from_u8);
+                    let idx_simple =
+                        matches!(at3, Some(Opcode::LoadLocal) | Some(Opcode::LoadConst));
+                    let at6 = code.get(ip + 6).copied().and_then(Opcode::from_u8);
+                    let is_read = idx_simple && at6 == Some(Opcode::GetIndex);
+                    let is_write = idx_simple
+                        && matches!(at6, Some(Opcode::LoadLocal) | Some(Opcode::LoadConst))
+                        && code.get(ip + 9).copied().and_then(Opcode::from_u8) == Some(Opcode::Dup)
+                        && code.get(ip + 10).copied().and_then(Opcode::from_u8)
+                            == Some(Opcode::SetIndex);
+                    if !is_read && !is_write {
+                        // Bare array-param load — stage it as a self-call argument (the next `SelfCall`
+                        // validates + consumes it). A genuine escape leaves it pending at a boundary → bail.
+                        arr_call_pending.push(slot);
+                        ip += 3;
+                        continue;
                     }
+                    let idx_f64 = read_simple_operand(&mut bcx, code, ip + 3, chunk, &vars)?;
                     // i = idx as usize (saturating: NaN→0, neg→0 — matches the VM's `n as usize`).
                     let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx_f64);
                     // Read `val` (write only) BEFORE the bounds-check split so its LoadLocal reads the
@@ -2493,6 +2628,46 @@ fn build_body_cfg(
                 let fallthrough = *blocks.get(&(ip + 3))?;
                 bcx.ins().brif(falsy, target, &[], fallthrough, &[]);
                 terminated = true;
+                ip += 3;
+            }
+            Opcode::SelfCall if array_mask != 0 => {
+                // #187: array-mode recursive self-call (queens' `place` recursing on the SAME arrays).
+                // Array args were staged in `arr_call_pending` and MUST be exactly this function's own
+                // array params in ABI order — then the recursion reuses `handles_ptr`/`deopt_ptr`
+                // unchanged and only re-marshals the numeric args (a fresh `numeric_ptr` per level).
+                let sref = self_ref?;
+                let num_arrays = arr_call_pending.len();
+                let num_numeric = arity.checked_sub(num_arrays)?;
+                let expected: Vec<usize> =
+                    (0..arity).filter(|k| (array_mask >> k) & 1 == 1).collect();
+                if arr_call_pending != expected || stack.len() < num_numeric {
+                    return None;
+                }
+                arr_call_pending.clear();
+                // Marshal the numeric args (top of the stack, in ABI order) into a fresh stack slot.
+                let slot = bcx.create_sized_stack_slot(cranelift::codegen::ir::StackSlotData::new(
+                    cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                    (num_numeric * 8) as u32,
+                    3, // 2^3 = 8-byte alignment for f64
+                ));
+                let arg_start = stack.len() - num_numeric;
+                for (j, (v, is_bool)) in stack.drain(arg_start..).enumerate() {
+                    if is_bool {
+                        return None; // a bool numeric arg doesn't match the f64 ABI
+                    }
+                    bcx.ins().stack_store(v, slot, (j * 8) as i32);
+                }
+                let num_ptr = bcx.ins().stack_addr(types::I64, slot, 0);
+                let handles_ptr = *params.get(1)?;
+                let deopt_ptr = *params.get(2)?;
+                // #187: thread the RecurGuard (if this recursive array fn was compiled with one) so every
+                // level re-checks the native stack at entry — a catchable RangeError, not a SIGSEGV.
+                let mut call_args = vec![num_ptr, handles_ptr, deopt_ptr];
+                if let Some(gp) = guard_ptr {
+                    call_args.push(gp);
+                }
+                let call = bcx.ins().call(sref, &call_args);
+                stack.push((bcx.inst_results(call)[0], false));
                 ip += 3;
             }
             Opcode::SelfCall => {
@@ -3213,6 +3388,123 @@ mod tests {
                 "cross-call sumSq wrong for n={n}"
             );
         }
+    }
+
+    /// #187: an array-mode function that is SELF-RECURSIVE and passes a BOOL array param back to itself
+    /// (queens' `place` shape). Exercises: bool-array element read (`!cols[col]`), bool-array write
+    /// (`cols[col] = true/false`), and the native array self-call (reusing `handles_ptr`, re-marshalling
+    /// the numeric args). `place(n, 0, all-false)` counts permutations = n!.
+    #[test]
+    fn jit_array_mode_recursion_over_bool_array() {
+        let f = jit_arrays(
+            "function place(n, row, cols) {\n\
+             if (row === n) { return 1 }\n\
+             let count = 0\n\
+             for (let col = 0; col < n; col = col + 1) {\n\
+               if (!cols[col]) {\n\
+                 cols[col] = true\n\
+                 count = count + place(n, row + 1, cols)\n\
+                 cols[col] = false\n\
+               }\n\
+             }\n\
+             return count\n\
+             }\n\
+             place(0, 0, [])\n",
+        );
+        assert!(f.array_param_mask() != 0, "cols is an array param");
+        assert!(
+            f.recur_guarded(),
+            "place is self-recursive → compiled with a trailing RecurGuard param"
+        );
+        // n! for n = 0..6 (cols starts all-false = 0.0). Each call resets `cols` to all-false on return.
+        let factorial = [1.0f64, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0];
+        for (n, &expect) in factorial.iter().enumerate() {
+            let mut cols = vec![0.0f64; n.max(1)];
+            let handles = [ArrayHandle {
+                ptr: cols.as_mut_ptr(),
+                len: n,
+            }];
+            // `stack_limit = 0` ⇒ the entry SP-check never trips (a real SP is always ≥ 0).
+            let mut guard = RecurGuard {
+                stack_limit: 0,
+                tripped: 0,
+            };
+            let (res, deopt) = f.call_arrays_guarded(&[n as f64, 0.0], &handles, &mut guard);
+            assert!(!deopt, "in-bounds, no deopt for n={n}");
+            assert_eq!(
+                guard.tripped, 0,
+                "shallow recursion must not trip the guard"
+            );
+            assert_eq!(res, expect, "place({n},0,cols) = {n}! = {expect}");
+        }
+    }
+
+    /// #187: the write-KIND classification that pins the array-mode writeback's soundness. The JIT
+    /// flattens every element to `f64`, so `try_call_array_jit` re-boxes each written element by the
+    /// runtime array's element type — which is only sound when the statically written kind (bool vs
+    /// number) matches. `classify_params` must therefore report, per writable array, whether it is
+    /// written with a bool (a `LoadConst(Bool)` or a `LoadLocal(bool-slot)`), and reject a single array
+    /// written with BOTH a bool and a number (unrepresentable as one flat re-boxing).
+    #[test]
+    fn classify_params_bool_write_kinds() {
+        // The arity-2 array fn `f(a, n)` from `src` (already the nested chunk).
+        fn arr_fn(src: &str) -> Chunk {
+            fn_chunk(src)
+        }
+        let bit0 = |m: u8| m & 1;
+
+        // A bool CONST write ⇒ array bit, writable bit, AND bool-write bit all set.
+        let c = arr_fn(
+            "function f(a, n) { for (let i = 0; i < n; i = i + 1) { a[i] = true } return 0 }\nf([0], 1)\n",
+        );
+        let (am, wm, bm) = classify_params(&c, c.param_count as usize);
+        assert_eq!(
+            (bit0(am), bit0(wm), bit0(bm)),
+            (1, 1, 1),
+            "bool-const write"
+        );
+
+        // A number CONST write ⇒ array + writable set, bool-write CLEAR.
+        let c = arr_fn(
+            "function f(a, n) { for (let i = 0; i < n; i = i + 1) { a[i] = 7 } return 0 }\nf([0], 1)\n",
+        );
+        let (am, wm, bm) = classify_params(&c, c.param_count as usize);
+        assert_eq!(
+            (bit0(am), bit0(wm), bit0(bm)),
+            (1, 1, 0),
+            "number-const write"
+        );
+
+        // A bool LOCAL write ⇒ the whole fn bails: `classify_bool_slots` is a superset (a bool-tagged
+        // slot may be reassigned a number), so a `LoadLocal(bool-slot)` written value can't be typed for
+        // the flat writeback. Reject rather than risk re-boxing wrong.
+        let c = arr_fn(
+            "function f(a, n) { let b = true; for (let i = 0; i < n; i = i + 1) { a[i] = b } return 0 }\nf([0], 1)\n",
+        );
+        assert_eq!(
+            classify_params(&c, c.param_count as usize),
+            (0, 0, 0),
+            "bool-local write must bail (bool-tagged slot may hold a number)"
+        );
+
+        // A number LOCAL write ⇒ bool-write CLEAR.
+        let c = arr_fn(
+            "function f(a, n) { let x = n + 1; for (let i = 0; i < n; i = i + 1) { a[i] = x } return 0 }\nf([0], 1)\n",
+        );
+        let (am, wm, bm) = classify_params(&c, c.param_count as usize);
+        assert_eq!(
+            (bit0(am), bit0(wm), bit0(bm)),
+            (1, 1, 0),
+            "number-local write"
+        );
+
+        // Mixed bool + number writes to the SAME array ⇒ the whole function is rejected.
+        let c = arr_fn("function f(a, n) { a[0] = true; a[1] = 5; return 0 }\nf([0, 0], 1)\n");
+        assert_eq!(
+            classify_params(&c, c.param_count as usize),
+            (0, 0, 0),
+            "mixed bool+number writes must bail"
+        );
     }
 
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME
