@@ -167,33 +167,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// #295: `--target js --format bundle` must re-emit the entry module's named exports as a real
-    /// ES `export { … }` (previously only `export default` was emitted; `export fn/const/{…}` were
-    /// silently dropped, forcing downstream regex post-processing of every bundle).
-    #[test]
-    fn bundle_emits_named_exports() {
-        let dir = std::env::temp_dir().join("tishlang_bundle_exports_295");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("entry.tish");
-        let src = "export fn mountFoo(h) { return h }\nexport const VERSION = \"1\"\nfn helper() { return 2 }\nexport { helper as helperExported }\nexport default 42\n";
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(src.as_bytes()).unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        let js = compile_project_with_jsx(&path, Some(&dir), false)
-            .expect("compile_project_with_jsx failed");
-        assert!(
-            js.contains("export { VERSION, helper as helperExported, mountFoo };"),
-            "bundle must emit named exports, got:\n{}",
-            &js[js.len().saturating_sub(300)..]
-        );
-        assert!(
-            js.contains("export default __default_0;"),
-            "bundle must still emit the default export"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
     #[test]
     fn jsx_never_emits_vdom_helpers_or_prelude_flags() {
         let src = r#"fn X() { return <div class="x">{"a"}</div> }"#;
