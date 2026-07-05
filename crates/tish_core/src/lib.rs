@@ -154,6 +154,23 @@ pub fn stack_overflow_error() -> Value {
     Value::object(e)
 }
 
+/// A catchable `TypeError` for calling a non-callable value — the `{ name, message }` shape matches
+/// the VM/interpreter/node (`e.name === "TypeError"`). Used to PARK a pending throw (#381) instead of
+/// aborting the process, so `value_call` on a non-function surfaces as a catchable error at the next
+/// pending-throw checkpoint rather than an uncatchable native panic.
+pub fn not_a_function_error(message: impl Into<String>) -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(
+        std::sync::Arc::from("name"),
+        Value::String("TypeError".into()),
+    );
+    e.insert(
+        std::sync::Arc::from("message"),
+        Value::String(message.into().into()),
+    );
+    Value::object(e)
+}
+
 /// RAII frame for the depth-counting recursion guard: holding one means the depth was incremented;
 /// dropping it decrements, so early returns in generated code can't leak a level. #381
 pub struct CallDepthGuard(());
