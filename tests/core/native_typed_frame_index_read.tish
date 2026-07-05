@@ -1,0 +1,44 @@
+// Regression lock (#426 follow-up): a native-typed frame (`-> f64`) whose body hits the
+// `promote_strict_lt` fast-path — `if (a === b) { break }` — followed by an array INDEX READ in the
+// promoted region. Post-#425, a non-optional index read counts as may-throw, so codegen emits a
+// pending-throw checkpoint after it; in a native-typed frame that checkpoint (`return Err(..)` /
+// `return Value::Null`) does not type-check. The primary emit site guards against this; the strict-`<`
+// fast-path (Site 2) did NOT, so this shape failed to BUILD on the rust native backend (fannkuch).
+// This fixture is compiled on every backend by the integration harness (incl. native), so it catches
+// a recurrence in fast PR CI, not only the nightly gauntlet.
+
+function kernel(n) {
+  let arr = []
+  let i = 0
+  while (i < n) { arr.push(i * 2); i = i + 1 }
+  let sum = 0
+  let r = 0
+  while (true) {
+    if (r === n) { break }   // strict-eq-of-idents + break -> promote_strict_lt fast-path
+    let v = arr[r]           // index read in the promoted region -> Site 2 checkpoint
+    sum = sum + v
+    r = r + 1
+  }
+  return sum
+}
+
+// A second shape: strict-eq break that is NOT the immediate exit, with a nested index read.
+function scan(m) {
+  let a = []
+  let i = 0
+  while (i < m) { a.push(m - i); i = i + 1 }
+  let acc = 0
+  let k = 0
+  while (true) {
+    if (k === m) { break }
+    let t = a[k]
+    if (t === k) { acc = acc + 1 }
+    acc = acc + a[k]
+    k = k + 1
+  }
+  return acc
+}
+
+console.log("kernel", kernel(5))
+console.log("kernel0", kernel(0))
+console.log("scan", scan(4))

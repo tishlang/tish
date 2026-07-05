@@ -13984,7 +13984,16 @@ impl Codegen {
                         self.emit_native_fn_body(&statements[i])?;
                     } else {
                         self.emit_statement(&statements[i])?;
-                        if Self::stmt_may_throw(&statements[i]) && !Self::is_terminator_stmt(&statements[i]) {
+                        // Same guard as the primary emit site above: a native-typed frame
+                        // (`-> f64`/`-> Vec<..>`/`-> ()`) can't type the `Err`/`Value::Null` check, so
+                        // suppress it there — the parked throw still surfaces at the first Value/Result
+                        // frame up the chain. Without this guard the strict-`<` fast-path emitted an
+                        // untypeable checkpoint after any may-throw stmt (e.g. an index read post-#425),
+                        // breaking pure-numeric fixtures like fannkuch.
+                        if Self::stmt_may_throw(&statements[i])
+                            && !Self::is_terminator_stmt(&statements[i])
+                            && (self.try_closure_depth > 0 || !self.in_native_typed_frame())
+                        {
                             self.emit_pending_throw_check();
                         }
                     }
