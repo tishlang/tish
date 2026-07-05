@@ -443,6 +443,9 @@ pub enum Expr {
     },
     /// Arrow function: (params) => body
     ArrowFunction {
+        /// `true` for `async () => …` (#428) — the body runs in async context (`await` allowed) and
+        /// the JS target emits an `async` prefix. Non-async arrows have `async_: false`.
+        async_: bool,
         params: Vec<FunParam>,
         body: ArrowBody,
         span: Span,

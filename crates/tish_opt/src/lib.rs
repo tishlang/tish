@@ -513,12 +513,18 @@ fn optimize_expr(expr: &Expr) -> Expr {
             value: Box::new(optimize_expr(value)),
             span: *span,
         },
-        Expr::ArrowFunction { params, body, span } => {
+        Expr::ArrowFunction {
+            async_,
+            params,
+            body,
+            span,
+        } => {
             let opt_body = match body {
                 ArrowBody::Expr(e) => ArrowBody::Expr(Box::new(optimize_expr(e))),
                 ArrowBody::Block(s) => ArrowBody::Block(Box::new(optimize_statement(s))),
             };
             Expr::ArrowFunction {
+                async_: *async_,
                 params: params.clone(),
                 body: opt_body,
                 span: *span,

@@ -902,7 +902,9 @@ impl Codegen {
                 let val = self.emit_expr(value)?;
                 format!("({}[{}] = {})", obj, idx, val)
             }
-            Expr::ArrowFunction { params, body, .. } => {
+            Expr::ArrowFunction {
+                async_, params, body, ..
+            } => {
                 let ps = self.emit_params(params, None)?;
                 let body_str = match body {
                     ArrowBody::Expr(e) => self.emit_expr(e)?,
@@ -918,10 +920,11 @@ impl Codegen {
                         block
                     }
                 };
+                let prefix = if *async_ { "async " } else { "" }; // #428
                 if matches!(body, ArrowBody::Expr(_)) {
-                    format!("({}) => ({})", ps, body_str)
+                    format!("{}({}) => ({})", prefix, ps, body_str)
                 } else {
-                    format!("({}) => {}", ps, body_str)
+                    format!("{}({}) => {}", prefix, ps, body_str)
                 }
             }
             Expr::TemplateLiteral { quasis, exprs, .. } => {
