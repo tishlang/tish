@@ -1682,7 +1682,15 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(TokenKind::RBrace)?;
-            let from = self.parse_from_clause()?;
+            // #415: the `from` clause is OPTIONAL. `export { a, b as c } from "./m"` re-exports;
+            // `export { a, b as c }` (no `from`) is a LOCAL named export of already-declared bindings.
+            let from = if matches!(self.peek_kind(), Some(TokenKind::Ident))
+                && self.peek().and_then(|t| t.literal.as_deref()) == Some("from")
+            {
+                Some(self.parse_from_clause()?)
+            } else {
+                None
+            };
             ExportDeclaration::ReExport {
                 specifiers,
                 all: false,
@@ -1690,9 +1698,9 @@ impl<'a> Parser<'a> {
                 span: self.span_end(span_start),
             }
         } else if matches!(self.peek_kind(), Some(TokenKind::Star)) {
-            // #305: re-export all — `export * from "./m"`
+            // #305: re-export all — `export * from "./m"` (always requires `from`).
             self.advance(); // *
-            let from = self.parse_from_clause()?;
+            let from = Some(self.parse_from_clause()?);
             ExportDeclaration::ReExport {
                 specifiers: Vec::new(),
                 all: true,

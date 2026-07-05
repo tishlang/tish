@@ -1057,29 +1057,42 @@ impl Codegen {
                 from,
                 ..
             } => {
-                let spec = rewrite_import_to_js(
-                    from.as_ref(),
-                    &self.module_path,
-                    &self.project_root,
-                    self.import_rewrite,
-                )?;
-                if *all {
-                    self.writeln(&format!("export * from {:?};", spec));
-                } else {
-                    let mut parts: Vec<String> = Vec::new();
-                    for s in specifiers {
-                        if let ImportSpecifier::Named { name, alias, .. } = s {
-                            match alias {
-                                Some(a) => parts.push(format!(
-                                    "{} as {}",
-                                    Self::escape_ident(name.as_ref()),
-                                    Self::escape_ident(a.as_ref())
-                                )),
-                                None => parts.push(Self::escape_ident(name.as_ref()).to_string()),
-                            }
+                let mut parts: Vec<String> = Vec::new();
+                for s in specifiers {
+                    if let ImportSpecifier::Named { name, alias, .. } = s {
+                        match alias {
+                            Some(a) => parts.push(format!(
+                                "{} as {}",
+                                Self::escape_ident(name.as_ref()),
+                                Self::escape_ident(a.as_ref())
+                            )),
+                            None => parts.push(Self::escape_ident(name.as_ref()).to_string()),
                         }
                     }
-                    self.writeln(&format!("export {{ {} }} from {:?};", parts.join(", "), spec));
+                }
+                match from {
+                    // Re-export from another module: `export … from "…"`.
+                    Some(from) => {
+                        let spec = rewrite_import_to_js(
+                            from.as_ref(),
+                            &self.module_path,
+                            &self.project_root,
+                            self.import_rewrite,
+                        )?;
+                        if *all {
+                            self.writeln(&format!("export * from {:?};", spec));
+                        } else {
+                            self.writeln(&format!(
+                                "export {{ {} }} from {:?};",
+                                parts.join(", "),
+                                spec
+                            ));
+                        }
+                    }
+                    // #415 local named export — no `from` clause.
+                    None => {
+                        self.writeln(&format!("export {{ {} }};", parts.join(", ")));
+                    }
                 }
             }
         }

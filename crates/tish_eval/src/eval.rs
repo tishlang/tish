@@ -993,7 +993,7 @@ impl Evaluator {
                     ExportDeclaration::ReExport {
                         specifiers,
                         all,
-                        from,
+                        from: Some(from),
                         ..
                     } => {
                         let dep_val = self.load_module(from.as_ref())?;
@@ -1016,6 +1016,11 @@ impl Evaluator {
                             }
                         }
                     }
+                    // #415 local named export (`export { a, b as c }`, no `from`): a no-op in the
+                    // running (entry) program — the bindings already exist, and an export alias is
+                    // visible only to importers, never as a local variable (JS semantics). The module
+                    // export table is populated by the module-evaluation path, not here.
+                    ExportDeclaration::ReExport { from: None, .. } => {}
                 }
                 Ok(Value::Null)
             }
@@ -1086,7 +1091,7 @@ impl Evaluator {
                     ExportDeclaration::ReExport {
                         specifiers,
                         all,
-                        from,
+                        from: Some(from),
                         ..
                     } => {
                         let dep_val = self.load_module(from.as_ref())?;
@@ -1104,6 +1109,24 @@ impl Evaluator {
                             if let ImportSpecifier::Named { name, alias, .. } = spec {
                                 let v = dep.strings.get(name.as_ref()).ok_or_else(|| {
                                     EvalError::Error(format!("Module does not export '{}'", name))
+                                })?;
+                                let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                self.scope.borrow_mut().set(Arc::from(bind), v.clone(), false);
+                                export_names.push(bind.to_string());
+                            }
+                        }
+                    }
+                    // #415 local named export (`export { a, b as c }`, no `from`): the bindings are
+                    // already declared in this module's scope; expose each under its export name.
+                    ExportDeclaration::ReExport {
+                        specifiers,
+                        from: None,
+                        ..
+                    } => {
+                        for spec in specifiers {
+                            if let ImportSpecifier::Named { name, alias, .. } = spec {
+                                let v = self.scope.borrow().get(name.as_ref()).ok_or_else(|| {
+                                    EvalError::Error(format!("Export '{}' is not defined", name))
                                 })?;
                                 let bind = alias.as_deref().unwrap_or(name.as_ref());
                                 self.scope.borrow_mut().set(Arc::from(bind), v.clone(), false);

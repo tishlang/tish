@@ -839,8 +839,9 @@ impl Printer {
                         ..
                     } => {
                         if *all {
+                            // `export *` always has a source.
                             self.buf.push_str("* from \"");
-                            self.buf.push_str(from);
+                            self.buf.push_str(from.as_deref().unwrap_or(""));
                             self.buf.push('"');
                         } else {
                             self.buf.push_str("{ ");
@@ -858,9 +859,13 @@ impl Printer {
                                     }
                                 }
                             }
-                            self.buf.push_str(" } from \"");
-                            self.buf.push_str(from);
-                            self.buf.push('"');
+                            self.buf.push_str(" }");
+                            // #415: a local named export (`export { a }`) has no `from` clause.
+                            if let Some(from) = from {
+                                self.buf.push_str(" from \"");
+                                self.buf.push_str(from);
+                                self.buf.push('"');
+                            }
                         }
                     }
                 }

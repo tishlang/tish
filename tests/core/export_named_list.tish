@@ -1,0 +1,14 @@
+// #415: a local named export list — `export { a, b as c }` with NO `from` clause — exposes
+// already-declared local bindings (optionally renamed), distinct from a re-export
+// (`export { a } from "./m"`). At runtime in a single (entry) file the statement is a no-op; the
+// original bindings work as normal. An export ALIAS is visible only to importers, never as a local
+// variable (JS semantics), so the body below uses the original names. JS `--format esm` emits
+// `export { square, cube as toThePower3 };`.
+
+fn square(n) { return n * n }
+fn cube(n) { return n * n * n }
+
+export { square, cube as toThePower3 }
+
+console.log(square(4), cube(3))
+console.log(cube(2))

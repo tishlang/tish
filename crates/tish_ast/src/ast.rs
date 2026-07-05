@@ -157,13 +157,15 @@ pub enum ExportDeclaration {
     /// export default expr
     Default(Expr),
     /// Re-export from another module (#305):
-    ///   `export { foo, bar as inc } from "./m"`  -> specifiers, all=false
-    ///   `export * from "./m"`                    -> specifiers=[], all=true
+    ///   `export { foo, bar as inc } from "./m"`  -> specifiers, all=false, from=Some
+    ///   `export * from "./m"`                    -> specifiers=[], all=true, from=Some
+    ///   `export { a, b as c }`                   -> specifiers, all=false, from=None (#415 —
+    ///                                               a LOCAL named export of already-declared bindings)
     /// Specifiers reuse `ImportSpecifier::Named` (`{ a as b }`).
     ReExport {
         specifiers: Vec<ImportSpecifier>,
         all: bool,
-        from: Arc<str>,
+        from: Option<Arc<str>>,
         span: Span,
     },
 }
