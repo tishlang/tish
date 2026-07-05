@@ -1133,6 +1133,12 @@ fn try_call_array_jit(
             }
         }
     }
+    // #187: a VOID function (side-effect writer, e.g. `multiplyAv`) returns the implicit `null` — its
+    // `f64` result is a dummy. Return `Value::Null` to match the interpreter; the real effect is the
+    // array writeback above.
+    if nf.returns_void() {
+        return Some(Value::Null);
+    }
     Some(Value::Number(res))
 }
 
@@ -1363,6 +1369,12 @@ impl Vm {
 
     /// Run a chunk using this VM's capability set. `repl_mode` persists top-level `let` across REPL lines.
     pub fn run_with_options(&mut self, chunk: &Chunk, repl_mode: bool) -> Result<Value, String> {
+        // #187: the directly-callable-callee registry is scoped to ONE top-level program run. Clear it
+        // here (the outermost entry — closures run via `run_chunk`, not this) so a long-lived process
+        // (REPL / embedder) running a NEW program never resolves a stale callee registered by a prior
+        // one. A cross-caller and its callee always compile within the same run, so this is sufficient.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::jit::reset_callees();
         let result = self.run_chunk(chunk, &chunk.nested, &[], repl_mode);
         // A throw that escaped every `catch` reaches here as the pending-throw sentinel; turn the
         // parked value into the conventional uncaught-error message (issue #60).
