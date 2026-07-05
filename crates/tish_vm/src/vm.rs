@@ -597,13 +597,12 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
             Value::Number(n.acos())
         }),
     );
+    // hypot delegates to the shared builtin (variadic, NaN/Infinity-correct) so the vm never diverges
+    // from interp/native (#247). The old inline `filter_map(as_number)` dropped non-number args
+    // instead of propagating NaN.
     math.insert(
         "hypot".into(),
-        Value::native(|args: &[Value]| {
-            let nums: Vec<f64> = args.iter().filter_map(|v| v.as_number()).collect();
-            let sum_sq: f64 = nums.iter().map(|n| n * n).sum();
-            Value::Number(sum_sq.sqrt())
-        }),
+        Value::native(|args: &[Value]| math_builtins::hypot(args)),
     );
     // Hyperbolic, inverse-hyperbolic, cbrt and base-2/10 logs. Like the trig block above
     // these aren't in `math_builtins`, and on the wasm/native VM there is no host `Math`
