@@ -13884,8 +13884,17 @@ impl Codegen {
         let mut found = false;
         Self::for_each_stmt_expr(stmt, &mut |e| {
             Self::walk_subexprs(e, &mut |x| {
-                if matches!(x, Expr::Call { .. } | Expr::New { .. }) {
-                    found = true;
+                // A call/new may throw; a NON-optional property/index read may throw a TypeError when
+                // the receiver is nullish (#425 — `get_prop`/`get_index` PARK it). Flagging these makes
+                // the emitted post-statement pending-throw checkpoint fire so the throw surfaces at the
+                // right scope (e.g. is caught by an enclosing `try` whose body is a pure read). Optional
+                // chaining (`a?.b`) yields null on a nullish receiver and never throws, so it's excluded.
+                match x {
+                    Expr::Call { .. } | Expr::New { .. } => found = true,
+                    Expr::Member { optional: false, .. } | Expr::Index { optional: false, .. } => {
+                        found = true
+                    }
+                    _ => {}
                 }
             });
         });

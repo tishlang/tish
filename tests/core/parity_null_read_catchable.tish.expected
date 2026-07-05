@@ -1,0 +1,8 @@
+member-call TypeError
+member-pure TypeError
+index TypeError
+survived true
+valid-prop 49
+valid-index 20
+valid-len 3
+oob-index-no-throw no-throw

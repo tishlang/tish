@@ -171,6 +171,23 @@ pub fn not_a_function_error(message: impl Into<String>) -> Value {
     Value::object(e)
 }
 
+/// A catchable `TypeError` for reading a property/index of the nullish value — the `{ name, message }`
+/// shape matches the VM/interpreter/node (`e.name === "TypeError"`). Used to PARK a pending throw in
+/// the native/runtime `get_prop`/`get_index` null arm (#425), so `null.length` / `null[0]` surface a
+/// catchable error at the next pending-throw checkpoint instead of silently reading back `null`.
+pub fn cannot_read_property_error(prop: &str) -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(
+        std::sync::Arc::from("name"),
+        Value::String("TypeError".into()),
+    );
+    e.insert(
+        std::sync::Arc::from("message"),
+        Value::String(format!("Cannot read property '{}' of null", prop).into()),
+    );
+    Value::object(e)
+}
+
 /// RAII frame for the depth-counting recursion guard: holding one means the depth was incremented;
 /// dropping it decrements, so early returns in generated code can't leak a level. #381
 pub struct CallDepthGuard(());
