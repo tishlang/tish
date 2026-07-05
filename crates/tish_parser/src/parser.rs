@@ -1977,9 +1977,54 @@ impl<'a> Parser<'a> {
     binary_single_op!(parse_bit_and, parse_shift, BitAnd, BinOp::BitAnd);
 
     binary_multi_op!(parse_shift, parse_equality, Shl => BinOp::Shl, Shr => BinOp::Shr, UShr => BinOp::UShr);
-    binary_multi_op!(parse_equality, parse_comparison,
-        StrictEq => BinOp::StrictEq, StrictNe => BinOp::StrictNe,
-        Eq => BinOp::Eq, Ne => BinOp::Ne);
+
+    // Loose equality `==` / `!=` is rejected at parse, uniformly across every backend (#244). Its
+    // coercion is a footgun, and leaving it accepted was a portability trap: interp/vm silently
+    // treated `==` as strict, the `--target js` backend emitted true JS loose `==` (so `1 == "1"`
+    // disagreed), and the native-rust backend refused to compile it. Only `===` / `!==` are accepted;
+    // `Eq` / `Ne` produce an actionable error pointing at the strict form. `StrictEq` / `StrictNe`
+    // parse exactly as the generic `binary_multi_op!` would.
+    fn parse_equality(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::StrictEq) => BinOp::StrictEq,
+                Some(TokenKind::StrictNe) => BinOp::StrictNe,
+                Some(TokenKind::Eq) => {
+                    let at = self
+                        .peek()
+                        .map(|t| format!("{:?}", t.span))
+                        .unwrap_or_else(|| "EOF".to_string());
+                    return Err(format!(
+                        "Loose equality '==' is not supported — use strict '===' (at {})",
+                        at
+                    ));
+                }
+                Some(TokenKind::Ne) => {
+                    let at = self
+                        .peek()
+                        .map(|t| format!("{:?}", t.span))
+                        .unwrap_or_else(|| "EOF".to_string());
+                    return Err(format!(
+                        "Loose inequality '!=' is not supported — use strict '!==' (at {})",
+                        at
+                    ));
+                }
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_comparison()?;
+            let start = expr_span(&left).start;
+            let end = expr_span(&right).end;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+                span: Span { start, end },
+            };
+        }
+        Ok(left)
+    }
     binary_multi_op!(parse_comparison, parse_term,
         Lt => BinOp::Lt, Le => BinOp::Le, Gt => BinOp::Gt, Ge => BinOp::Ge, In => BinOp::In);
     binary_multi_op!(parse_term, parse_factor, Plus => BinOp::Add, Minus => BinOp::Sub);

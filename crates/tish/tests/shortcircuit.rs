@@ -9,7 +9,7 @@ use tishlang_vm;
 
 #[test]
 fn test_and_shortcircuit_emits_jump() {
-    let source = "let x = null; let y = x != null && x.foo;";
+    let source = "let x = null; let y = x !== null && x.foo;";
     let program = parse(source).expect("parse");
     let chunk = compile_unoptimized(&program).expect("compile");
     let code = &chunk.code;
@@ -22,7 +22,7 @@ fn test_and_shortcircuit_emits_jump() {
 
 #[test]
 fn test_and_shortcircuit_runs_unoptimized() {
-    let source = "let x = null; let y = x != null && x.foo;";
+    let source = "let x = null; let y = x !== null && x.foo;";
     let program = parse(source).expect("parse");
     let chunk = compile_unoptimized(&program).expect("compile");
     let result = tishlang_vm::run(&chunk);
@@ -35,7 +35,7 @@ fn test_and_shortcircuit_runs_unoptimized() {
 
 #[test]
 fn test_and_shortcircuit_runs_optimized() {
-    let source = "let x = null; let y = x != null && x.foo;";
+    let source = "let x = null; let y = x !== null && x.foo;";
     let program = parse(source).expect("parse");
     let program = tishlang_opt::optimize(&program);
     let chunk = tishlang_bytecode::compile(&program).expect("compile");
