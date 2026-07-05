@@ -1062,6 +1062,13 @@ pub fn to_uint32_value(v: &Value) -> u32 {
 }
 
 /// Invoke a callable [`Value`]: [`Value::Function`], or an object exposing `__call` (e.g. `Symbol`).
+///
+/// Calling a NON-callable (e.g. a method on `null` whose read returned `null`, or any non-function
+/// value) is a JS `TypeError`. In the native/runtime path this used to `panic!` — an UNCATCHABLE
+/// process abort (#381 class). It now PARKS a catchable `TypeError` and returns the `null` sentinel;
+/// the throw surfaces at the caller's next pending-throw checkpoint (statement boundary in emitted
+/// native code, or the `has_pending_throw()` polls in the shared builtins), so `try { null.foo() }
+/// catch (e) { … }` recovers instead of aborting — matching the VM/interpreter/node.
 pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     match callee {
         Value::Function(f) => f.call(args),
@@ -1070,15 +1077,19 @@ pub fn value_call(callee: &Value, args: &[Value]) -> Value {
             if let Some(inner) = inner {
                 return value_call(&inner, args);
             }
-            panic!(
-                "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
-                callee
-            );
+            crate::set_pending_throw(crate::not_a_function_error(format!(
+                "{} is not a function",
+                callee.to_display_string()
+            )));
+            Value::Null
         }
-        _ => panic!(
-            "Not a function: tried to call {:?} as a function (e.g. method on Null when read failed)",
-            callee
-        ),
+        _ => {
+            crate::set_pending_throw(crate::not_a_function_error(format!(
+                "{} is not a function",
+                callee.to_display_string()
+            )));
+            Value::Null
+        }
     }
 }
 
@@ -1879,6 +1890,44 @@ mod propmap_merge_tests {
         assert_eq!(keys(&dst), keys(&src));
         assert_eq!(num(&dst, "x"), Some(7.0));
         assert_eq!(num(&dst, "y"), Some(8.0));
+    }
+}
+
+#[cfg(test)]
+mod value_call_non_function_tests {
+    // Calling a non-callable value PARKS a catchable `TypeError` (#381) instead of `panic!`-ing
+    // (an uncatchable process abort). The throw surfaces at the caller's next pending-throw
+    // checkpoint. These lock the no-panic contract at the primitive level.
+    use super::{value_call, Value};
+    use crate::{has_pending_throw, take_pending_throw};
+
+    fn parked_error_name(v: &Value) -> Option<String> {
+        if let Value::Object(o) = v {
+            if let Some(Value::String(s)) = o.borrow().strings.get("name") {
+                return Some(s.to_string());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn calling_null_parks_type_error_and_does_not_panic() {
+        let _ = take_pending_throw(); // clear any stale slot on this thread
+        let r = value_call(&Value::Null, &[]);
+        assert!(matches!(r, Value::Null), "returns the null sentinel, not a panic");
+        assert!(has_pending_throw(), "a throw must be parked");
+        let parked = take_pending_throw().expect("parked throw present");
+        assert_eq!(parked_error_name(&parked).as_deref(), Some("TypeError"));
+    }
+
+    #[test]
+    fn calling_a_number_parks_type_error() {
+        let _ = take_pending_throw();
+        let r = value_call(&Value::Number(5.0), &[]);
+        assert!(matches!(r, Value::Null));
+        assert!(has_pending_throw());
+        let parked = take_pending_throw().expect("parked throw present");
+        assert_eq!(parked_error_name(&parked).as_deref(), Some("TypeError"));
     }
 }
 

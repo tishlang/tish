@@ -1,0 +1,6 @@
+null-method TypeError
+number-call TypeError
+string-call TypeError
+survived true
+normal-call 5
+method-call hi
