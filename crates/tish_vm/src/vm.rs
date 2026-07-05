@@ -1223,6 +1223,213 @@ fn try_call_array_jit(
     Some(Value::Number(res))
 }
 
+/// #187 native HOF fusion. When `arr.map/filter/reduce/forEach(cb)` has a JIT-compiled pure-numeric
+/// callback (`cb` is a [`VmClosure`] with a plain register-`f64` [`crate::jit::NumericFn`]) AND the
+/// array is all-numeric, the whole higher-order call runs as a tight native loop calling the
+/// `NumericFn` per element — skipping the per-element boxed `Callable::call` dispatch AND the
+/// `Value` (un)boxing of each element that the generic `arr_builtins` path pays.
+///
+/// This is PURELY ADDITIVE: every helper returns `None` to fall back to the existing generic path
+/// (which is byte-identical to the interpreter), so a bail is always sound. The gate is deliberately
+/// narrow — see [`fused_numeric_fn`] and the per-helper arity/`result_bool` conditions.
+#[cfg(not(target_arch = "wasm32"))]
+mod hof_fusion {
+    use super::VmClosure;
+    use tishlang_core::{Value, VmRef};
+
+    /// Extract the callback's fusable [`crate::jit::NumericFn`], if any. Fires ONLY for a `VmClosure`
+    /// whose JIT is a plain pure-numeric register-`f64` function:
+    ///   * `array_param_mask() == 0` — not an array-mode ABI (that path reads `arr[i]`, needs handles);
+    ///   * `!is_jv()` — no function-local JIT arrays (those signal a deopt via a per-thread flag we'd
+    ///     have to poll — the generic path handles them correctly, so bail);
+    ///   * `!recur_guarded()` — not self-recursive (would need the `RecurGuard` trailing-ptr ABI; a
+    ///     lambda callback is never self-recursive, so this only ever excludes pathological input).
+    ///
+    /// Any other callable (builtin native fn, non-JIT closure, array-mode/JV/recursive fn) → `None`.
+    #[inline]
+    pub(super) fn fused_numeric_fn(cb: &Value) -> Option<crate::jit::NumericFn> {
+        let Value::Function(f) = cb else { return None };
+        let vc = f.as_any().downcast_ref::<VmClosure>()?;
+        let nf = vc.jit_fn?;
+        if nf.array_param_mask() != 0 || nf.is_jv() || nf.recur_guarded() {
+            return None;
+        }
+        Some(nf)
+    }
+
+    /// Snapshot an all-numeric array as a `Vec<f64>`. Accepts a packed [`Value::NumberArray`] and a
+    /// boxed [`Value::Array`] whose every element is a [`Value::Number`]. Returns `None` for any other
+    /// shape (mixed/boxed non-number element, a non-array) so the caller falls back to the generic
+    /// path. Snapshots (clones) so — exactly like the generic `arr_builtins` path (#382) — a callback
+    /// that re-enters the same array observes the pre-call contents and can never deadlock the borrow.
+    #[inline]
+    fn numeric_snapshot(arr: &Value) -> Option<Vec<f64>> {
+        match arr {
+            Value::NumberArray(a) => Some(a.borrow().clone()),
+            Value::Array(a) => {
+                let b = a.borrow();
+                let mut out = Vec::with_capacity(b.len());
+                for v in b.iter() {
+                    match v {
+                        Value::Number(n) => out.push(*n),
+                        _ => return None,
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Box a `NumericFn` f64 result the SAME way the interpreter/generic path does: as `Value::Bool`
+    /// when the callback's result is a comparison (`result_is_bool`), else `Value::Number`. A bool
+    /// `NumericFn` returns exactly `0.0`/`1.0`, so `r != 0.0` is exact.
+    #[inline]
+    fn box_result(nf: &crate::jit::NumericFn, r: f64) -> Value {
+        if nf.result_is_bool() {
+            Value::Bool(r != 0.0)
+        } else {
+            Value::Number(r)
+        }
+    }
+
+    /// Truthiness of a `NumericFn` result under tish's rules — matches `Value::is_truthy` on the
+    /// boxed form: a number is truthy iff `!= 0` and not NaN; a bool-result fn returns `0.0`/`1.0`
+    /// (never NaN) so the same test is exact for it too.
+    #[inline]
+    fn result_truthy(r: f64) -> bool {
+        r != 0.0 && !r.is_nan()
+    }
+
+    /// Fused `map`. Fires when the callback is a fusable numeric fn of arity ≤ 2 (it may read the
+    /// element and the index; a 3rd `array` param can't be a number, so arity 3+ bails). Returns the
+    /// SAME `Value` variant the generic path would: a numeric-returning map over a `NumberArray` yields
+    /// a packed `NumberArray` (empty → boxed empty `Array`, matching `packed_or_empty`); a
+    /// bool-returning map, or any map over a boxed `Array`, yields a boxed `Value::Array`.
+    pub(super) fn map(arr: &Value, cb: &Value) -> Option<Value> {
+        let nf = fused_numeric_fn(cb)?;
+        if nf.arity() > 2 {
+            return None; // 3rd param is the array arg — not a number; bail (sound).
+        }
+        let data = numeric_snapshot(arr)?;
+        let arity = nf.arity();
+        let packed_input = matches!(arr, Value::NumberArray(_));
+        // A numeric-returning map over a packed input keeps its result packed (byte-identical to
+        // `packed_or_empty`); every other case (bool result, or a boxed `Array` input) boxes.
+        if !nf.result_is_bool() && packed_input {
+            let mut out: Vec<f64> = Vec::with_capacity(data.len());
+            let mut args = [0.0f64; 2];
+            for (i, &n) in data.iter().enumerate() {
+                args[0] = n;
+                args[1] = i as f64;
+                out.push(nf.call(&args[..arity]));
+            }
+            // Empty → boxed empty `Array`, matching `packed_or_empty`.
+            if out.is_empty() {
+                return Some(Value::Array(VmRef::new(Vec::new())));
+            }
+            return Some(Value::number_array(out));
+        }
+        let mut out: Vec<Value> = Vec::with_capacity(data.len());
+        let mut args = [0.0f64; 2];
+        for (i, &n) in data.iter().enumerate() {
+            args[0] = n;
+            args[1] = i as f64;
+            out.push(box_result(&nf, nf.call(&args[..arity])));
+        }
+        Some(Value::Array(VmRef::new(out)))
+    }
+
+    /// Fused `filter`. Callback is a predicate of arity ≤ 2. Keeps the ORIGINAL element (not the
+    /// callback result) when the result is truthy — so the output is always a subset of the numeric
+    /// input. Packed input → packed output (`packed_or_empty`); boxed `Array` input → boxed `Array`.
+    pub(super) fn filter(arr: &Value, cb: &Value) -> Option<Value> {
+        let nf = fused_numeric_fn(cb)?;
+        if nf.arity() > 2 {
+            return None;
+        }
+        let data = numeric_snapshot(arr)?;
+        let arity = nf.arity();
+        let packed_input = matches!(arr, Value::NumberArray(_));
+        let mut args = [0.0f64; 2];
+        if packed_input {
+            let mut out: Vec<f64> = Vec::new();
+            for (i, &n) in data.iter().enumerate() {
+                args[0] = n;
+                args[1] = i as f64;
+                if result_truthy(nf.call(&args[..arity])) {
+                    out.push(n);
+                }
+            }
+            if out.is_empty() {
+                return Some(Value::Array(VmRef::new(Vec::new())));
+            }
+            return Some(Value::number_array(out));
+        }
+        let mut out: Vec<Value> = Vec::new();
+        for (i, &n) in data.iter().enumerate() {
+            args[0] = n;
+            args[1] = i as f64;
+            if result_truthy(nf.call(&args[..arity])) {
+                out.push(Value::Number(n));
+            }
+        }
+        Some(Value::Array(VmRef::new(out)))
+    }
+
+    /// Fused `reduce`. Callback is `(acc, element, index)` — arity ≤ 3 (a 4th `array` param bails).
+    /// The accumulator stays an `f64` across the whole fold, so the callback result must NOT be a bool
+    /// (`!result_is_bool()`): a bool acc fed back into the numeric fn would diverge from the interpreter
+    /// (which would pass a `Value::Bool`, not a number). No-initial-value semantics match the generic
+    /// path: absent init (`Value::Null`) with a non-empty array seeds `acc = data[0]` and scans from
+    /// index 1; an empty array with no init throws (bail to the generic path, which raises it).
+    pub(super) fn reduce(arr: &Value, cb: &Value, init: &Value) -> Option<Value> {
+        let nf = fused_numeric_fn(cb)?;
+        if nf.arity() > 3 || nf.result_is_bool() {
+            return None;
+        }
+        let data = numeric_snapshot(arr)?;
+        let arity = nf.arity();
+        // Determine seed. Reduce with no initial value AND an empty array is a TypeError in JS — let
+        // the generic path produce that exact throw rather than replicate it here.
+        let (start, mut acc) = match init {
+            Value::Null if !data.is_empty() => (1usize, data[0]),
+            Value::Null => return None, // empty + no init → generic path throws
+            Value::Number(n) => (0usize, *n),
+            _ => return None, // non-numeric explicit init → generic path (acc wouldn't stay f64)
+        };
+        let mut args = [0.0f64; 3];
+        for (i, &x) in data.iter().enumerate().skip(start) {
+            args[0] = acc;
+            args[1] = x;
+            args[2] = i as f64;
+            acc = nf.call(&args[..arity]);
+        }
+        Some(Value::Number(acc))
+    }
+
+    /// Fused `forEach`. Callback arity ≤ 2; result discarded; always returns `Value::Null`. Only worth
+    /// fusing when the callback is side-effect-free numeric arithmetic — but a `NumericFn` is pure by
+    /// construction (no calls/member/throw), so a fused `forEach` is observably a no-op EXCEPT for its
+    /// (absent) side effects: it computes and discards. Kept for completeness / uniformity; it can
+    /// never diverge because there is nothing observable to diverge on.
+    pub(super) fn for_each(arr: &Value, cb: &Value) -> Option<Value> {
+        let nf = fused_numeric_fn(cb)?;
+        if nf.arity() > 2 {
+            return None;
+        }
+        let data = numeric_snapshot(arr)?;
+        let arity = nf.arity();
+        let mut args = [0.0f64; 2];
+        for (i, &n) in data.iter().enumerate() {
+            args[0] = n;
+            args[1] = i as f64;
+            let _ = nf.call(&args[..arity]);
+        }
+        Some(Value::Null)
+    }
+}
+
 struct VmClosure {
     chunk: Arc<Chunk>,
     /// Whether this closure can run on the frame stack — computed ONCE at creation (eligibility is an
@@ -3598,19 +3805,37 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     match key_s {
                         "map" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
+                            // #187 fusion over the SAME boxed snapshot `bv` the generic path uses, so a
+                            // fused result is byte-identical (a boxed all-number `Array` → boxed output).
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(v) = hof_fusion::map(&bv, &cb) {
+                                return v;
+                            }
                             arr_builtins::map(&bv, &cb)
                         }),
                         "filter" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(v) = hof_fusion::filter(&bv, &cb) {
+                                return v;
+                            }
                             arr_builtins::filter(&bv, &cb)
                         }),
                         "reduce" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
                             let init = args.get(1).cloned().unwrap_or(Value::Null);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(v) = hof_fusion::reduce(&bv, &cb, &init) {
+                                return v;
+                            }
                             arr_builtins::reduce(&bv, &cb, &init)
                         }),
                         "forEach" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(v) = hof_fusion::for_each(&bv, &cb) {
+                                return v;
+                            }
                             arr_builtins::for_each(&bv, &cb)
                         }),
                         "find" => make_native_fn(move |args| {
@@ -3750,20 +3975,42 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "map" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::map(&Value::Array(a_clone.clone()), &cb)
+                    let arr = Value::Array(a_clone.clone());
+                    // #187 native HOF fusion — tight native loop over a JIT'd numeric callback; bails
+                    // (None) to the byte-identical generic path for any non-fusable callback/array.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(v) = hof_fusion::map(&arr, &cb) {
+                        return v;
+                    }
+                    arr_builtins::map(&arr, &cb)
                 }),
                 "filter" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::filter(&Value::Array(a_clone.clone()), &cb)
+                    let arr = Value::Array(a_clone.clone());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(v) = hof_fusion::filter(&arr, &cb) {
+                        return v;
+                    }
+                    arr_builtins::filter(&arr, &cb)
                 }),
                 "reduce" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
                     let init = args.get(1).cloned().unwrap_or(Value::Null);
-                    arr_builtins::reduce(&Value::Array(a_clone.clone()), &cb, &init)
+                    let arr = Value::Array(a_clone.clone());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(v) = hof_fusion::reduce(&arr, &cb, &init) {
+                        return v;
+                    }
+                    arr_builtins::reduce(&arr, &cb, &init)
                 }),
                 "forEach" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    arr_builtins::for_each(&Value::Array(a_clone.clone()), &cb)
+                    let arr = Value::Array(a_clone.clone());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(v) = hof_fusion::for_each(&arr, &cb) {
+                        return v;
+                    }
+                    arr_builtins::for_each(&arr, &cb)
                 }),
                 "find" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
