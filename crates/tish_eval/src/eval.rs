@@ -4057,6 +4057,11 @@ impl Evaluator {
                     _ => Ok(Value::Null),
                 }
             }
+            // Reading a property of the nullish value throws a catchable `TypeError`, matching the
+            // bytecode VM (`get_member`'s `_` arm), cranelift/wasi, and node — not a silent `null`.
+            // The tree-walker used to fall through to `_ => Ok(Value::Null)`, so `null.length` read
+            // back as `null` on interp while every other backend threw (a pure interp≠vm bug).
+            Value::Null => Err(format!("Cannot read property '{}' of null", key)),
             _ => Ok(Value::Null),
         }
     }
@@ -4091,6 +4096,9 @@ impl Evaluator {
                 };
                 self.get_prop(obj, key)
             }
+            // Indexing the nullish value throws a catchable `TypeError` (like `get_prop` above and
+            // the VM/cranelift/wasi/node) rather than silently reading back `null`.
+            Value::Null => Err(format!("Cannot read property '{}' of null", index)),
             _ => Ok(Value::Null),
         }
     }
@@ -4696,5 +4704,51 @@ mod recursion_limit_tests_381 {
     fn normal_recursion_is_unaffected() {
         let src = "fn fib(n) { if (n < 2) { return n } return fib(n - 1) + fib(n - 2) }\nfib(12)";
         assert_eq!(run_with_depth(src, 20000), "144");
+    }
+}
+
+#[cfg(test)]
+mod null_member_access_tests {
+    // Reading a property or index of the nullish value throws a catchable `TypeError`, matching the
+    // bytecode VM / cranelift / wasi / node. The tree-walker used to fall through to `Ok(Null)`, so
+    // `null.length` read back as `null` on interp while every other backend threw (a pure interp≠vm
+    // divergence). These lock the interpreter to the throwing behavior.
+    use super::Evaluator;
+    use tishlang_parser::parse;
+
+    fn run(src: &str) -> String {
+        let program = parse(src).unwrap();
+        let mut eval = Evaluator::new();
+        eval.eval_program(&program).unwrap().to_string()
+    }
+
+    #[test]
+    fn null_property_read_throws_type_error() {
+        let src = "let name = 'none'\n\
+                   try { let z = null; z.length } catch (e) { name = e.name }\n\
+                   name";
+        assert_eq!(run(src), "TypeError");
+    }
+
+    #[test]
+    fn null_index_read_throws_type_error() {
+        let src = "let name = 'none'\n\
+                   try { let z = null; z[0] } catch (e) { name = e.name }\n\
+                   name";
+        assert_eq!(run(src), "TypeError");
+    }
+
+    #[test]
+    fn object_missing_property_still_reads_null() {
+        // Guard against over-reach: a MISSING property of a real object is `null`, not a throw.
+        let src = "let o = { a: 1 }\nString(o.b === null)";
+        assert_eq!(run(src), "true");
+    }
+
+    #[test]
+    fn array_oob_index_still_reads_null() {
+        // Out-of-bounds array index stays nullish (only a null/undefined *receiver* throws).
+        let src = "let a = [1, 2, 3]\nString(a[9] === null)";
+        assert_eq!(run(src), "true");
     }
 }
