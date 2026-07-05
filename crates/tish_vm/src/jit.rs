@@ -20,6 +20,7 @@
 //! Not compiled for wasm targets (cranelift-jit emits host code).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
 use cranelift::codegen::settings::{self, Configurable};
@@ -106,6 +107,14 @@ pub struct NumericFn {
     /// [`NumericFn::call`] ABI; an out-of-bounds array access (or a non-numeric return) sets a
     /// per-thread deopt flag ([`jv_take_deopt`]) and the caller discards the result + re-interprets.
     jv: bool,
+    /// #187: true when this function embeds a native call to a registered callee. Such a function is
+    /// NOT cached by [`try_compile_numeric`] (its embedded callee address could go stale if a
+    /// long-lived process reuses chunk addresses across programs) — it is recompiled per closure
+    /// creation, which resolves against the live callee registry. `false` (cacheable) for all others.
+    uses_xcall: bool,
+    /// #187: true when this is a VOID array-mode function (only returns the implicit `null`). Its
+    /// `f64` result is a dummy, so [`try_call_array_jit`] returns `Value::Null` instead of a number.
+    void_result: bool,
 }
 
 /// A flat numeric array handed to an array-mode JIT function: a raw `f64` slice (`ptr`, `len`).
@@ -376,6 +385,13 @@ impl NumericFn {
         self.array_writable_mask
     }
 
+    /// #187: true when this array-mode function is VOID (returns the implicit `null`); its `f64` result
+    /// is a dummy, so [`try_call_array_jit`] returns `Value::Null` for it.
+    #[inline]
+    pub fn returns_void(&self) -> bool {
+        self.void_result
+    }
+
     /// Call an array-mode function (`array_param_mask != 0`). `numeric` holds the f64 values for the
     /// numeric params in numeric-param order; `arrays` the [`ArrayHandle`]s for the array params in
     /// array-param order. Returns `(result, deopt)` — when `deopt` is true an out-of-bounds access
@@ -426,6 +442,22 @@ struct JitGlobal {
     math_call_id: cranelift_module::FuncId,
     /// `FuncId`s of the imported `tish_jv_*` vector runtime (#189).
     jv_fns: JvFns,
+    /// #187: directly-callable numeric callees, keyed by the stable global name a top-level function is
+    /// bound to (`Chunk.global_name`). Populated when a plain register-`f64` function compiles; a
+    /// caller's `name(args)` then lowers to a native cranelift call to `id`. Sound because the compiler
+    /// only stamps `global_name` on functions it proved are never reassigned/shadowed program-wide, so
+    /// the binding can never change under a cached caller. A caller that references a name NOT yet here
+    /// (a forward reference) simply bails to the interpreter.
+    callees: HashMap<Arc<str>, CalleeEntry>,
+}
+
+/// #187: a registered directly-callable numeric callee (register-`f64` ABI). Callers resolve against
+/// the LIVE registry at compile time and are never cached ([`NumericFn::uses_xcall`]), so a name
+/// re-registered by a later program simply overwrites this — a stale callee is never invoked.
+#[derive(Clone, Copy)]
+struct CalleeEntry {
+    id: cranelift_module::FuncId,
+    arity: u8,
 }
 
 // SAFETY: `JITModule` is `!Send`, but the single instance lives behind the
@@ -685,6 +717,7 @@ fn jit() -> Option<&'static Mutex<JitGlobal>> {
                 counter: 0,
                 math_call_id,
                 jv_fns,
+                callees: HashMap::new(),
             })
         })
     })
@@ -761,6 +794,19 @@ fn chunk_fingerprint(chunk: &Chunk) -> u64 {
 
 /// Get (or compile, then cache) the native numeric function for `chunk`.
 /// Returns `None` if the chunk isn't a straight-line numeric function.
+/// #187: clear the directly-callable-callee registry at the start of each top-level program run, so a
+/// long-lived process (REPL / embedder) never resolves a callee registered by a PRIOR program (a name
+/// re-registered non-numerically would otherwise leave a stale native entry). Cross-callers aren't
+/// cached, so they always re-resolve against the freshly-populated registry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reset_callees() {
+    if let Some(lock) = jit() {
+        if let Ok(mut g) = lock.lock() {
+            g.callees.clear();
+        }
+    }
+}
+
 pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
     if !chunk.slot_based
         || chunk.rest_param_index != NO_REST_PARAM
@@ -781,7 +827,12 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
         }
     }
     let result = compile_chunk(&mut g, chunk);
-    g.cache.insert(key, (fp, result));
+    // #187: a function that embeds a native call to a registered callee is NOT cached — its callee
+    // address could go stale across programs in a long-lived process. It recompiles per closure
+    // creation (once, in practice), resolving against the live registry. Everything else caches.
+    if !result.is_some_and(|nf| nf.uses_xcall) {
+        g.cache.insert(key, (fp, result));
+    }
     result
 }
 
@@ -1253,6 +1304,50 @@ fn js_to_int32(bcx: &mut FunctionBuilder, x: ClifValue) -> ClifValue {
     bcx.ins().select(finite, red, zero)
 }
 
+/// #187: import every registered directly-callable callee this chunk references (via `LoadVar name`)
+/// into `func`, returning `name → (FuncRef, arity)` for the Call-lowering peephole. Empty when the
+/// chunk calls no registered callee (the common case) — then `LoadVar`/`Call` still bail to interp.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_resolved_callees(
+    g: &mut JitGlobal,
+    chunk: &Chunk,
+    func: &mut cranelift::codegen::ir::Function,
+) -> HashMap<Arc<str>, (cranelift::codegen::ir::FuncRef, u8)> {
+    let mut resolved = HashMap::new();
+    if g.callees.is_empty() {
+        return resolved;
+    }
+    // Collect (name, id, arity) for referenced registered callees first, so the `g.callees` borrow is
+    // released before the `g.module` mutable borrow in `declare_func_in_func`.
+    let mut refs: Vec<(Arc<str>, cranelift_module::FuncId, u8)> = Vec::new();
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        if op == Opcode::LoadVar {
+            if let Some(name) = peek_u16(code, ip + 1).and_then(|ni| chunk.names.get(ni as usize)) {
+                if let Some(entry) = g.callees.get(name) {
+                    if !refs.iter().any(|(n, _, _)| n == name) {
+                        refs.push((Arc::clone(name), entry.id, entry.arity));
+                    }
+                }
+            }
+        }
+        ip += match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+    }
+    for (name, id, arity) in refs {
+        let fref = g.module.declare_func_in_func(id, func);
+        resolved.insert(name, (fref, arity));
+    }
+    resolved
+}
+
 fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     let arity = chunk.param_count as usize;
 
@@ -1333,6 +1428,9 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     } else {
         None
     };
+    // #187: import any directly-callable numeric callees this chunk references, so `name(args)` can
+    // lower to a native call. Empty for the vast majority of functions.
+    let resolved = build_resolved_callees(g, chunk, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     let result_bool = match build_body_cfg(
         &mut ctx.func,
@@ -1344,6 +1442,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         recur_guard,
         math_fref,
         jv_ctx.as_ref(),
+        &resolved,
     ) {
         Some(b) => b,
         // A JV function has no straight-line fallback (its ABI has the deopt param `build_body`
@@ -1377,6 +1476,22 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         return None;
     }
     let ptr = g.module.get_finalized_function(id);
+    // #187: a plain register-`f64` top-level function (no arrays / recursion-guard / bool result) with a
+    // provably-stable global name becomes a directly-callable callee. `id` is already finalized above,
+    // so a later caller can `declare_func_in_func(id)` and call it. Re-registering a name (a different
+    // program reusing the address) overwrites with the new `id`/`fp`; callers resolve against the live
+    // registry (and cross-call callers skip the cache), so a stale callee is never invoked.
+    if !is_jv && !recur_guard && !result_bool {
+        if let Some(name) = &chunk.global_name {
+            g.callees.insert(
+                Arc::clone(name),
+                CalleeEntry {
+                    id,
+                    arity: arity as u8,
+                },
+            );
+        }
+    }
     Some(NumericFn {
         ptr: ptr as usize,
         arity: arity as u8,
@@ -1385,6 +1500,8 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         array_writable_mask: 0,
         recur_guarded: recur_guard,
         jv: is_jv,
+        uses_xcall: !resolved.is_empty(),
+        void_result: false, // register-f64 functions return a real f64
     })
 }
 
@@ -1413,6 +1530,10 @@ fn classify_params(chunk: &Chunk, arity: usize) -> (u8, u8) {
         };
         let size = match op_size(op) {
             Some(s) => s,
+            // #187: a bare `LoadVar name` / `Call argc` (a global function call whose result is numeric)
+            // doesn't touch param classification — treat as a sized no-op. `build_body_cfg` is the gate:
+            // it lowers the call only if the callee resolves, else the whole function bails to interp.
+            None if matches!(op, Opcode::LoadVar | Opcode::Call) => 3,
             None => return (0, 0), // an opcode the array CFG can't handle ⇒ ineligible
         };
         match op {
@@ -1507,6 +1628,8 @@ fn compile_chunk_arrays(
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
+    // #187: array-mode functions (e.g. spectral_norm's multiplyAv) may call a register-f64 callee.
+    let resolved = build_resolved_callees(g, chunk, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     // No self-call in array mode (recursive call would need the array signature) → pass None.
     // No JV local arrays in array-param mode either → pass None for the JV context.
@@ -1520,6 +1643,7 @@ fn compile_chunk_arrays(
         false,
         math_fref,
         None,
+        &resolved,
     )
     .is_none()
     {
@@ -1543,6 +1667,8 @@ fn compile_chunk_arrays(
         array_writable_mask: writable_mask,
         recur_guarded: false,
         jv: false,
+        uses_xcall: !resolved.is_empty(),
+        void_result: chunk_is_void(chunk),
     })
 }
 
@@ -1802,6 +1928,41 @@ fn chunk_has_self_call(chunk: &Chunk) -> bool {
 /// a tagged slot only makes its `LoadLocal`s carry `is_bool`, which at worst forces a diverging
 /// `bool === number` compare or a `return bool` to bail to the interpreter (never a miscompile). A
 /// bytecode decode failure stops the scan early (→ fewer tags → more conservative), never a panic.
+/// #187: is this a VOID function — one that only ever `return`s the implicit `null` (a side-effect
+/// function like `multiplyAv`, which writes an array param and falls through)? True iff EVERY `Return`
+/// is immediately preceded by `LoadConst Null`. The array-mode JIT can then emit a dummy `f64` result
+/// for such a function and its wrapper returns `Value::Null` (matching the interpreter). Conservative:
+/// a decode failure or any value-returning path makes it `false`.
+#[cfg(not(target_arch = "wasm32"))]
+fn chunk_is_void(chunk: &Chunk) -> bool {
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    let mut prev_null = false;
+    let mut saw_return = false;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => return false,
+        };
+        if op == Opcode::Return {
+            saw_return = true;
+            if !prev_null {
+                return false; // a value-returning path ⇒ not void
+            }
+        }
+        prev_null = op == Opcode::LoadConst
+            && matches!(
+                peek_u16(code, ip + 1).and_then(|i| chunk.constants.get(i as usize)),
+                Some(Constant::Null)
+            );
+        ip += match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => return false,
+        };
+    }
+    saw_return
+}
+
 fn classify_bool_slots(chunk: &Chunk) -> std::collections::HashSet<usize> {
     let code = &chunk.code;
     let mut set: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -1966,6 +2127,9 @@ fn build_body_cfg(
     // JV slot set. Those slots become `i64` handle Variables and their array ops lower to `tish_jv_*`
     // calls; an out-of-bounds index sets the per-thread deopt flag the wrapper re-interprets on.
     jv: Option<&JvCtx>,
+    // #187: `name → (FuncRef, arity)` for directly-callable numeric callees imported into `func`. A
+    // `LoadVar name ; args ; Call` whose name is here lowers to a native call; unresolved names bail.
+    resolved: &HashMap<Arc<str>, (cranelift::codegen::ir::FuncRef, u8)>,
 ) -> Option<bool> {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -1979,6 +2143,9 @@ fn build_body_cfg(
     } else {
         std::collections::HashSet::new()
     };
+    // #187: a VOID array-mode function (only returns the implicit `null`, e.g. a side-effect writer)
+    // gets a dummy `f64` result; `try_call_array_jit` returns `Value::Null` for it (matches interp).
+    let is_void = array_mask != 0 && chunk_is_void(chunk);
 
     // 1. Validate every opcode is supported + collect block leaders (jump targets, the fall-through
     //    after each branch, entry). Bail on any unsupported opcode (so we never mis-size the scan).
@@ -1995,6 +2162,10 @@ fn build_body_cfg(
         let size = match op_size(op) {
             Some(s) => s,
             None if jv.is_some() => op.instruction_size(code, ip)?,
+            // #187: `LoadVar`/`Call` are 3 bytes; the translate loop lowers them to a native call if the
+            // callee resolved, else bails. Sizing them here lets a function with a resolvable call pass
+            // the scan (an unresolvable one still bails in translation).
+            None if matches!(op, Opcode::LoadVar | Opcode::Call) => 3,
             None => return None,
         };
         // A SelfCall whose arity != this function's arity can't be a plain f64-ABI native call → bail.
@@ -2144,6 +2315,9 @@ fn build_body_cfg(
     // `arr.push` awaiting its arg + `Call`. Both must be empty at every block boundary.
     let mut jv_pending: Vec<ClifValue> = Vec::new();
     let mut pending_push: Option<ClifValue> = None;
+    // #187: a resolved callee awaiting its args + `Call` (set by `LoadVar name`, consumed by the very
+    // next `Call`). Like the JV pending state, must be empty at every block boundary.
+    let mut pending_callee: Option<(cranelift::codegen::ir::FuncRef, u8)> = None;
     let mut cur = body_start;
     let mut terminated = false;
     let mut ip = 0usize;
@@ -2156,8 +2330,8 @@ fn build_body_cfg(
                     }
                     bcx.ins().jump(blk, &[]);
                 }
-                // A JV ref or a pending push must never span a statement boundary.
-                if !jv_pending.is_empty() || pending_push.is_some() {
+                // A JV ref, a pending push, or a pending callee must never span a statement boundary.
+                if !jv_pending.is_empty() || pending_push.is_some() || pending_callee.is_some() {
                     return None;
                 }
                 bcx.switch_to_block(blk);
@@ -2420,6 +2594,59 @@ fn build_body_cfg(
                 stack.push((bcx.ins().fcvt_from_uint(types::F64, len_i), false));
                 ip += 3;
             }
+            // #187: `LoadVar name` where `name` is a resolved directly-callable callee — stage it for the
+            // very next `Call`. Any other `LoadVar` (an unresolved global) bails to the interpreter.
+            Opcode::LoadVar => {
+                if pending_callee.is_some() {
+                    return None; // no nested resolved calls in v1
+                }
+                let name = chunk.names.get(peek_u16(code, ip + 1)? as usize)?;
+                match resolved.get(name) {
+                    Some(&(fref, callee_arity)) => pending_callee = Some((fref, callee_arity)),
+                    None => return None,
+                }
+                ip += 3;
+            }
+            // #187: `Call argc` consuming a staged callee — a native cranelift call (like `SelfCall`,
+            // minus the guard). Pops `argc` f64 args from the stack, pushes the f64 result.
+            Opcode::Call if pending_callee.is_some() => {
+                let (fref, callee_arity) = pending_callee.take()?;
+                if peek_u16(code, ip + 1)? as u8 != callee_arity
+                    || stack.len() < callee_arity as usize
+                {
+                    return None;
+                }
+                let arg_start = stack.len() - callee_arity as usize;
+                let mut call_args = Vec::with_capacity(callee_arity as usize);
+                for (v, is_bool) in stack.drain(arg_start..) {
+                    if is_bool {
+                        return None; // a bool arg doesn't match the callee's f64 ABI
+                    }
+                    call_args.push(v);
+                }
+                let call = bcx.ins().call(fref, &call_args);
+                stack.push((bcx.inst_results(call)[0], false));
+                ip += 3;
+            }
+            // #187: a VOID array-mode function's implicit `return null` (the fall-through of a
+            // side-effect writer like `multiplyAv`). Emit a dummy `f64` result — the wrapper returns
+            // `Value::Null` for a void function, matching the interpreter — so the whole native body
+            // (the array reads/writes + any cross-calls) runs instead of bailing on the null. MUST be
+            // an actual return-null (next op is `Return`): a MID-BODY `let x = null` is also a
+            // non-numeric `LoadConst`, and terminating on it would drop the rest of the function.
+            Opcode::LoadConst
+                if is_void
+                    && Opcode::from_u8(*code.get(ip + 3)?)? == Opcode::Return
+                    && !matches!(
+                        chunk.constants.get(peek_u16(code, ip + 1)? as usize),
+                        Some(Constant::Number(_)) | Some(Constant::Bool(_))
+                    ) =>
+            {
+                let zero = bcx.ins().f64const(0.0);
+                bcx.ins().return_(&[zero]);
+                terminated = true; // the following `Return` (and any dead tail) is now skipped
+                ip += 3;
+            }
             // #189: a non-numeric constant load in a JV function — almost always the compiler's
             // trailing implicit `LoadConst Null; Return` epilogue after a `while (true)` loop. That
             // epilogue is the loop's never-taken exit edge: statically reachable (so it becomes a
@@ -2431,6 +2658,7 @@ fn build_body_cfg(
             // produces the correct value. Sound either way, since the deopt path reproduces semantics.
             Opcode::LoadConst
                 if jv.is_some()
+                    && Opcode::from_u8(*code.get(ip + 3)?)? == Opcode::Return
                     && !matches!(
                         chunk.constants.get(peek_u16(code, ip + 1)? as usize),
                         Some(Constant::Number(_)) | Some(Constant::Bool(_))
@@ -2561,6 +2789,12 @@ fn build_body(
                 stack.push((sel, then_b));
                 ip = merge_target;
             }
+            // #187: a `function name(x) { … }` block body wraps its statements in EnterBlock/ExitBlock
+            // (+ loop-var markers) — pure scope bookkeeping with no runtime effect on a straight-line
+            // numeric body. Skip them so leaf functions (e.g. a `sq(x)`/`evalA(i,j)` cross-call callee)
+            // compile instead of bailing on the first marker. The real `Return` still ends the path.
+            Opcode::EnterBlock | Opcode::ExitBlock | Opcode::LoopVarsEnd => ip += 1,
+            Opcode::LoopVarsBegin => ip += 3,
             // Loops / member / index / call / array / object → VM.
             _ => return None,
         }
@@ -2939,6 +3173,46 @@ mod tests {
         ];
         let (_res, deopt) = f.call_arrays(&[5.0], &handles); // writes dst[0..5) into a len-2 array
         assert!(deopt, "OOB array-param write must deopt");
+    }
+
+    /// #187: a caller lowers a `name(args)` call to a stable register-`f64` callee into a native
+    /// cranelift call. Compiles `sq` first (registering it), then `sumSq` which calls it; the result
+    /// (`sum_{i<n} i^2 == (n-1)n(2n-1)/6`) is checked against a closed form independent of the interp.
+    #[test]
+    fn jit_cross_function_call_matches_closed_form() {
+        let src = "function sq(x) { return x * x }\n\
+                   function sumSq(n) {\n\
+                     let s = 0\n\
+                     let i = 0\n\
+                     while (i < n) { s = s + sq(i); i = i + 1 }\n\
+                     return s\n\
+                   }\n\
+                   sumSq(0)\n";
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let chunk = tishlang_bytecode::compile(&opt).expect("compile");
+        // Compile every nested fn in source order (sq before sumSq) so sq registers before sumSq
+        // resolves it. `compile_chunk` bypasses the address cache, and cross-call fns aren't cached.
+        let lock = jit().expect("jit available");
+        let mut sumsq: Option<NumericFn> = None;
+        for n in &chunk.nested {
+            let mut g = lock.lock().unwrap();
+            if let Some(f) = compile_chunk(&mut g, n) {
+                if n.global_name.as_deref() == Some("sumSq") {
+                    sumsq = Some(f);
+                }
+            }
+        }
+        let f =
+            sumsq.expect("sumSq must compile with the resolved `sq` call (did resolution break?)");
+        for n in [1i64, 5, 20, 50] {
+            let expect = ((n - 1) * n * (2 * n - 1) / 6) as f64;
+            assert_eq!(
+                f.call(&[n as f64]),
+                expect,
+                "cross-call sumSq wrong for n={n}"
+            );
+        }
     }
 
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME

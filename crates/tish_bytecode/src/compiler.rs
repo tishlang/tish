@@ -24,11 +24,17 @@ enum SimpleMapResult {
 /// `false`, so a numeric accumulator never routes through the builder.
 fn is_string_typed(expr: &Expr) -> bool {
     match expr {
-        Expr::Literal { value: Literal::String(_), .. } => true,
+        Expr::Literal {
+            value: Literal::String(_),
+            ..
+        } => true,
         Expr::TemplateLiteral { .. } => true,
-        Expr::Binary { left, op: BinOp::Add, right, .. } => {
-            is_string_typed(left) || is_string_typed(right)
-        }
+        Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+            ..
+        } => is_string_typed(left) || is_string_typed(right),
         _ => false,
     }
 }
@@ -130,6 +136,11 @@ struct Compiler<'a> {
     /// the [`Opcode::MathUnary`] intrinsic, which the numeric JIT can compile without a shape guard.
     /// `false` on nested-fn compilers and whenever the scan can't prove stability.
     math_is_global: bool,
+    /// #187: top-level function names provably stable across the whole program (see
+    /// [`compute_stable_globals`]). A top-level `function N` in this set gets its chunk stamped with
+    /// `global_name = Some(N)`, which lets the numeric JIT register it as a directly-callable callee.
+    /// Threaded unchanged into every nested compiler (shared `Arc`).
+    stable_globals: Arc<std::collections::HashSet<Arc<str>>>,
 }
 
 /// Does `e` reference only the given params (no free/global vars, no nested
@@ -180,9 +191,7 @@ fn expr_is_param_only(e: &Expr, params: &HashSet<&str>) -> bool {
             ObjectProp::KeyValue(_, x, _) => expr_is_param_only(x, params),
             ObjectProp::Spread(_) => false,
         }),
-        Expr::TemplateLiteral { exprs, .. } => {
-            exprs.iter().all(|x| expr_is_param_only(x, params))
-        }
+        Expr::TemplateLiteral { exprs, .. } => exprs.iter().all(|x| expr_is_param_only(x, params)),
         Expr::TypeOf { operand, .. } => expr_is_param_only(operand, params),
         // Mutation, nested fns, async, jsx, native, `new` — not eligible.
         _ => false,
@@ -254,7 +263,9 @@ fn simple_fn_slots(
 /// **Default ON** — validated across the full cross-backend suite + the compute micros (−22..27%) +
 /// the `main.tish` bundle (−22%). Set `TISH_VM_SLOTS=0` to disable (name-based, the old path).
 fn slots_enabled() -> bool {
-    std::env::var("TISH_VM_SLOTS").map(|v| v != "0").unwrap_or(true)
+    std::env::var("TISH_VM_SLOTS")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 /// Is `name` bound by one of `params` (so it would shadow a function's own name)? Conservative:
@@ -263,6 +274,19 @@ fn params_bind_name(params: &[FunParam], name: &str) -> bool {
     params.iter().any(|p| match p {
         FunParam::Simple(tp) => tp.name.as_ref() == name,
         FunParam::Destructure { .. } => true,
+    })
+}
+
+/// #187: does any parameter DEFAULT expression rebind `name`? A default like `(y = (foo = evil))`
+/// reassigns `foo` when the function is called, so a callee reached through it is NOT stable. The
+/// stability walk must scan these (they are otherwise invisible to the body scan).
+fn params_default_rebinds(params: &[FunParam], name: &str) -> bool {
+    params.iter().any(|p| {
+        let default = match p {
+            FunParam::Simple(tp) => &tp.default,
+            FunParam::Destructure { default, .. } => default,
+        };
+        default.as_ref().is_some_and(|e| expr_rebinds(e, name))
     })
 }
 
@@ -282,23 +306,44 @@ fn stmt_rebinds(s: &Statement, name: &str) -> bool {
         Statement::ExprStmt { expr, .. } => expr_rebinds(expr, name),
         Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_rebinds(e, name)),
         Statement::Throw { value, .. } => expr_rebinds(value, name),
-        Statement::If { cond, then_branch, else_branch, .. } => {
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             expr_rebinds(cond, name)
                 || stmt_rebinds(then_branch, name)
                 || else_branch.as_ref().is_some_and(|s| stmt_rebinds(s, name))
         }
         Statement::While { cond, body, .. } => expr_rebinds(cond, name) || stmt_rebinds(body, name),
-        Statement::DoWhile { body, cond, .. } => stmt_rebinds(body, name) || expr_rebinds(cond, name),
-        Statement::For { init, cond, update, body, .. } => {
+        Statement::DoWhile { body, cond, .. } => {
+            stmt_rebinds(body, name) || expr_rebinds(cond, name)
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
             init.as_ref().is_some_and(|s| stmt_rebinds(s, name))
                 || cond.as_ref().is_some_and(|e| expr_rebinds(e, name))
                 || update.as_ref().is_some_and(|e| expr_rebinds(e, name))
                 || stmt_rebinds(body, name)
         }
-        Statement::ForOf { name: n, iterable, body, .. } => {
-            n.as_ref() == name || expr_rebinds(iterable, name) || stmt_rebinds(body, name)
-        }
-        Statement::Switch { expr, cases, default_body, .. } => {
+        Statement::ForOf {
+            name: n,
+            iterable,
+            body,
+            ..
+        } => n.as_ref() == name || expr_rebinds(iterable, name) || stmt_rebinds(body, name),
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
             expr_rebinds(expr, name)
                 || cases.iter().any(|(t, body)| {
                     t.as_ref().is_some_and(|e| expr_rebinds(e, name))
@@ -308,7 +353,12 @@ fn stmt_rebinds(s: &Statement, name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|b| b.iter().any(|s| stmt_rebinds(s, name)))
         }
-        Statement::Try { body, catch_body, finally_body, .. } => {
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
             stmt_rebinds(body, name)
                 || catch_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
                 || finally_body.as_ref().is_some_and(|s| stmt_rebinds(s, name))
@@ -325,7 +375,9 @@ fn expr_rebinds(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Assign { name: n, value, .. }
         | Expr::CompoundAssign { name: n, value, .. }
-        | Expr::LogicalAssign { name: n, value, .. } => n.as_ref() == name || expr_rebinds(value, name),
+        | Expr::LogicalAssign { name: n, value, .. } => {
+            n.as_ref() == name || expr_rebinds(value, name)
+        }
         Expr::PostfixInc { name: n, .. }
         | Expr::PostfixDec { name: n, .. }
         | Expr::PrefixInc { name: n, .. }
@@ -334,11 +386,18 @@ fn expr_rebinds(e: &Expr, name: &str) -> bool {
         Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
             expr_rebinds(left, name) || expr_rebinds(right, name)
         }
-        Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
-            expr_rebinds(operand, name)
-        }
-        Expr::Conditional { cond, then_branch, else_branch, .. } => {
-            expr_rebinds(cond, name) || expr_rebinds(then_branch, name) || expr_rebinds(else_branch, name)
+        Expr::Unary { operand, .. }
+        | Expr::TypeOf { operand, .. }
+        | Expr::Await { operand, .. } => expr_rebinds(operand, name),
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_rebinds(cond, name)
+                || expr_rebinds(then_branch, name)
+                || expr_rebinds(else_branch, name)
         }
         Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
             expr_rebinds(callee, name)
@@ -347,27 +406,195 @@ fn expr_rebinds(e: &Expr, name: &str) -> bool {
                 })
         }
         Expr::Member { object, .. } => expr_rebinds(object, name),
-        Expr::Index { object, index, .. } => expr_rebinds(object, name) || expr_rebinds(index, name),
+        Expr::Index { object, index, .. } => {
+            expr_rebinds(object, name) || expr_rebinds(index, name)
+        }
         Expr::Array { elements, .. } => elements.iter().any(|el| match el {
             ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_rebinds(e, name),
         }),
         Expr::Object { props, .. } => props.iter().any(|p| match p {
             ObjectProp::KeyValue(_, e, _) | ObjectProp::Spread(e) => expr_rebinds(e, name),
         }),
-        Expr::MemberAssign { object, value, .. } => expr_rebinds(object, name) || expr_rebinds(value, name),
-        Expr::IndexAssign { object, index, value, .. } => {
-            expr_rebinds(object, name) || expr_rebinds(index, name) || expr_rebinds(value, name)
+        Expr::MemberAssign { object, value, .. } => {
+            expr_rebinds(object, name) || expr_rebinds(value, name)
         }
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            ..
+        } => expr_rebinds(object, name) || expr_rebinds(index, name) || expr_rebinds(value, name),
         Expr::TemplateLiteral { exprs, .. } => exprs.iter().any(|e| expr_rebinds(e, name)),
-        // A nested closure could reassign the outer `name`; recurse (over-conservative if it shadows,
-        // which only costs the optimization).
-        Expr::ArrowFunction { body, .. } => match body {
-            ArrowBody::Expr(e) => expr_rebinds(e, name),
-            ArrowBody::Block(s) => stmt_rebinds(s, name),
-        },
+        // A nested closure could reassign the outer `name` — in its body OR a param default (which
+        // evaluates in the enclosing scope). Recurse into both (over-conservative if it shadows, which
+        // only costs the optimization). #187: the param-default scan closes the `(a = (foo = x)) => …` hole.
+        Expr::ArrowFunction { params, body, .. } => {
+            params_default_rebinds(params, name)
+                || match body {
+                    ArrowBody::Expr(e) => expr_rebinds(e, name),
+                    ArrowBody::Block(s) => stmt_rebinds(s, name),
+                }
+        }
         // Jsx, NativeModuleLoad, and anything unknown → conservative.
         _ => true,
     }
+}
+
+/// #187: whole-program scan — does `name` get REBOUND (assigned/updated, redeclared via `let`/`const`/
+/// `for-of`/`catch`, shadowed by a param, or (re)declared via a `function name`) anywhere in `s`,
+/// INCLUDING inside every function body? Unlike [`stmt_rebinds`] (which returns `true` on any `FunDecl`
+/// so it can't run program-wide), this has an explicit `FunDecl` arm: a `function name` is itself a
+/// binding, and every function body is recursed into. `true` (or any node it can't analyze) ⇒ NOT
+/// stable — which only forgoes the cross-function-call optimization, never risks a miscompile.
+fn name_rebinds_in_stmt(s: &Statement, name: &str) -> bool {
+    match s {
+        Statement::FunDecl {
+            name: n,
+            params,
+            rest_param,
+            body,
+            ..
+        } => {
+            n.as_ref() == name
+                || params_bind_name(params, name)
+                || params_default_rebinds(params, name)
+                || rest_param
+                    .as_ref()
+                    .is_some_and(|rp| rp.name.as_ref() == name)
+                || name_rebinds_in_stmt(body, name)
+        }
+        Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+            statements.iter().any(|s| name_rebinds_in_stmt(s, name))
+        }
+        Statement::VarDecl { name: n, init, .. } => {
+            n.as_ref() == name || init.as_ref().is_some_and(|e| expr_rebinds(e, name))
+        }
+        Statement::ExprStmt { expr, .. } => expr_rebinds(expr, name),
+        Statement::Return { value, .. } => value.as_ref().is_some_and(|e| expr_rebinds(e, name)),
+        Statement::Throw { value, .. } => expr_rebinds(value, name),
+        Statement::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_rebinds(cond, name)
+                || name_rebinds_in_stmt(then_branch, name)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|s| name_rebinds_in_stmt(s, name))
+        }
+        Statement::While { cond, body, .. } => {
+            expr_rebinds(cond, name) || name_rebinds_in_stmt(body, name)
+        }
+        Statement::DoWhile { body, cond, .. } => {
+            name_rebinds_in_stmt(body, name) || expr_rebinds(cond, name)
+        }
+        Statement::For {
+            init,
+            cond,
+            update,
+            body,
+            ..
+        } => {
+            init.as_ref().is_some_and(|s| name_rebinds_in_stmt(s, name))
+                || cond.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || update.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                || name_rebinds_in_stmt(body, name)
+        }
+        Statement::ForOf {
+            name: n,
+            iterable,
+            body,
+            ..
+        } => n.as_ref() == name || expr_rebinds(iterable, name) || name_rebinds_in_stmt(body, name),
+        Statement::Switch {
+            expr,
+            cases,
+            default_body,
+            ..
+        } => {
+            expr_rebinds(expr, name)
+                || cases.iter().any(|(t, body)| {
+                    t.as_ref().is_some_and(|e| expr_rebinds(e, name))
+                        || body.iter().any(|s| name_rebinds_in_stmt(s, name))
+                })
+                || default_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| name_rebinds_in_stmt(s, name)))
+        }
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            name_rebinds_in_stmt(body, name)
+                || catch_body
+                    .as_ref()
+                    .is_some_and(|s| name_rebinds_in_stmt(s, name))
+                || finally_body
+                    .as_ref()
+                    .is_some_and(|s| name_rebinds_in_stmt(s, name))
+        }
+        Statement::Break { .. } | Statement::Continue { .. } => false,
+        // VarDeclDestructure (could bind `name`) + any unknown construct → conservative.
+        _ => true,
+    }
+}
+
+/// #187: the set of top-level function names that are PROVABLY stable across the whole program — each
+/// declared exactly once as a top-level `function N`, never also bound by a top-level `let`/`var`/
+/// `const`, and never reassigned/redeclared/shadowed anywhere (via [`name_rebinds_in_stmt`], skipping
+/// the single defining declaration but still recursing into its body). A direct native call to such a
+/// callee can never dispatch a stale function, because the binding can never change.
+fn compute_stable_globals(program: &Program) -> std::collections::HashSet<Arc<str>> {
+    let mut fn_count: HashMap<Arc<str>, usize> = HashMap::new();
+    let mut nonfn_toplevel: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+    for s in &program.statements {
+        match s {
+            Statement::FunDecl { name, .. } => *fn_count.entry(Arc::clone(name)).or_insert(0) += 1,
+            Statement::VarDecl { name, .. } => {
+                nonfn_toplevel.insert(Arc::clone(name));
+            }
+            _ => {}
+        }
+    }
+    let mut stable: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+    'cand: for (name, &count) in &fn_count {
+        if count != 1 || nonfn_toplevel.contains(name) {
+            continue;
+        }
+        for s in &program.statements {
+            match s {
+                // The single defining `function name`: not a rebind, but its body/params still count.
+                Statement::FunDecl {
+                    name: n,
+                    params,
+                    rest_param,
+                    body,
+                    ..
+                } if n == name => {
+                    if params_bind_name(params, name)
+                        || params_default_rebinds(params, name)
+                        || rest_param
+                            .as_ref()
+                            .is_some_and(|rp| rp.name.as_ref() == name.as_ref())
+                        || name_rebinds_in_stmt(body, name)
+                    {
+                        continue 'cand;
+                    }
+                }
+                other => {
+                    if name_rebinds_in_stmt(other, name) {
+                        continue 'cand;
+                    }
+                }
+            }
+        }
+        stable.insert(Arc::clone(name));
+    }
+    stable
 }
 
 /// One conservative pass computing the over-approximated CAPTURED set: every identifier that appears
@@ -387,19 +614,42 @@ struct SlotScan {
 impl SlotScan {
     fn stmt(&mut self, s: &Statement, in_closure: bool) -> bool {
         match s {
-            Statement::Block { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
-            Statement::Multi { statements, .. } => statements.iter().all(|s| self.stmt(s, in_closure)),
-            Statement::VarDecl { init, .. } => init.as_ref().is_none_or(|e| self.expr(e, in_closure)),
+            Statement::Block { statements, .. } => {
+                statements.iter().all(|s| self.stmt(s, in_closure))
+            }
+            Statement::Multi { statements, .. } => {
+                statements.iter().all(|s| self.stmt(s, in_closure))
+            }
+            Statement::VarDecl { init, .. } => {
+                init.as_ref().is_none_or(|e| self.expr(e, in_closure))
+            }
             Statement::VarDeclDestructure { init, .. } => self.expr(init, in_closure),
             Statement::ExprStmt { expr, .. } => self.expr(expr, in_closure),
-            Statement::If { cond, then_branch, else_branch, .. } => {
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.expr(cond, in_closure)
                     && self.stmt(then_branch, in_closure)
-                    && else_branch.as_ref().is_none_or(|s| self.stmt(s, in_closure))
+                    && else_branch
+                        .as_ref()
+                        .is_none_or(|s| self.stmt(s, in_closure))
             }
-            Statement::While { cond, body, .. } => self.expr(cond, in_closure) && self.stmt(body, in_closure),
-            Statement::DoWhile { body, cond, .. } => self.stmt(body, in_closure) && self.expr(cond, in_closure),
-            Statement::For { init, cond, update, body, .. } => {
+            Statement::While { cond, body, .. } => {
+                self.expr(cond, in_closure) && self.stmt(body, in_closure)
+            }
+            Statement::DoWhile { body, cond, .. } => {
+                self.stmt(body, in_closure) && self.expr(cond, in_closure)
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 init.as_ref().is_none_or(|i| self.stmt(i, in_closure))
                     && cond.as_ref().is_none_or(|e| self.expr(e, in_closure))
                     && update.as_ref().is_none_or(|e| self.expr(e, in_closure))
@@ -408,10 +658,17 @@ impl SlotScan {
             Statement::ForOf { iterable, body, .. } => {
                 self.expr(iterable, in_closure) && self.stmt(body, in_closure)
             }
-            Statement::Return { value, .. } => value.as_ref().is_none_or(|e| self.expr(e, in_closure)),
+            Statement::Return { value, .. } => {
+                value.as_ref().is_none_or(|e| self.expr(e, in_closure))
+            }
             Statement::Throw { value, .. } => self.expr(value, in_closure),
             Statement::Break { .. } | Statement::Continue { .. } => true,
-            Statement::Switch { expr, cases, default_body, .. } => {
+            Statement::Switch {
+                expr,
+                cases,
+                default_body,
+                ..
+            } => {
                 if !self.expr(expr, in_closure) {
                     return false;
                 }
@@ -429,10 +686,17 @@ impl SlotScan {
                     .as_ref()
                     .is_none_or(|b| b.iter().all(|s| self.stmt(s, in_closure)))
             }
-            Statement::Try { body, catch_body, finally_body, .. } => {
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
                 self.stmt(body, in_closure)
                     && catch_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
-                    && finally_body.as_ref().is_none_or(|s| self.stmt(s, in_closure))
+                    && finally_body
+                        .as_ref()
+                        .is_none_or(|s| self.stmt(s, in_closure))
             }
             // A nested named function: its param defaults (enclosing-scope) + whole body capture.
             Statement::FunDecl { params, body, .. } => {
@@ -452,14 +716,25 @@ impl SlotScan {
                 }
                 true
             }
-            Expr::Binary { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
-            Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
-                self.expr(operand, in_closure)
+            Expr::Binary { left, right, .. } => {
+                self.expr(left, in_closure) && self.expr(right, in_closure)
             }
-            Expr::Conditional { cond, then_branch, else_branch, .. } => {
-                self.expr(cond, in_closure) && self.expr(then_branch, in_closure) && self.expr(else_branch, in_closure)
+            Expr::Unary { operand, .. }
+            | Expr::TypeOf { operand, .. }
+            | Expr::Await { operand, .. } => self.expr(operand, in_closure),
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr(cond, in_closure)
+                    && self.expr(then_branch, in_closure)
+                    && self.expr(else_branch, in_closure)
             }
-            Expr::NullishCoalesce { left, right, .. } => self.expr(left, in_closure) && self.expr(right, in_closure),
+            Expr::NullishCoalesce { left, right, .. } => {
+                self.expr(left, in_closure) && self.expr(right, in_closure)
+            }
             Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
                 self.expr(callee, in_closure)
                     && args.iter().all(|a| match a {
@@ -467,7 +742,9 @@ impl SlotScan {
                     })
             }
             Expr::Member { object, .. } => self.expr(object, in_closure),
-            Expr::Index { object, index, .. } => self.expr(object, in_closure) && self.expr(index, in_closure),
+            Expr::Index { object, index, .. } => {
+                self.expr(object, in_closure) && self.expr(index, in_closure)
+            }
             Expr::Array { elements, .. } => elements.iter().all(|el| match el {
                 ArrayElement::Expr(e) | ArrayElement::Spread(e) => self.expr(e, in_closure),
             }),
@@ -482,9 +759,18 @@ impl SlotScan {
                 }
                 self.expr(value, in_closure)
             }
-            Expr::MemberAssign { object, value, .. } => self.expr(object, in_closure) && self.expr(value, in_closure),
-            Expr::IndexAssign { object, index, value, .. } => {
-                self.expr(object, in_closure) && self.expr(index, in_closure) && self.expr(value, in_closure)
+            Expr::MemberAssign { object, value, .. } => {
+                self.expr(object, in_closure) && self.expr(value, in_closure)
+            }
+            Expr::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                self.expr(object, in_closure)
+                    && self.expr(index, in_closure)
+                    && self.expr(value, in_closure)
             }
             Expr::PostfixInc { name, .. }
             | Expr::PostfixDec { name, .. }
@@ -531,7 +817,11 @@ impl SlotScan {
 /// (names that must stay name-based) when eligible, else `None` (compile name-based). Eligible iff the
 /// flag is on, no rest param, all params simple, the body fully analysable, and no PARAM is captured
 /// (the VM binds params into slots 0..n, but a closure reads captures by name from `local_scope`).
-fn slot_analyze(params: &[FunParam], has_rest: bool, body: &Statement) -> Option<HashSet<Arc<str>>> {
+fn slot_analyze(
+    params: &[FunParam],
+    has_rest: bool,
+    body: &Statement,
+) -> Option<HashSet<Arc<str>>> {
     if !slots_enabled() || has_rest {
         return None;
     }
@@ -579,7 +869,10 @@ impl<'a> Compiler<'a> {
                 return Some(*s);
             }
         }
-        self.slot_scopes.iter().rev().find_map(|m| m.get(name).copied())
+        self.slot_scopes
+            .iter()
+            .rev()
+            .find_map(|m| m.get(name).copied())
     }
 
     /// Emit a variable READ: `LoadLocal` if slotted, else name-based `LoadVar`.
@@ -619,6 +912,7 @@ impl<'a> Compiler<'a> {
             finally_stack: Vec::new(),
             self_fn_name: None,
             math_is_global: false,
+            stable_globals: Arc::new(std::collections::HashSet::new()),
         }
     }
 
@@ -863,10 +1157,7 @@ impl<'a> Compiler<'a> {
     /// condition shape stays eligible for the cranelift JIT (#167). Returns the `JumpIfFalse` patch
     /// sites the caller must point at its "condition is false" target. The condition value itself is
     /// never observed here, so truthiness-only lowering is exact; short-circuit order is preserved.
-    fn compile_condition_jump_if_false(
-        &mut self,
-        cond: &Expr,
-    ) -> Result<Vec<usize>, CompileError> {
+    fn compile_condition_jump_if_false(&mut self, cond: &Expr) -> Result<Vec<usize>, CompileError> {
         match cond {
             // `a && b` is false if EITHER operand is false — test each in order; both exit to the
             // same false-target, so concatenate their patch sites.
@@ -1277,7 +1568,13 @@ impl<'a> Compiler<'a> {
                 // slot flushes the first every iteration → O(n²) (#186). Restricting to string-typed
                 // RHS keeps `s = s + "x"` fast (string_concat) while `i = i + 1` stays a plain store.
                 if let Expr::Assign { name, value, .. } = expr {
-                    if let Expr::Binary { left, op: BinOp::Add, right, .. } = value.as_ref() {
+                    if let Expr::Binary {
+                        left,
+                        op: BinOp::Add,
+                        right,
+                        ..
+                    } = value.as_ref()
+                    {
                         if matches!(left.as_ref(), Expr::Ident { name: ln, .. } if ln == name)
                             && is_string_typed(right)
                         {
@@ -1609,7 +1906,16 @@ impl<'a> Compiler<'a> {
                     inner.slot_based = true;
                     inner.num_slots = param_names.len() as u16;
                 }
+                // #187: stamp the chunk with its global name so the JIT can register it as a directly-
+                // callable callee — but ONLY when it is a provably-stable top-level function. `self`
+                // being the ROOT compiler (top-level) is indicated by `self.self_fn_name.is_none()` and
+                // an empty `slot_scopes`; simplest sound check: the name is in `stable_globals` (which
+                // by construction contains only the unique top-level `function name`).
+                if self.stable_globals.contains(name) {
+                    inner.global_name = Some(Arc::clone(name));
+                }
                 let mut inner_comp = Compiler::new(&mut inner, false);
+                inner_comp.stable_globals = Arc::clone(&self.stable_globals);
                 // Recursion-JIT enabler: if `name`'s binding is provably stable in the body (no
                 // param shadows it, no reassignment/redeclaration), direct `name(args)` calls inside
                 // compile to `SelfCall` — no name lookup, and the numeric JIT lowers it to a native
@@ -1640,7 +1946,8 @@ impl<'a> Compiler<'a> {
                         .iter()
                         .map(|n| (Arc::clone(n), false))
                         .collect::<HashMap<_, _>>()];
-                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                    inner_comp
+                        .emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                     inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_statement(body)?;
                 }
@@ -2326,6 +2633,7 @@ impl<'a> Compiler<'a> {
                     inner.num_slots = param_names.len() as u16;
                 }
                 let mut inner_comp = Compiler::new(&mut inner, false);
+                inner_comp.stable_globals = Arc::clone(&self.stable_globals); // #187
                 if let Some(map) = simple_slots {
                     inner_comp.slot_ctx = Some(map);
                 } else {
@@ -2333,7 +2641,8 @@ impl<'a> Compiler<'a> {
                         .iter()
                         .map(|n| (Arc::clone(n), false))
                         .collect::<HashMap<_, _>>()];
-                    inner_comp.emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
+                    inner_comp
+                        .emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                 }
                 inner_comp.emit_param_defaults_prologue(params)?;
                 match body {
@@ -2475,14 +2784,22 @@ impl<'a> Compiler<'a> {
                 // pops both, removes the property, and pushes `true`. Deleting anything that
                 // isn't a property reference is a no-op that still yields `true` (JS).
                 match target.as_ref() {
-                    Expr::Member { object, prop: MemberProp::Name { name, .. }, .. } => {
+                    Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name, .. },
+                        ..
+                    } => {
                         self.compile_expr(object)?;
                         let idx = self.constant_idx(Constant::String(Arc::clone(name)));
                         self.emit(Opcode::LoadConst);
                         self.chunk.write_u16(idx);
                         self.emit(Opcode::DeleteIndex);
                     }
-                    Expr::Member { object, prop: MemberProp::Expr(key), .. } => {
+                    Expr::Member {
+                        object,
+                        prop: MemberProp::Expr(key),
+                        ..
+                    } => {
                         self.compile_expr(object)?;
                         self.compile_expr(key)?;
                         self.emit(Opcode::DeleteIndex);
@@ -2748,9 +3065,102 @@ fn compile_internal(
     // `stmt_rebinds` is conservative (any rebind, destructure, FunDecl, or unknown node → true), so a
     // `false` here only forgoes the optimization, never risks a miscompile.
     compiler.math_is_global = !program.statements.iter().any(|s| stmt_rebinds(s, "Math"));
+    // #187 — the set of top-level functions safe to call directly from JIT'd code (never reassigned/
+    // shadowed/redeclared anywhere). Conservative: a name absent here only forgoes the optimization.
+    compiler.stable_globals = Arc::new(compute_stable_globals(program));
     compiler.compile_program(program)?;
     if peephole {
         crate::peephole::optimize(&mut chunk);
     }
     Ok(chunk)
+}
+
+#[cfg(test)]
+mod stable_globals_tests {
+    use super::compute_stable_globals;
+
+    fn stable(src: &str) -> std::collections::HashSet<String> {
+        let prog = tishlang_parser::parse(src).expect("parse");
+        compute_stable_globals(&prog)
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect()
+    }
+
+    /// #187 gate: the exact spectral_norm shape — five top-level functions, none reassigned — must ALL
+    /// be provably stable (this is what lets `multiplyAv` directly call `evalA`). The naive
+    /// `stmt_rebinds`-based scan would return the empty set here (it treats every `FunDecl` as a
+    /// rebind), so this is the regression tripwire for the purpose-built analysis.
+    #[test]
+    fn all_unreassigned_top_level_fns_are_stable() {
+        let s = stable(
+            "function evalA(i, j) { return 1.0 / (i + j) }\n\
+             function multiplyAv(n, v, av) { let i = 0; while (i < n) { av[i] = evalA(i, i) * v[i]; i = i + 1 } }\n\
+             function spectralNorm(n) { multiplyAv(n, n, n); return n }\n",
+        );
+        assert!(
+            s.contains("evalA"),
+            "evalA (called by multiplyAv) must be stable"
+        );
+        assert!(s.contains("multiplyAv"));
+        assert!(s.contains("spectralNorm"));
+    }
+
+    /// A reassigned function is NOT stable (a direct call could hit a stale binding) — but a sibling
+    /// that is never reassigned still is.
+    #[test]
+    fn reassigned_function_is_excluded() {
+        let s = stable(
+            "function f(x) { return x + 1 }\n\
+             function g(x) { return f(x) * 2 }\n\
+             f = (x) => x + 100\n",
+        );
+        assert!(!s.contains("f"), "f is reassigned → must NOT be stable");
+        assert!(s.contains("g"), "g is never reassigned → stable");
+    }
+
+    /// Reassignment/redeclaration/shadowing INSIDE another function body must disqualify the name —
+    /// the whole-program walk has to recurse into every body (the whole point vs `stmt_rebinds`).
+    #[test]
+    fn cross_body_rebind_and_shadow_and_redecl_excluded() {
+        // reassigned inside another function's body
+        assert!(!stable(
+            "function h(x) { return x }\n\
+             function k() { h = 5; return h }\n"
+        )
+        .contains("h"));
+        // shadowed by a param in another function
+        assert!(!stable(
+            "function p(x) { return x }\n\
+             function q(p) { return p }\n"
+        )
+        .contains("p"));
+        // declared twice at top level
+        assert!(!stable("function d(x) { return x }\nfunction d(y) { return y }\n").contains("d"));
+        // also bound by a top-level let
+        assert!(!stable("function e(x) { return x }\nlet e = 3\n").contains("e"));
+    }
+
+    /// A global reassigned inside a PARAMETER DEFAULT (of a function or arrow) must disqualify it — the
+    /// default runs in the enclosing scope when the function is called, so a direct call would be stale.
+    #[test]
+    fn param_default_rebind_excluded() {
+        // `foo` reassigned in another function's param default
+        assert!(!stable(
+            "function evil(x) { return x + 1000 }\n\
+             function foo(x) { return x + 1 }\n\
+             function resetFoo(y = (foo = evil)) { return y }\n"
+        )
+        .contains("foo"));
+        // `bar` reassigned in an arrow's param default
+        assert!(!stable(
+            "function bar(x) { return x }\n\
+             let f = (z = (bar = 5)) => z\n"
+        )
+        .contains("bar"));
+        // a param default that does NOT touch the name leaves it stable
+        assert!(
+            stable("function ok(x) { return x }\nfunction u(a = 1) { return a }\n").contains("ok")
+        );
+    }
 }

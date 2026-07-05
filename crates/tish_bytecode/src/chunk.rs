@@ -79,6 +79,12 @@ pub struct Chunk {
     pub lines: Vec<(u32, u32)>,
     /// Source file path for error messages (`file:line`); propagated to nested chunks. Runtime-only.
     pub source: Option<Arc<str>>,
+    /// #187: when `Some(name)`, this chunk is a top-level `function name` whose binding is provably
+    /// stable across the whole program (never reassigned/shadowed/redeclared). The numeric JIT
+    /// registers such a chunk under `name` so a caller's `name(args)` can lower to a direct native
+    /// call. `None` for anonymous/nested/unstable functions. Runtime-only; not serialized (a reloaded
+    /// program just forgoes the cross-function-call optimization).
+    pub global_name: Option<Arc<str>>,
 }
 
 impl Chunk {
@@ -95,6 +101,7 @@ impl Chunk {
             inline_caches: InlineCaches::default(),
             lines: Vec::new(),
             source: None,
+            global_name: None,
         }
     }
 

@@ -189,5 +189,7 @@ pub fn deserialize(mut data: &[u8]) -> Result<Chunk, String> {
         // Debug-only; not part of the serialized format (issue #74).
         lines: Vec::new(),
         source: None,
+        // #187: runtime-only — a deserialized program forgoes the cross-function-call optimization.
+        global_name: None,
     })
 }

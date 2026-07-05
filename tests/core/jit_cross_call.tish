@@ -1,0 +1,13 @@
+// #187: cross-function numeric calls. A stable top-level callee (`sq`, `cube`) is called directly
+// from inside a JIT'd loop; the result must be identical across every backend. `poly` chains two
+// distinct callees to exercise more than one entry in the callee registry.
+function sq(x) { return x * x }
+function cube(x) { return x * x * x }
+function poly(n) {
+  let s = 0
+  let i = 0
+  while (i < n) { s = s + sq(i) + cube(i); i = i + 1 }
+  return s
+}
+console.log(poly(10))
+console.log(sq(7) + cube(3))
