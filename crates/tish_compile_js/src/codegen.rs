@@ -1241,6 +1241,7 @@ fn compile_project_js_inner(
         merged.program.clone()
     };
     let stmt_sources = merged.statement_sources;
+    let entry_exports = merged.entry_exports; // #295: entry module's named exports for the bundle
     let default_export = program.statements.iter().find_map(|s| {
         if let Statement::VarDecl { name, .. } = s {
             let n = name.as_ref();
@@ -1280,6 +1281,26 @@ fn compile_project_js_inner(
         gen.emit_program(&program, None, None)?;
     }
     let mut js = gen.output;
+    // #295: re-emit the entry module's named exports as a real ES `export { … }` so the bundle is a
+    // valid ES module (previously only `export default` was emitted; named `export fn/let/{…}` were
+    // silently dropped, forcing downstream regex post-processing).
+    if !entry_exports.is_empty() {
+        let parts: Vec<String> = entry_exports
+            .iter()
+            .map(|(local, exported)| {
+                if local == exported {
+                    Codegen::escape_ident(local)
+                } else {
+                    format!(
+                        "{} as {}",
+                        Codegen::escape_ident(local),
+                        Codegen::escape_ident(exported)
+                    )
+                }
+            })
+            .collect();
+        js.push_str(&format!("\nexport {{ {} }};\n", parts.join(", ")));
+    }
     if let Some(name) = default_export {
         js.push_str(&format!("\nexport default {};\n", name));
     }
