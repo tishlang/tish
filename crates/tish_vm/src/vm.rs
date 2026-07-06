@@ -679,6 +679,14 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::decode_uri(args)),
     );
     g.insert(
+        "encodeURIComponent".into(),
+        Value::native(|args: &[Value]| globals_builtins::encode_uri_component(args)),
+    );
+    g.insert(
+        "decodeURIComponent".into(),
+        Value::native(|args: &[Value]| globals_builtins::decode_uri_component(args)),
+    );
+    g.insert(
         "htmlEscape".into(),
         Value::native(|args: &[Value]| {
             tishlang_builtins::string::escape_html(args.first().unwrap_or(&Value::Null))

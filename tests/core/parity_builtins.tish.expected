@@ -71,3 +71,6 @@ clz32 31 32 0
 fround 1.100000023841858 5.5
 expm1 0 0
 gopn a,b
+enc-comp a%20b%26c%3Dd%2Fe%3Ff
+dec-comp a b&c=d
+dec-uri a b%26c

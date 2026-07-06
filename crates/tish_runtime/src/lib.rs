@@ -802,6 +802,12 @@ pub fn decode_uri(args: &[Value]) -> Value {
 pub fn encode_uri(args: &[Value]) -> Value {
     builtins_encode_uri(args)
 }
+pub fn encode_uri_component(args: &[Value]) -> Value {
+    tishlang_builtins::globals::encode_uri_component(args)
+}
+pub fn decode_uri_component(args: &[Value]) -> Value {
+    tishlang_builtins::globals::decode_uri_component(args)
+}
 
 // Math functions - use tishlang_builtins::math
 pub use tishlang_builtins::math::{

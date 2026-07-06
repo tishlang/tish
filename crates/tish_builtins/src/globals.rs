@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tishlang_core::VmRef;
-use tishlang_core::{percent_decode, percent_encode, ObjectMap, Value};
+use tishlang_core::{percent_decode, percent_decode_component, percent_encode, percent_encode_component, ObjectMap, Value};
 
 /// Boolean(value) - coerce to bool
 pub fn boolean(args: &[Value]) -> Value {
@@ -13,7 +13,7 @@ pub fn boolean(args: &[Value]) -> Value {
     Value::Bool(v.is_truthy())
 }
 
-/// decodeURI(str)
+/// decodeURI(str) — preserves the URI reserved delimiters (the inverse of encodeURI).
 pub fn decode_uri(args: &[Value]) -> Value {
     let s = args
         .first()
@@ -29,6 +29,24 @@ pub fn encode_uri(args: &[Value]) -> Value {
         .map(Value::to_display_string)
         .unwrap_or_default();
     Value::String(percent_encode(&s).into())
+}
+
+/// encodeURIComponent(str) — stricter than encodeURI (also escapes the URI reserved delimiters).
+pub fn encode_uri_component(args: &[Value]) -> Value {
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
+    Value::String(percent_encode_component(&s).into())
+}
+
+/// decodeURIComponent(str) — decodes ALL `%XX` escapes (including the reserved delimiters).
+pub fn decode_uri_component(args: &[Value]) -> Value {
+    let s = args
+        .first()
+        .map(Value::to_display_string)
+        .unwrap_or_default();
+    Value::String(percent_decode_component(&s).unwrap_or(s).into())
 }
 
 /// isFinite(value) — coerces via ToNumber (like `Number()`), then tests finiteness. `isFinite("3")`

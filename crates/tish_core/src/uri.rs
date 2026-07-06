@@ -88,6 +88,51 @@ pub fn percent_encode(input: &str) -> String {
     result
 }
 
+/// Percent-DECODE for `decodeURIComponent` — decodes EVERY `%XX` (unlike `percent_decode`/`decodeURI`,
+/// which preserves the reserved delimiters). Bytes are collected then UTF-8 decoded, so multi-byte
+/// escapes (`%E2%82%AC` → `€`) round-trip. Errors on a malformed `%` sequence (JS `URIError`).
+pub fn percent_decode_component(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 < bytes.len() {
+                if let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|s| u8::from_str_radix(s, 16).ok())
+                {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+            }
+            return Err("URIError: malformed URI sequence".to_string());
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|_| "URIError: malformed URI sequence".to_string())
+}
+
+/// Percent-encode for `encodeURIComponent` — escapes everything except the unreserved set
+/// `A-Za-z0-9 - _ . ! ~ * ' ( )` (stricter than `encodeURI`, which also preserves the URI reserved
+/// delimiters `; / ? : @ & = + $ , #`).
+pub fn percent_encode_component(input: &str) -> String {
+    const UNRESERVED: &[char] = &['-', '_', '.', '!', '~', '*', '\'', '(', ')'];
+    let mut result = String::with_capacity(input.len());
+    for c in input.chars() {
+        if c.is_ascii_alphanumeric() || UNRESERVED.contains(&c) {
+            result.push(c);
+        } else {
+            for byte in c.to_string().as_bytes() {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

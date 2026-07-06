@@ -99,6 +99,20 @@ pub fn encode_uri(args: &[Value]) -> Result<Value, String> {
     Ok(Value::String(tishlang_core::percent_encode(&s).into()))
 }
 
+pub fn encode_uri_component(args: &[Value]) -> Result<Value, String> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    Ok(Value::String(
+        tishlang_core::percent_encode_component(&s).into(),
+    ))
+}
+
+pub fn decode_uri_component(args: &[Value]) -> Result<Value, String> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    Ok(Value::String(
+        tishlang_core::percent_decode_component(&s).unwrap_or(s).into(),
+    ))
+}
+
 pub fn html_escape(args: &[Value]) -> Result<Value, String> {
     let input = match args.first() {
         Some(Value::String(s)) => s.to_string(),

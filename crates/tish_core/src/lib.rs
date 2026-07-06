@@ -16,7 +16,7 @@ pub use json::{
     escape_json_string_into, json_parse, json_stringify, json_stringify_into, write_json_number,
 };
 pub use shape::{ShapeId, DICT_SHAPE, EMPTY_SHAPE};
-pub use uri::{percent_decode, percent_encode};
+pub use uri::{percent_decode, percent_decode_component, percent_encode, percent_encode_component};
 pub use arcstr::ArcStr;
 pub use value::*;
 pub use vmref::{VmReadGuard, VmRef, VmWriteGuard};
