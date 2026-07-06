@@ -95,6 +95,7 @@ verify" section gives the exact commands.
 | `tiny_http`, **native AOT** (`tish build --native-backend rust`): `/plaintext` + `/json`, 32/32 return 200 | manual repro below | ✅ 32/32 200 (snapshot) |
 | `scripts/test_http_concurrency.sh` shared-counter regression passes, no deadlock (PREFORK=0, contended): script exits 0 | `./scripts/test_http_concurrency.sh -n 8` | ✅ pass, no deadlock (snapshot) |
 | `hyper` backend, native AOT (`--feature http-hyper --feature process`): 32/32 return 200, 0 panics | manual repro below | ✅ 32/32 200, 0 panics *(after the fixes below)* (snapshot) |
+| **Serve smoke — BOTH backends bind + serve static/json/dynamic routes on native AOT** | **CI: `.github/workflows/serve-smoke.yml` on every relevant PR + main** (`scripts/test_serve_smoke.sh`) | ✅ automated (tiny_http + hyper) |
 | Full TFB app `tish build src/main.tish` (DB endpoints) builds: exits 0 | `tish-techempower` build | ✅ builds *(after the fixes below)* (snapshot) |
 | All 7 endpoints vs local Postgres (`/db`,`/queries`,`/cached-queries`,`/updates`,`/fortunes`): correct rows, writes, HTML+XSS-escaped fortunes, no panics | manual repro below | ✅ correct (snapshot) |
 | **HTTP throughput is within the http perf gate vs the JS control** | `scripts/run_http_perf.sh`; validated on each run, not a recorded number | not measured in this analysis — run `scripts/run_http_perf.sh` to obtain |

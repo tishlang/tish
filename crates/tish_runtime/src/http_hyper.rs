@@ -10,7 +10,7 @@
 //!   N OS threads (one per CPU, pinned via core_affinity)
 //!    ├─ single-threaded tokio runtime per thread
 //!    ├─ SO_REUSEPORT-bound TcpListener per thread
-//!    └─ hyper HTTP/1.1 + HTTP/2 server
+//!    └─ hyper HTTP/1.1 server (`http1::Builder`)
 //!          │
 //!          ├─ async per-connection state machine (no OS thread)
 //!          ├─ static-route fast path (lock-free ArcSwap<HashMap> from
@@ -23,12 +23,16 @@
 //!
 //! * Removes tiny_http's thread-per-connection model (the bottleneck on
 //!   every macOS/Linux Tish HTTP server at >50k concurrent connections).
-//! * Gives HTTP/2 + TLS-ready surface for free (hyper handles the state
-//!   machine; we only have to convert our `RequestPrimitive` to/from
-//!   `http::Request` / `http::Response`).
 //! * Shared async context with `reqwest`, `tokio-postgres`, `tokio` in
 //!   general — the tokio runtime is reused for client fetch, db, and
 //!   server accept.
+//!
+//! ## Protocol support
+//!
+//! HTTP/1.1 only today (the accept loop uses `http1::Builder`). The `hyper` dependency enables the
+//! `http2` feature, so upgrading to an `hyper_util::server::conn::auto` builder (h2c prior-knowledge,
+//! and HTTP/2 over TLS once ALPN is wired) is a contained follow-up — tracked separately. Do NOT
+//! advertise HTTP/2 until that lands.
 //!
 //! ## Integration with the Tish VM
 //!
@@ -312,7 +316,9 @@ async fn handle_request(
 
     // Slow path: cross the mpsc to the VM thread.
     let (method, url, path, query, headers, body_bytes) = extract_request(req).await;
-    let body = String::from_utf8(body_bytes).unwrap_or_default();
+    // Lossy UTF-8 decode to match the tiny_http path (`http.rs`): a body with invalid UTF-8 becomes
+    // replacement chars, NOT an empty string — `req.body` is a String and both backends must agree.
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
     let prim = RequestPrimitive::new_pub(method, url, path, query, headers, body);
 
     let (resp_tx, resp_rx) = std_mpsc::sync_channel::<ResponsePrimitive>(1);

@@ -1,0 +1,19 @@
+// Serve smoke fixture — run by scripts/test_serve_smoke.sh against BOTH http backends
+// (tiny_http default + hyper). Uses the `fn main() { serve(...) }` entry idiom (#469 auto-main),
+// a static route, a JSON route, and a dynamic echo route (exercises the VM handler dispatch).
+import { serve } from 'http'
+
+fn handler(req) {
+  if (req.path === "/plaintext") {
+    return { status: 200, headers: { "content-type": "text/plain" }, body: "Hello, World!" }
+  }
+  if (req.path === "/json") {
+    return { status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "Hello, World!" }) }
+  }
+  return { status: 200, headers: { "content-type": "text/plain" }, body: "echo:" + req.path }
+}
+
+fn main() {
+  let port = "PORT" in process.env ? parseInt(process.env.PORT) : 8080
+  serve(port, handler)
+}
