@@ -6976,6 +6976,13 @@ impl Codegen {
                         "trimEnd" => {
                             return Ok(format!("tishlang_runtime::string_trim_end(&{})", obj_expr));
                         }
+                        "codePointAt" => {
+                            let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_code_point_at(&{}, &{})",
+                                obj_expr, idx
+                            ));
+                        }
                         "toUpperCase" => {
                             return Ok(format!("tishlang_runtime::string_to_upper_case(&{})", obj_expr));
                         }

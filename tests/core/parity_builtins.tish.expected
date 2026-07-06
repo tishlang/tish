@@ -59,3 +59,5 @@ negzero-string 0
 negzero-concat 0
 negzero-template 0
 negzero-inspect -0
+cpat 97 99
+substr ell lo
