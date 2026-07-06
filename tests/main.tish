@@ -3494,6 +3494,9 @@ console.log("clz32", Math.clz32(1), Math.clz32(0), Math.clz32(0xffffffff))
 console.log("fround", Math.fround(1.1), Math.fround(5.5))
 console.log("expm1", Math.expm1(0), Math.log1p(0))
 console.log("gopn", Object.getOwnPropertyNames({a: 1, b: 2}).join(","))
+console.log("enc-comp", encodeURIComponent("a b&c=d/e?f"))
+console.log("dec-comp", decodeURIComponent("a%20b%26c%3Dd"))
+console.log("dec-uri", decodeURI("a%20b%26c"))
 }
 __perf_run_core_parity_builtins()
 
