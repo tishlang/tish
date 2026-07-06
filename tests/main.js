@@ -3429,6 +3429,8 @@ console.log("negzero-string", String(-0))
 console.log("negzero-concat", "" + (-0))
 console.log("negzero-template", `${-0}`)
 console.log("negzero-inspect", -0)
+console.log("cpat", "abc".codePointAt(0), "abc".codePointAt(2))
+console.log("substr", "hello".substr(1, 3), "hello".substr(-2))
 }
 
 {

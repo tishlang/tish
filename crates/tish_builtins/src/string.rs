@@ -538,6 +538,23 @@ pub fn char_code_at(s: &Value, idx: &Value) -> Value {
     }
 }
 
+/// `codePointAt(i)` — the Unicode code point at char index `i`, or `null` (JS `undefined`) if out of
+/// range. tish strings are code-point sequences, so this returns the same value as `charCodeAt` for
+/// an in-range index, but reads `null` (not `NaN`) past the end.
+pub fn code_point_at(s: &Value, idx: &Value) -> Value {
+    if let Value::String(s) = s {
+        let idx = match idx {
+            Value::Number(n) if *n >= 0.0 => *n as usize,
+            _ => return Value::Null,
+        };
+        char_at_idx(s, idx)
+            .map(|c| Value::Number(c as u32 as f64))
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    }
+}
+
 pub fn repeat(s: &Value, count: &Value) -> Value {
     if let Value::String(s) = s {
         let count = match count {

@@ -131,6 +131,7 @@ pub use tishlang_builtins::array::{
 // Re-export string methods from tishlang_builtins
 pub use tishlang_builtins::string::{
     at as string_at_impl, char_at as string_char_at_impl, char_code_at as string_char_code_at_impl,
+    code_point_at as string_code_point_at,
     ends_with as string_ends_with_impl, escape_html as string_escape_html_impl,
     includes as string_includes_impl, index_of as string_index_of_impl,
     last_index_of as string_last_index_of_impl, pad_end as string_pad_end_impl,

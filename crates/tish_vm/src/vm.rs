@@ -4246,6 +4246,15 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let idx = args.first().unwrap_or(&Value::Null);
                     str_builtins::char_code_at(&Value::String(s_clone.clone()), idx)
                 }),
+                "codePointAt" => make_native_fn(move |args: &[Value]| {
+                    let idx = args.first().unwrap_or(&Value::Null);
+                    str_builtins::code_point_at(&Value::String(s_clone.clone()), idx)
+                }),
+                "substr" => make_native_fn(move |args: &[Value]| {
+                    let start = args.first().cloned().unwrap_or(Value::Null);
+                    let length = args.get(1).cloned().unwrap_or(Value::Null);
+                    str_builtins::substr(&Value::String(s_clone.clone()), &start, &length)
+                }),
                 "repeat" => make_native_fn(move |args: &[Value]| {
                     let count = args.first().unwrap_or(&Value::Null);
                     str_builtins::repeat(&Value::String(s_clone.clone()), count)

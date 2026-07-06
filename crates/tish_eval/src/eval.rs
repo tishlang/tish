@@ -2492,6 +2492,35 @@ impl Evaluator {
                                     .map(|c| Value::Number(c as u32 as f64))
                                     .unwrap_or(Value::Number(f64::NAN)));
                             }
+                            "codePointAt" => {
+                                let idx = match arg_vals.first() {
+                                    Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
+                                    _ => return Ok(Value::Null),
+                                };
+                                return Ok(nth_char_cached(s, idx)
+                                    .map(|c| Value::Number(c as u32 as f64))
+                                    .unwrap_or(Value::Null));
+                            }
+                            "substr" => {
+                                // (interp lacked substr; vm/native had it — this closes the gap.)
+                                let chars: Vec<char> = s.chars().collect();
+                                let len = chars.len() as i64;
+                                let mut start = match arg_vals.first() {
+                                    Some(Value::Number(n)) => *n as i64,
+                                    _ => 0,
+                                };
+                                if start < 0 {
+                                    start = (len + start).max(0);
+                                }
+                                let start = (start as usize).min(chars.len());
+                                let count = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+                                    _ => chars.len() - start,
+                                };
+                                let out: String =
+                                    chars[start..(start + count).min(chars.len())].iter().collect();
+                                return Ok(Value::String(out.into()));
+                            }
                             "repeat" => {
                                 let count = match arg_vals.first() {
                                     Some(Value::Number(n)) if *n >= 0.0 => *n as usize,
