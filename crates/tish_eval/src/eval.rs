@@ -2303,6 +2303,12 @@ impl Evaluator {
                             "trim" => {
                                 return Ok(Value::String(s.trim().into()));
                             }
+                            "trimStart" => {
+                                return Ok(Value::String(s.trim_start().into()));
+                            }
+                            "trimEnd" => {
+                                return Ok(Value::String(s.trim_end().into()));
+                            }
                             "toUpperCase" => {
                                 return Ok(Value::String(s.to_uppercase().into()));
                             }

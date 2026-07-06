@@ -6936,6 +6936,12 @@ impl Codegen {
                         "trim" => {
                             return Ok(format!("tishlang_runtime::string_trim(&{})", obj_expr));
                         }
+                        "trimStart" => {
+                            return Ok(format!("tishlang_runtime::string_trim_start(&{})", obj_expr));
+                        }
+                        "trimEnd" => {
+                            return Ok(format!("tishlang_runtime::string_trim_end(&{})", obj_expr));
+                        }
                         "toUpperCase" => {
                             return Ok(format!("tishlang_runtime::string_to_upper_case(&{})", obj_expr));
                         }
