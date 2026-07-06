@@ -22,16 +22,19 @@ fi
 
 # build_run NAME FIXTURE "<build feature flags>" "<run env>" "<expected stdout>"
 build_run() {
-  local name="$1" fixture="$2" flags="$3" run_env="$4" expected="$5"
+  local name="$1" fixture="$2" run_env="$3" expected="$4"; shift 4
+  local -a flags=("$@")   # feature flags as an array — properly quoted, no word-split
   local bin="target/native_smoke_${name}"
   echo "──────── ${name} (${fixture}) ────────"
-  # shellcheck disable=SC2086
-  if ! "$TISH" build "$fixture" -o "$bin" --target native --native-backend rust ${flags} >"$bin.build.log" 2>&1; then
+  if ! "$TISH" build "$fixture" -o "$bin" --target native --native-backend rust "${flags[@]}" >"$bin.build.log" 2>&1; then
     echo "  ✗ BUILD FAILED"; tail -30 "$bin.build.log"; FAIL=1; return
   fi
   local got rc
-  # shellcheck disable=SC2086
-  got=$(env ${run_env} "$bin" 2>&1); rc=$?
+  if [[ -n "$run_env" ]]; then
+    got=$(env "$run_env" "$bin" 2>&1); rc=$?   # run_env is a single KEY=VAL
+  else
+    got=$("$bin" 2>&1); rc=$?
+  fi
   if [[ "$rc" != 0 ]]; then
     echo "  ✗ NON-ZERO EXIT ($rc)"; echo "$got"; FAIL=1
   fi
@@ -44,19 +47,21 @@ build_run() {
 }
 
 # 1. CLI app
-build_run "cli" "tests/native_smoke/cli_app.tish" "--feature process" "SMOKE_NAME=ci" \
+build_run "cli" "tests/native_smoke/cli_app.tish" "SMOKE_NAME=ci" \
 "sorted: 1,2,3,5,8,9
 sum: 28
 fib10: 55
 upper: NATIVE
-hello: ci"
+hello: ci" \
+--feature process
 
 # 2. fs app
 FSTMP="target/native_smoke_fs_$$.json"
-build_run "fs" "tests/native_smoke/fs_app.tish" "--feature fs --feature process" "SMOKE_FILE=$FSTMP" \
+build_run "fs" "tests/native_smoke/fs_app.tish" "SMOKE_FILE=$FSTMP" \
 "fs-version: 3
 fs-count: 3
-fs-join: alpha-beta-gamma"
+fs-join: alpha-beta-gamma" \
+--feature fs --feature process
 rm -f "$FSTMP"
 
 # 3. HTTP serve — both backends (delegates to the serve smoke).

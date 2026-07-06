@@ -23,21 +23,24 @@ fi
 
 # test_backend NAME "<extra build feature flags>" "<runtime env, e.g. TISH_HTTP_BACKEND=hyper>"
 test_backend() {
-  local name="$1" build_flags="$2" run_env="$3"
+  local name="$1" run_env="$2"; shift 2
+  local -a extra_flags=("$@")   # e.g. (--feature http-hyper --feature process) — array, no word-split
   local bin="target/serve_smoke_${name}"
   local log="target/serve_smoke_${name}.log"
   echo "──────── backend: ${name} ────────"
 
-  echo "  build: tish build ... --feature http ${build_flags}"
-  # shellcheck disable=SC2086
-  if ! "$TISH" build "$FIX" -o "$bin" --target native --native-backend rust --feature http ${build_flags} >"$log.build" 2>&1; then
+  echo "  build: tish build ... --feature http ${extra_flags[*]}"
+  if ! "$TISH" build "$FIX" -o "$bin" --target native --native-backend rust --feature http "${extra_flags[@]}" >"$log.build" 2>&1; then
     echo "  ✗ BUILD FAILED"; tail -30 "$log.build"; FAIL=1; return
   fi
 
   local port=$(( (RANDOM % 2000) + 8300 ))
   echo "  serve on :${port} (${run_env:-default})"
-  # shellcheck disable=SC2086
-  env PORT="$port" ${run_env} "$bin" >"$log" 2>&1 &
+  if [[ -n "$run_env" ]]; then
+    env PORT="$port" "$run_env" "$bin" >"$log" 2>&1 &   # run_env is a single KEY=VAL
+  else
+    env PORT="$port" "$bin" >"$log" 2>&1 &
+  fi
   local pid=$!
 
   # Wait up to ~10s for the port to accept connections.
@@ -76,8 +79,8 @@ test_backend() {
 
 # `--feature process` is included because a realistic server reads its port from `process.env`
 # (the fixture does), and it exercises the process global captured into the `main` closure.
-test_backend "tiny_http" "--feature process"                     ""
-test_backend "hyper"     "--feature http-hyper --feature process" "TISH_HTTP_BACKEND=hyper"
+test_backend "tiny_http" ""                       --feature process
+test_backend "hyper"     "TISH_HTTP_BACKEND=hyper" --feature http-hyper --feature process
 
 echo "────────────────────────────────"
 if [[ "$FAIL" == 0 ]]; then
