@@ -3500,6 +3500,14 @@ console.log("maEmpty", [..."abc".matchAll(/\d/g)].length);
 console.log("maIdx", [..."aXbXc".matchAll(/X/g)].map(m => m.index).join(","));
 let _maerr = "none"; try { [..."ab".matchAll(/a/)]; } catch (e) { _maerr = e.name; }
 console.log("maErr", _maerr);
+// Array string-key indexing coerces canonical integer keys (#432)
+let _ai = [10, 20, 30];
+console.log("aidx", _ai["0"], _ai["1"], _ai["2"], _ai["0"] === _ai[0]);
+let _aik = "";
+for (let k in _ai) { _aik = _aik + k + ":" + _ai[k] + " "; }
+console.log("aforin", _aik);
+_ai["1"] = 99;
+console.log("awrite", _ai[1], JSON.stringify(_ai));
 }
 
 {

@@ -3319,6 +3319,12 @@ impl Evaluator {
                     Value::Array(arr) => {
                         let idx = match &idx_val {
                             Value::Number(n) => *n as usize,
+                            // Canonical integer string key → index (#432); a non-index string key
+                            // can't live in a Vec-backed array, so the write is a no-op.
+                            Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                                Some(i) => i,
+                                None => return Ok(val),
+                            },
                             _ => return Err(EvalError::Error(format!(
                                 "Array index must be a number, got {:?}",
                                 idx_val
@@ -4592,6 +4598,12 @@ impl Evaluator {
             Value::Array(arr) => {
                 let idx = match index {
                     Value::Number(n) => *n as usize,
+                    // A canonical integer string key ("0","1",…) indexes the array (#432), so
+                    // `arr["0"] === arr[0]`; any other key reads Null.
+                    Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                        Some(i) => i,
+                        None => return Ok(Value::Null),
+                    },
                     _ => return Ok(Value::Null),
                 };
                 Ok(arr.borrow().get(idx).cloned().unwrap_or(Value::Null))
