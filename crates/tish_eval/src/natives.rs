@@ -612,6 +612,43 @@ pub mod fsx {
     pub fn constants() -> Value {
         crate::value_convert::core_to_eval(fx::constants())
     }
+
+    /// Core op behind a Node-callback-style fs function (Ok = data, Err = error value), if `f` is one.
+    /// The interpreter binds fs to self-less `Value::Native`s that can't invoke an eval callback, so
+    /// `call_func` uses this to run the sync op and split its Result into `(err, data)` for the
+    /// callback form (#122). Covers both the old tish aliases (`readFile` → `natives::read_file`) and
+    /// the `fsx::*` bridges. `exists`/`access` are omitted — they answer a boolean and never error.
+    pub type CoreOp = fn(&[tishlang_core::Value]) -> Result<tishlang_core::Value, tishlang_core::Value>;
+    pub fn callback_core(f: crate::value::NativeFn) -> Option<CoreOp> {
+        use std::ptr::fn_addr_eq;
+        type NF = crate::value::NativeFn;
+        // Node names bound to the old tish aliases (natives::*).
+        if fn_addr_eq(f, super::read_file as NF) { return Some(fx::read_file_core); }
+        if fn_addr_eq(f, super::write_file as NF) { return Some(fx::write_file_core); }
+        if fn_addr_eq(f, super::read_file_bytes as NF) { return Some(fx::read_file_bytes_core); }
+        if fn_addr_eq(f, super::read_dir as NF) { return Some(fx::readdir_core); }
+        if fn_addr_eq(f, super::mkdir as NF) { return Some(fx::mkdir_core); }
+        // The `fsx::*` bridges (Node *Sync names and the ops with no old alias).
+        if fn_addr_eq(f, read_file as NF) { return Some(fx::read_file_core); }
+        if fn_addr_eq(f, write_file as NF) { return Some(fx::write_file_core); }
+        if fn_addr_eq(f, append_file as NF) { return Some(fx::append_file_core); }
+        if fn_addr_eq(f, read_file_bytes as NF) { return Some(fx::read_file_bytes_core); }
+        if fn_addr_eq(f, readdir as NF) { return Some(fx::readdir_core); }
+        if fn_addr_eq(f, stat as NF) { return Some(fx::stat_core); }
+        if fn_addr_eq(f, lstat as NF) { return Some(fx::lstat_core); }
+        if fn_addr_eq(f, mkdir as NF) { return Some(fx::mkdir_core); }
+        if fn_addr_eq(f, rm as NF) { return Some(fx::rm_core); }
+        if fn_addr_eq(f, rmdir as NF) { return Some(fx::rmdir_core); }
+        if fn_addr_eq(f, unlink as NF) { return Some(fx::unlink_core); }
+        if fn_addr_eq(f, rename as NF) { return Some(fx::rename_core); }
+        if fn_addr_eq(f, copy_file as NF) { return Some(fx::copy_file_core); }
+        if fn_addr_eq(f, cp as NF) { return Some(fx::cp_core); }
+        if fn_addr_eq(f, realpath as NF) { return Some(fx::realpath_core); }
+        if fn_addr_eq(f, readlink as NF) { return Some(fx::readlink_core); }
+        if fn_addr_eq(f, truncate as NF) { return Some(fx::truncate_core); }
+        if fn_addr_eq(f, mkdtemp as NF) { return Some(fx::mkdtemp_core); }
+        None
+    }
 }
 
 #[cfg(feature = "fs")]

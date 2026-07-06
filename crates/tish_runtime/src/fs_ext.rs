@@ -103,20 +103,20 @@ fn stats_object(md: &std::fs::Metadata) -> Value {
 
 // ── cores ─────────────────────────────────────────────────────────────────────────────────
 
-fn read_file_core(args: &[Value]) -> Result<Value, Value> {
+pub fn read_file_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::read_to_string(path_arg(args, 0))
         .map(|s| Value::String(s.into()))
         .map_err(io_err)
 }
 
-fn read_file_bytes_core(args: &[Value]) -> Result<Value, Value> {
+pub fn read_file_bytes_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::read(path_arg(args, 0))
         .map(|b| Value::Array(VmRef::new(b.into_iter().map(|x| Value::Number(x as f64)).collect())))
         .map_err(io_err)
 }
 
 /// Write a string, or a byte array (numbers 0–255), to a file.
-fn write_file_core(args: &[Value]) -> Result<Value, Value> {
+pub fn write_file_core(args: &[Value]) -> Result<Value, Value> {
     let path = path_arg(args, 0);
     let res = match args.get(1) {
         Some(Value::Array(a)) => {
@@ -133,7 +133,7 @@ fn write_file_core(args: &[Value]) -> Result<Value, Value> {
     res.map(|_| Value::Null).map_err(io_err)
 }
 
-fn append_file_core(args: &[Value]) -> Result<Value, Value> {
+pub fn append_file_core(args: &[Value]) -> Result<Value, Value> {
     use std::io::Write;
     let path = path_arg(args, 0);
     let data = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
@@ -146,14 +146,14 @@ fn append_file_core(args: &[Value]) -> Result<Value, Value> {
         .map_err(io_err)
 }
 
-fn stat_core(args: &[Value]) -> Result<Value, Value> {
+pub fn stat_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::metadata(path_arg(args, 0)).map(|m| stats_object(&m)).map_err(io_err)
 }
-fn lstat_core(args: &[Value]) -> Result<Value, Value> {
+pub fn lstat_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::symlink_metadata(path_arg(args, 0)).map(|m| stats_object(&m)).map_err(io_err)
 }
 
-fn readdir_core(args: &[Value]) -> Result<Value, Value> {
+pub fn readdir_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::read_dir(path_arg(args, 0))
         .map(|entries| {
             let names: Vec<Value> = entries
@@ -166,7 +166,7 @@ fn readdir_core(args: &[Value]) -> Result<Value, Value> {
 }
 
 /// `mkdir(path[, { recursive }])` — recursive creates parents.
-fn mkdir_core(args: &[Value]) -> Result<Value, Value> {
+pub fn mkdir_core(args: &[Value]) -> Result<Value, Value> {
     let path = path_arg(args, 0);
     let recursive = opt_bool(args.get(1), "recursive");
     let res = if recursive {
@@ -178,7 +178,7 @@ fn mkdir_core(args: &[Value]) -> Result<Value, Value> {
 }
 
 /// `rm(path[, { recursive }])` — file, or whole tree when recursive.
-fn rm_core(args: &[Value]) -> Result<Value, Value> {
+pub fn rm_core(args: &[Value]) -> Result<Value, Value> {
     let path = path_arg(args, 0);
     let recursive = opt_bool(args.get(1), "recursive");
     let md = std::fs::symlink_metadata(&path);
@@ -195,29 +195,29 @@ fn rm_core(args: &[Value]) -> Result<Value, Value> {
     res.map(|_| Value::Null).map_err(io_err)
 }
 
-fn rmdir_core(args: &[Value]) -> Result<Value, Value> {
+pub fn rmdir_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::remove_dir(path_arg(args, 0)).map(|_| Value::Null).map_err(io_err)
 }
-fn unlink_core(args: &[Value]) -> Result<Value, Value> {
+pub fn unlink_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::remove_file(path_arg(args, 0)).map(|_| Value::Null).map_err(io_err)
 }
-fn rename_core(args: &[Value]) -> Result<Value, Value> {
+pub fn rename_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::rename(path_arg(args, 0), path_arg(args, 1)).map(|_| Value::Null).map_err(io_err)
 }
-fn copy_file_core(args: &[Value]) -> Result<Value, Value> {
+pub fn copy_file_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::copy(path_arg(args, 0), path_arg(args, 1)).map(|_| Value::Null).map_err(io_err)
 }
-fn realpath_core(args: &[Value]) -> Result<Value, Value> {
+pub fn realpath_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::canonicalize(path_arg(args, 0))
         .map(|p| Value::String(p.to_string_lossy().into()))
         .map_err(io_err)
 }
-fn readlink_core(args: &[Value]) -> Result<Value, Value> {
+pub fn readlink_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::read_link(path_arg(args, 0))
         .map(|p| Value::String(p.to_string_lossy().into()))
         .map_err(io_err)
 }
-fn truncate_core(args: &[Value]) -> Result<Value, Value> {
+pub fn truncate_core(args: &[Value]) -> Result<Value, Value> {
     let len = match args.get(1) {
         Some(Value::Number(n)) => *n as u64,
         _ => 0,
@@ -234,7 +234,7 @@ fn truncate_core(args: &[Value]) -> Result<Value, Value> {
 /// characters; a timestamp suffix is both predictable (a temp-dir security smell) and collision-prone
 /// under rapid calls. Use a random suffix and rely on `create_dir`'s exclusive semantics, retrying on
 /// the astronomically-rare collision.
-fn mkdtemp_core(args: &[Value]) -> Result<Value, Value> {
+pub fn mkdtemp_core(args: &[Value]) -> Result<Value, Value> {
     let prefix = path_arg(args, 0);
     for _ in 0..16 {
         // 10 base-36 chars derived from a random u64 (~51 bits of entropy).
@@ -258,7 +258,7 @@ fn mkdtemp_core(args: &[Value]) -> Result<Value, Value> {
 }
 
 /// `cp(src, dest[, { recursive }])` — copy a file, or a directory tree when recursive.
-fn cp_core(args: &[Value]) -> Result<Value, Value> {
+pub fn cp_core(args: &[Value]) -> Result<Value, Value> {
     let src = path_arg(args, 0);
     let dest = path_arg(args, 1);
     let recursive = opt_bool(args.get(2), "recursive");

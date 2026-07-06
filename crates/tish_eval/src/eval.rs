@@ -3908,7 +3908,31 @@ impl Evaluator {
                 }
                 Err(EvalError::Error("Not a function".to_string()))
             }
-            Value::Native(native_fn) => native_fn(args).map_err(EvalError::Error),
+            Value::Native(native_fn) => {
+                // #122: Node fs callback form — `readFile(path, (err, data) => …)`. The self-less
+                // `Value::Native` bridge can't invoke an eval callback (a core `Callable` can't
+                // re-enter the interpreter), so handle it here where `&self` is available: run the
+                // op's core on the non-callback args, split its Result into `(err, data)`, and call
+                // the callback. Matches the VM/native backends (fs_ext runs the callback in-core).
+                #[cfg(feature = "fs")]
+                if let Some(cb @ Value::Function { .. }) = args.last() {
+                    if let Some(core_op) = natives::fsx::callback_core(*native_fn) {
+                        let cb = cb.clone();
+                        let core_args = args[..args.len() - 1]
+                            .iter()
+                            .map(crate::value_convert::eval_to_core)
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(EvalError::Error)?;
+                        let (err, data) = match core_op(&core_args) {
+                            Ok(v) => (Value::Null, crate::value_convert::core_to_eval(v)),
+                            Err(e) => (crate::value_convert::core_to_eval(e), Value::Null),
+                        };
+                        self.call_func(&cb, &[err, data])?;
+                        return Ok(Value::Null);
+                    }
+                }
+                native_fn(args).map_err(EvalError::Error)
+            }
             #[cfg(feature = "http")]
             Value::PromiseResolver(r) => {
                 let value = args.first().cloned().unwrap_or(Value::Null);

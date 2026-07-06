@@ -69,20 +69,24 @@ fn node_fs_sync_surface_on_every_backend() {
 }
 
 #[test]
-fn node_fs_callback_form_on_vm() {
-    // Callback form (err, result) works on the VM. Native codegen / interp have existing
-    // closure-to-native limitations, so the callback form is VM-only for now (#122).
-    let tmp = tmp_dir("cb");
-    assert_eq!(
-        run_on("vm", "fs_parity_callbacks.tish", &tmp),
-        "write-err-null=true\n\
+fn node_fs_callback_form_on_every_backend() {
+    // Node callback form `readFile(path, (err, data) => …)` on every backend (#122): native's
+    // multi-arg-closure-to-native lowering was fixed upstream, and the interpreter runs the callback
+    // at the eval level (call_func's Native arm) instead of the self-less core bridge.
+    let expected = "write-err-null=true\n\
          read=callback data\n\
          size=13,file=true\n\
          unlink-err-null=true\n\
-         missing-err-set=true,data-null=true\n",
-        "callback form mismatch"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
+         missing-err-set=true,data-null=true\n";
+    for backend in ["vm", "interp", "native"] {
+        let tmp = tmp_dir(&format!("cb_{backend}"));
+        assert_eq!(
+            run_on(backend, "fs_parity_callbacks.tish", &tmp),
+            expected,
+            "callback form mismatch on {backend}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 #[test]
