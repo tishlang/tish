@@ -149,11 +149,19 @@ pub fn unshift(arr: &Value, args: &[Value]) -> Value {
     }
 }
 
-pub fn index_of(arr: &Value, search: &Value) -> Value {
+pub fn index_of(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let arr_borrow = arr.borrow();
-        for (i, v) in arr_borrow.iter().enumerate() {
+        // `fromIndex`: clamp positive to [0, len]; negative counts from the end (`len + n`, floored
+        // at 0). Same handling as `includes`. Absent → 0.
+        let len = arr_borrow.len() as i64;
+        let start = match from {
+            Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len).max(0) as usize,
+            Some(Value::Number(n)) if *n < 0.0 => ((len + *n as i64).max(0)) as usize,
+            _ => 0,
+        };
+        for (i, v) in arr_borrow.iter().enumerate().skip(start) {
             if v.strict_eq(search) {
                 return Value::Number(i as f64);
             }

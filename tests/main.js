@@ -3396,6 +3396,11 @@ console.log("str-neg", "abc"[-1] || "none")
 // JSON.stringify escapes control chars (valid JSON), not raw bytes.
 console.log("json-nul", JSON.stringify(String.fromCharCode(0)))
 console.log("json-bs", JSON.stringify(String.fromCharCode(8)))
+// 2nd-arg support: Array.indexOf fromIndex; String.startsWith/endsWith position.
+console.log("idxof-from", [1, 2, 1, 3].indexOf(1, 1))
+console.log("idxof-neg", [1, 2, 3, 2, 1].indexOf(2, -2))
+console.log("startsw-pos", "abc".startsWith("bc", 1))
+console.log("endsw-pos", "abc".endsWith("ab", 2))
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))

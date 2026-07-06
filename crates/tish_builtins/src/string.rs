@@ -333,17 +333,32 @@ pub fn to_lower_case(s: &Value) -> Value {
     }
 }
 
-pub fn starts_with(s: &Value, search: &Value) -> Value {
+pub fn starts_with(s: &Value, search: &Value, position: Option<&Value>) -> Value {
     if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.starts_with(search.as_str()))
+        // `position`: test as if the string began at char `position` (clamped to [0, len]). Absent → 0.
+        let pos = match position {
+            Some(Value::Number(n)) if *n > 0.0 => *n as usize,
+            _ => 0,
+        };
+        let byte_start = s.char_indices().nth(pos).map(|(b, _)| b).unwrap_or(s.len());
+        Value::Bool(s[byte_start..].starts_with(search.as_str()))
     } else {
         Value::Bool(false)
     }
 }
 
-pub fn ends_with(s: &Value, search: &Value) -> Value {
+pub fn ends_with(s: &Value, search: &Value, end_position: Option<&Value>) -> Value {
     if let (Value::String(s), Value::String(search)) = (s, search) {
-        Value::Bool(s.ends_with(search.as_str()))
+        // `endPosition`: test as if the string ended at char `endPosition` (clamped to [0, len]).
+        // Absent → the full length.
+        let char_count = s.chars().count();
+        let end = match end_position {
+            Some(Value::Number(n)) if *n >= 0.0 => (*n as usize).min(char_count),
+            Some(Value::Number(_)) => 0,
+            _ => char_count,
+        };
+        let byte_end = s.char_indices().nth(end).map(|(b, _)| b).unwrap_or(s.len());
+        Value::Bool(s[..byte_end].ends_with(search.as_str()))
     } else {
         Value::Bool(false)
     }
@@ -699,9 +714,12 @@ mod tests {
     fn case_and_prefix_suffix() {
         assert_same!(to_upper_case(&s("aB")), s("AB"));
         assert_same!(to_lower_case(&s("aB")), s("ab"));
-        assert_same!(starts_with(&s("/api"), &s("/api")), Value::Bool(true));
-        assert_same!(ends_with(&s("x.js"), &s(".js")), Value::Bool(true));
-        assert_same!(starts_with(&n(1.0), &s("")), Value::Bool(false));
+        assert_same!(starts_with(&s("/api"), &s("/api"), None), Value::Bool(true));
+        assert_same!(ends_with(&s("x.js"), &s(".js"), None), Value::Bool(true));
+        assert_same!(starts_with(&n(1.0), &s(""), None), Value::Bool(false));
+        // 2nd-arg: position / endPosition.
+        assert_same!(starts_with(&s("abc"), &s("bc"), Some(&n(1.0))), Value::Bool(true));
+        assert_same!(ends_with(&s("abc"), &s("ab"), Some(&n(2.0))), Value::Bool(true));
     }
 
     #[test]

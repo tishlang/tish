@@ -29,6 +29,10 @@ str-oob none
 str-neg none
 json-nul "\u0000"
 json-bs "\b"
+idxof-from 2
+idxof-neg 3
+startsw-pos true
+endsw-pos true
 includes-nan true
 includes-no false
 parseint-hex 31

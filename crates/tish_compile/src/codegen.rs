@@ -6838,9 +6838,14 @@ impl Codegen {
                         "indexOf" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            // Array `indexOf` takes `Option<&Value>` fromIndex; string keeps the &Value/Null form.
+                            let from_opt = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_index_of(&_obj, &{}), Value::String(_) => tishlang_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
-                                obj_expr, search, search, from
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_index_of(&_obj, &{}, {}), Value::String(_) => tishlang_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
+                                obj_expr, search, from_opt, search, from
                             ));
                         }
                         "lastIndexOf" => {
@@ -6939,16 +6944,24 @@ impl Codegen {
                         }
                         "startsWith" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let pos = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
                             return Ok(format!(
-                                "tishlang_runtime::string_starts_with(&{}, &{})",
-                                obj_expr, search
+                                "tishlang_runtime::string_starts_with(&{}, &{}, {})",
+                                obj_expr, search, pos
                             ));
                         }
                         "endsWith" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
+                            let pos = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
                             return Ok(format!(
-                                "tishlang_runtime::string_ends_with(&{}, &{})",
-                                obj_expr, search
+                                "tishlang_runtime::string_ends_with(&{}, &{}, {})",
+                                obj_expr, search, pos
                             ));
                         }
                         "replace" => {

@@ -149,8 +149,8 @@ pub fn array_push(arr: &Value, args: &[Value]) -> Value {
 pub fn array_unshift(arr: &Value, args: &[Value]) -> Value {
     array_unshift_impl(arr, args)
 }
-pub fn array_index_of(arr: &Value, search: &Value) -> Value {
-    array_index_of_impl(arr, search)
+pub fn array_index_of(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
+    array_index_of_impl(arr, search, from)
 }
 pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
     array_includes_impl(arr, search, Some(from))
@@ -217,11 +217,11 @@ pub fn string_split_limit(s: &Value, sep: &Value, limit: &Value) -> Value {
     }
     string_split_limit_impl(s, sep, max)
 }
-pub fn string_starts_with(s: &Value, search: &Value) -> Value {
-    string_starts_with_impl(s, search)
+pub fn string_starts_with(s: &Value, search: &Value, position: Option<&Value>) -> Value {
+    string_starts_with_impl(s, search, position)
 }
-pub fn string_ends_with(s: &Value, search: &Value) -> Value {
-    string_ends_with_impl(s, search)
+pub fn string_ends_with(s: &Value, search: &Value, end_position: Option<&Value>) -> Value {
+    string_ends_with_impl(s, search, end_position)
 }
 pub fn string_replace(s: &Value, search: &Value, replacement: &Value) -> Value {
     #[cfg(feature = "regex")]
