@@ -1638,7 +1638,14 @@ impl Evaluator {
                             "indexOf" => {
                                 let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();
-                                for (i, v) in arr_borrow.iter().enumerate() {
+                                // fromIndex: positive clamps to [0, len]; negative counts from the end.
+                                let len = arr_borrow.len() as i64;
+                                let start = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len).max(0) as usize,
+                                    Some(Value::Number(n)) if *n < 0.0 => ((len + *n as i64).max(0)) as usize,
+                                    _ => 0,
+                                };
+                                for (i, v) in arr_borrow.iter().enumerate().skip(start) {
                                     if v.strict_eq(&search) {
                                         return Ok(Value::Number(i as f64));
                                     }
@@ -2307,14 +2314,28 @@ impl Evaluator {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
-                                return Ok(Value::Bool(s.starts_with(search)));
+                                // position: test as if the string began at char `position`.
+                                let pos = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n > 0.0 => *n as usize,
+                                    _ => 0,
+                                };
+                                let byte_start = s.char_indices().nth(pos).map(|(b, _)| b).unwrap_or(s.len());
+                                return Ok(Value::Bool(s[byte_start..].starts_with(search)));
                             }
                             "endsWith" => {
                                 let search = match arg_vals.first() {
                                     Some(Value::String(ss)) => ss.as_ref(),
                                     _ => return Ok(Value::Bool(false)),
                                 };
-                                return Ok(Value::Bool(s.ends_with(search)));
+                                // endPosition: test as if the string ended at char `endPosition`.
+                                let char_count = s.chars().count();
+                                let end = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as usize).min(char_count),
+                                    Some(Value::Number(_)) => 0,
+                                    _ => char_count,
+                                };
+                                let byte_end = s.char_indices().nth(end).map(|(b, _)| b).unwrap_or(s.len());
+                                return Ok(Value::Bool(s[..byte_end].ends_with(search)));
                             }
                             "replace" => {
                                 #[cfg(feature = "regex")]

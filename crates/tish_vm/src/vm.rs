@@ -3899,7 +3899,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         "concat" => make_native_fn(move |args| arr_builtins::concat(&bv, args)),
                         "indexOf" => make_native_fn(move |args| {
                             let s = args.first().cloned().unwrap_or(Value::Null);
-                            arr_builtins::index_of(&bv, &s)
+                            arr_builtins::index_of(&bv, &s, args.get(1))
                         }),
                         "includes" => make_native_fn(move |args| {
                             let s = args.first().cloned().unwrap_or(Value::Null);
@@ -3972,7 +3972,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "indexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    arr_builtins::index_of(&Value::Array(a_clone.clone()), search)
+                    arr_builtins::index_of(&Value::Array(a_clone.clone()), search, args.get(1))
                 }),
                 "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
@@ -4150,11 +4150,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "startsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    str_builtins::starts_with(&Value::String(s_clone.clone()), search)
+                    str_builtins::starts_with(&Value::String(s_clone.clone()), search, args.get(1))
                 }),
                 "endsWith" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
-                    str_builtins::ends_with(&Value::String(s_clone.clone()), search)
+                    str_builtins::ends_with(&Value::String(s_clone.clone()), search, args.get(1))
                 }),
                 "replace" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
