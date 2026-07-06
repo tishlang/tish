@@ -6,7 +6,7 @@
 # Runs on Linux (the deployment / hyper-per-core target). No load generation here — this is a
 # correctness gate (routes return the right bodies, the process stays up), not a benchmark; throughput
 # lives in http-perf.yml.
-name: Serve smoke (both HTTP backends)
+name: Native smoke (CLI + fs + HTTP×2)
 
 on:
   push:
@@ -19,16 +19,18 @@ on:
       - "crates/tish_vm/**"
       - "crates/tish_core/**"
       - "tests/http/**"
+      - "tests/native_smoke/**"
       - "scripts/test_serve_smoke.sh"
-      - ".github/workflows/serve-smoke.yml"
+      - "scripts/test_native_smoke.sh"
+      - ".github/workflows/native-smoke.yml"
 
 concurrency:
-  group: serve-smoke-${{ github.ref }}
+  group: native-smoke-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  serve-smoke:
-    name: Native serve — tiny_http + hyper
+  native-smoke:
+    name: Native apps — CLI + fs + serve (tiny_http + hyper)
     runs-on: blacksmith-4vcpu-ubuntu-2204
     timeout-minutes: 30
     env:
@@ -48,5 +50,5 @@ jobs:
       - name: Build tish (release)
         run: cargo build --release -p tishlang --bin tish
 
-      - name: Serve smoke — tiny_http + hyper
-        run: bash scripts/test_serve_smoke.sh
+      - name: Native smoke — CLI + fs + serve (both backends)
+        run: bash scripts/test_native_smoke.sh

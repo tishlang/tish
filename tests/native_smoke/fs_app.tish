@@ -1,0 +1,11 @@
+// Native fs smoke — write a file, read it back, JSON round-trip, assert. Build: --feature fs process.
+import { readFile, writeFile } from 'tish:fs'
+fn main() {
+  let path = "SMOKE_FILE" in process.env ? process.env.SMOKE_FILE : "native_smoke_fs.tmp"
+  let data = { version: 3, items: ["alpha", "beta", "gamma"] }
+  writeFile(path, JSON.stringify(data))
+  let back = JSON.parse(readFile(path))
+  console.log("fs-version:", back.version)
+  console.log("fs-count:", back.items.length)
+  console.log("fs-join:", back.items.join("-"))
+}
