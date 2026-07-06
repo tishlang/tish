@@ -396,6 +396,12 @@ pub fn string_last_index_of(s: &Value, search: &Value, position: &Value) -> Valu
 pub fn number_to_fixed(n: &Value, digits: &Value) -> Value {
     tishlang_builtins::number::to_fixed(n, digits)
 }
+pub fn number_to_exponential(n: &Value, digits: &Value) -> Value {
+    tishlang_builtins::number::to_exponential(n, digits)
+}
+pub fn number_to_precision(n: &Value, precision: &Value) -> Value {
+    tishlang_builtins::number::to_precision(n, precision)
+}
 
 /// `.toString([radix])` for the compiled backend (issue #59). A number receiver uses the
 /// shared radix formatter so it stays byte-identical with the VM / interpreter; any other
@@ -951,6 +957,9 @@ pub fn array_from(args: &[Value]) -> Value {
 }
 pub fn object_is(args: &[Value]) -> Value {
     tishlang_builtins::globals::object_is(args)
+}
+pub fn object_has_own(args: &[Value]) -> Value {
+    tishlang_builtins::globals::object_has_own(args)
 }
 
 pub fn string_from_char_code(args: &[Value]) -> Value {

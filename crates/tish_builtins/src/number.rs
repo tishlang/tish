@@ -43,6 +43,179 @@ pub fn to_fixed_str(num: f64, digits: usize) -> String {
     format!("{:.*}", digits, rounded)
 }
 
+/// `Number.prototype.toExponential(fractionDigits?)` — ECMA-262 §21.1.3.2. Exponential notation with
+/// `fractionDigits` mantissa fraction digits (0–100), or the minimal digits needed when omitted. The
+/// exponent always carries an explicit sign (`1.23e+4`, `1e-7`) to match V8.
+pub fn to_exponential(n: &Value, digits: &Value) -> Value {
+    let num = match n {
+        Value::Number(x) => *x,
+        _ => f64::NAN,
+    };
+    let d = match digits {
+        Value::Number(x) => Some((*x as i32).clamp(0, 100) as usize),
+        _ => None,
+    };
+    Value::String(to_exponential_str(num, d).into())
+}
+
+/// f64-domain core of `toExponential`, shared with the tree-walk interpreter.
+pub fn to_exponential_str(num: f64, digits: Option<usize>) -> String {
+    if num.is_nan() {
+        return "NaN".to_string();
+    }
+    if num.is_infinite() {
+        return if num < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    let d = match digits {
+        // No fractionDigits: shortest round-trip mantissa (Rust's `{:e}` matches V8 here).
+        None => return fix_exponent_sign(&format!("{:e}", num)),
+        Some(d) => d,
+    };
+    if num == 0.0 {
+        let mant = if d == 0 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(d))
+        };
+        return format!("{}e+0", mant);
+    }
+    let sign = if num < 0.0 { "-" } else { "" };
+    let (ds, e) = sig_digits(num.abs(), d + 1);
+    let mant = if d == 0 {
+        ds
+    } else {
+        format!("{}.{}", &ds[..1], &ds[1..])
+    };
+    let esign = if e >= 0 { "+" } else { "-" };
+    format!("{}{}e{}{}", sign, mant, esign, e.abs())
+}
+
+/// Round `x` (finite, `x > 0`) to `sig` significant decimal digits with **half-away-from-zero**
+/// rounding — ECMA's "pick the larger n" tie rule (`2.5.toPrecision(1) === "3"`, not "2"). Returns the
+/// `sig`-digit string and the base-10 exponent of the leading digit.
+///
+/// The exact value of an f64 has a finite decimal expansion; scaling it through `f64` arithmetic
+/// re-rounds and can land a genuinely-below-half value (e.g. `2.675` ≈ `2.67499…`) exactly on `.5`,
+/// corrupting the tie test. So we format with many guard digits — `{:.Ne}` gives the correctly-rounded
+/// exact-value expansion — capturing the TRUE digit at position `sig`, then round the digit string:
+/// `digit[sig] >= 5` rounds up (half-away; `== 5` is a true tie only because the guard digits show no
+/// nonzero remainder). Rust's `{:e}` alone rounds half-to-even, which is exactly what we must avoid.
+fn sig_digits(x: f64, sig: usize) -> (String, i32) {
+    let sig = sig.max(1);
+    // Guard digits push the format's own (half-to-even) rounding far to the right of digit[sig], so
+    // digit[sig] is exact. A cascade into digit[sig] would need 16 consecutive 9s — not a real input.
+    let guard = sig + 16;
+    let raw = format!("{:.*e}", guard, x);
+    let (mant, exp_str) = raw.split_once('e').unwrap();
+    let mut e: i32 = exp_str.parse().unwrap_or(0);
+    let mut digits: Vec<u8> = mant
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    if digits.len() > sig {
+        let round_up = digits[sig] >= 5;
+        digits.truncate(sig);
+        if round_up {
+            let mut i = sig;
+            loop {
+                if i == 0 {
+                    // carry out of the leading digit: 9…9 → 1 0…0, one more place
+                    digits.insert(0, 1);
+                    digits.truncate(sig);
+                    e += 1;
+                    break;
+                }
+                i -= 1;
+                if digits[i] == 9 {
+                    digits[i] = 0;
+                } else {
+                    digits[i] += 1;
+                    break;
+                }
+            }
+        }
+    }
+    let s: String = digits.iter().map(|d| (d + b'0') as char).collect();
+    (s, e)
+}
+
+/// Rust's `{:e}` writes a bare positive exponent (`1.23e4`); JS/V8 always signs it (`1.23e+4`). Negative
+/// exponents already carry `-`.
+fn fix_exponent_sign(s: &str) -> String {
+    match s.split_once('e') {
+        Some((mantissa, exp)) if !exp.starts_with('-') && !exp.starts_with('+') => {
+            format!("{}e+{}", mantissa, exp)
+        }
+        _ => s.to_string(),
+    }
+}
+
+/// `Number.prototype.toPrecision(precision?)` — ECMA-262 §21.1.3.5. With `precision` significant digits,
+/// choosing fixed or exponential per the spec; omitted precision falls back to `ToString`. An
+/// out-of-range precision (`<1` or `>100`) parks a catchable `RangeError`.
+pub fn to_precision(n: &Value, precision: &Value) -> Value {
+    let num = match n {
+        Value::Number(x) => *x,
+        _ => f64::NAN,
+    };
+    match precision {
+        Value::Number(p) => {
+            let p = *p as i32;
+            if !(1..=100).contains(&p) && num.is_finite() {
+                tishlang_core::set_pending_throw(tishlang_core::range_error(
+                    "toPrecision() argument must be between 1 and 100",
+                ));
+                return Value::Null;
+            }
+            Value::String(to_precision_str(num, p).into())
+        }
+        // precision undefined → behave like ToString(number)
+        _ => Value::String(tishlang_core::js_number_to_string(num).into()),
+    }
+}
+
+/// f64-domain core of `toPrecision`, shared with the tree-walk interpreter. Assumes `precision` is in
+/// range (the `&Value` entry point validates and parks a RangeError otherwise).
+pub fn to_precision_str(num: f64, precision: i32) -> String {
+    if num.is_nan() {
+        return "NaN".to_string();
+    }
+    if num.is_infinite() {
+        return if num < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    let p = precision.clamp(1, 100) as usize;
+    if num == 0.0 {
+        if p == 1 {
+            return "0".to_string();
+        }
+        return format!("0.{}", "0".repeat(p - 1));
+    }
+    let sign = if num < 0.0 { "-" } else { "" };
+    // `p` significant digits + base-10 exponent, half-away rounded (shared with toExponential).
+    let (digits, e) = sig_digits(num.abs(), p);
+    let body = if e < -6 || e >= p as i32 {
+        // exponential form
+        let mut m = String::new();
+        m.push(digits.as_bytes()[0] as char);
+        if p > 1 {
+            m.push('.');
+            m.push_str(&digits[1..]);
+        }
+        let esign = if e >= 0 { "+" } else { "-" };
+        format!("{}e{}{}", m, esign, e.abs())
+    } else if e == p as i32 - 1 {
+        digits
+    } else if e >= 0 {
+        let split = (e + 1) as usize;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    } else {
+        let zeros = (-e - 1) as usize;
+        format!("0.{}{}", "0".repeat(zeros), digits)
+    };
+    format!("{}{}", sign, body)
+}
+
 /// `Number.prototype.toString([radix])` — ECMA-262 §21.1.3.6.
 ///
 /// Radix defaults to 10 (canonical JS number formatting). For radix 2–36 the value is
