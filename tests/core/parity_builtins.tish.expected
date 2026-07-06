@@ -79,3 +79,7 @@ rreduce-init zba
 akeys 0,1,2
 avalues a,b,c
 aentries 0:a|1:b
+sc 1 9 x y false
+scprim 7 hi
+scarr [1,[2,3]]
+sccycle true

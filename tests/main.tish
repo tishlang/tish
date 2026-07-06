@@ -3502,6 +3502,16 @@ console.log("rreduce-init", ["a","b"].reduceRight((a, x) => a + x, "z"))
 console.log("akeys", [...["a","b","c"].keys()].join(","))
 console.log("avalues", [...["a","b","c"].values()].join(","))
 console.log("aentries", [...["a","b"].entries()].map(e => e.join(":")).join("|"))
+// structuredClone — deep copy + cycle preservation (#437)
+let _sc = { n: 1, arr: [1, { d: "x" }] };
+let _scb = structuredClone(_sc);
+_scb.n = 9; _scb.arr[1].d = "y";
+console.log("sc", _sc.n, _scb.n, _sc.arr[1].d, _scb.arr[1].d, _sc === _scb);
+console.log("scprim", structuredClone(7), structuredClone("hi"));
+console.log("scarr", JSON.stringify(structuredClone([1,[2,3]])));
+let _scc = { k: 1 }; _scc.self = _scc;
+let _scd = structuredClone(_scc);
+console.log("sccycle", _scd.self === _scd);
 }
 __perf_run_core_parity_builtins()
 

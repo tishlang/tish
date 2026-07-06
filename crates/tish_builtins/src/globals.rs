@@ -113,6 +113,55 @@ pub fn array_from(args: &[Value]) -> Value {
     Value::Array(VmRef::new(out))
 }
 
+/// `structuredClone(value)` — a recursive deep copy of arrays, objects, and primitives, with cycles
+/// preserved (a repeated reference clones to the same new node). Functions and exotic types (Date,
+/// RegExp, Map, Set) are shared/shallow — a pragmatic subset covering plain data structures.
+pub fn structured_clone(args: &[Value]) -> Value {
+    let mut seen: Vec<(*const (), Value)> = Vec::new();
+    deep_clone(args.first().unwrap_or(&Value::Null), &mut seen)
+}
+
+fn deep_clone(v: &Value, seen: &mut Vec<(*const (), Value)>) -> Value {
+    match v {
+        Value::Array(a) => {
+            let ptr = a.as_ptr();
+            if let Some((_, c)) = seen.iter().find(|(p, _)| *p == ptr) {
+                return c.clone();
+            }
+            let new: VmRef<Vec<Value>> = VmRef::new(Vec::new());
+            seen.push((ptr, Value::Array(new.clone())));
+            let src = a.borrow().clone();
+            let cloned: Vec<Value> = src.iter().map(|e| deep_clone(e, seen)).collect();
+            *new.borrow_mut() = cloned;
+            Value::Array(new)
+        }
+        Value::NumberArray(a) => Value::NumberArray(VmRef::new(a.borrow().clone())),
+        Value::Object(o) => {
+            let ptr = o.as_ptr();
+            if let Some((_, c)) = seen.iter().find(|(p, _)| *p == ptr) {
+                return c.clone();
+            }
+            let entries: Vec<(Arc<str>, Value)> = o
+                .borrow()
+                .strings
+                .iter()
+                .map(|(k, val)| (k.clone(), val.clone()))
+                .collect();
+            let new_obj = Value::object(ObjectMap::default());
+            // register the (empty) new object before recursing so cycles resolve back to it
+            if let Value::Object(no) = &new_obj {
+                seen.push((ptr, new_obj.clone()));
+                for (k, val) in entries {
+                    let cloned = deep_clone(&val, seen);
+                    no.borrow_mut().strings.insert(k, cloned);
+                }
+            }
+            new_obj
+        }
+        other => other.clone(),
+    }
+}
+
 /// `Object.is(a, b)` — SameValue: like `===`, but NaN equals NaN and `+0` is NOT equal to `-0`.
 pub fn object_is(args: &[Value]) -> Value {
     let a = args.first().unwrap_or(&Value::Null);

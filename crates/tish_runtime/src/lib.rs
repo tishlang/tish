@@ -809,6 +809,9 @@ pub fn encode_uri_component(args: &[Value]) -> Value {
 pub fn decode_uri_component(args: &[Value]) -> Value {
     tishlang_builtins::globals::decode_uri_component(args)
 }
+pub fn structured_clone(args: &[Value]) -> Value {
+    tishlang_builtins::globals::structured_clone(args)
+}
 
 // Math functions - use tishlang_builtins::math
 pub use tishlang_builtins::math::{
