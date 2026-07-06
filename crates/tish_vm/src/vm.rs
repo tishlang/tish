@@ -4315,6 +4315,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     tishlang_runtime::string_match_regex(&Value::String(s_clone.clone()), re)
                 }),
                 #[cfg(feature = "regex")]
+                "matchAll" => make_native_fn(move |args: &[Value]| {
+                    let re = args.first().unwrap_or(&Value::Null);
+                    tishlang_runtime::string_match_all_regex(&Value::String(s_clone.clone()), re)
+                }),
+                #[cfg(feature = "regex")]
                 "search" => make_native_fn(move |args: &[Value]| {
                     let re = args.first().unwrap_or(&Value::Null);
                     tishlang_runtime::string_search_regex(&Value::String(s_clone.clone()), re)

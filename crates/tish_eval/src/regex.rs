@@ -147,6 +147,34 @@ pub fn string_match(input: &str, regexp: &Value) -> Value {
     }
 }
 
+/// `String.prototype.matchAll(regexp)` — collects every match as an exec-style match object (reusing
+/// `regexp_exec`). Returns `Err(())` if a non-global RegExp is passed (the caller raises a TypeError);
+/// a non-RegExp argument is coerced to a global regex. The caller wraps the results in an iterator.
+pub fn string_match_all(input: &str, regexp: &Value) -> Result<Vec<Value>, ()> {
+    let re_cell = match regexp {
+        Value::RegExp(re) => re.clone(),
+        other => match TishRegExp::new(&other.to_string(), "g") {
+            Ok(re) => Rc::new(RefCell::new(re)),
+            Err(_) => return Ok(Vec::new()),
+        },
+    };
+    if !re_cell.borrow().flags.global {
+        return Err(());
+    }
+    let mut results = Vec::new();
+    let mut re = re_cell.borrow_mut();
+    re.last_index = 0;
+    loop {
+        let m = regexp_exec(&mut re, input);
+        if matches!(m, Value::Null) {
+            break;
+        }
+        results.push(m);
+    }
+    re.last_index = 0;
+    Ok(results)
+}
+
 /// String.prototype.replace(searchValue, replaceValue)
 pub fn string_replace(input: &str, search: &Value, replace: &Value) -> Value {
     let replacement = match replace {

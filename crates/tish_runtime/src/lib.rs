@@ -1883,6 +1883,48 @@ pub fn string_match_regex(s: &Value, regexp: &Value) -> Value {
     }
 }
 
+/// `String.prototype.matchAll(regexp)` — an ITERATOR over every match, each an exec-style match object
+/// (`{ "0", ...groups, index, input, groups }`). Per ECMA the regexp must be global, else a `TypeError`
+/// is parked; a non-RegExp argument is coerced to a global regex. Reuses `regexp_exec_impl` so the
+/// match objects are byte-identical to `exec`/`match`, then wraps them in the shared iterator.
+#[cfg(feature = "regex")]
+pub fn string_match_all_regex(s: &Value, regexp: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return Value::Null,
+    };
+    let re_cell = match regexp {
+        Value::RegExp(re) => re.clone(),
+        other => {
+            let pattern = other.to_display_string();
+            match tishlang_core::TishRegExp::new(&pattern, "g") {
+                Ok(re) => tishlang_core::VmRef::new(re),
+                Err(_) => return Value::Null,
+            }
+        }
+    };
+    if !re_cell.borrow().flags.global {
+        tishlang_core::set_pending_throw(tishlang_core::type_error(
+            "String.prototype.matchAll called with a non-global RegExp argument",
+        ));
+        return Value::Null;
+    }
+    let mut results: Vec<Value> = Vec::new();
+    {
+        let mut re = re_cell.borrow_mut();
+        re.last_index = 0;
+        loop {
+            let m = regexp_exec_impl(&mut re, input);
+            if matches!(m, Value::Null) {
+                break;
+            }
+            results.push(m);
+        }
+        re.last_index = 0;
+    }
+    tishlang_builtins::iterator::array_iterator(results)
+}
+
 #[cfg(feature = "regex")]
 fn string_replace_regex_or_callback(s: &Value, search: &Value, replacement: &Value) -> Value {
     let input = match s {

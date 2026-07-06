@@ -103,3 +103,9 @@ normNFD true 2
 normDefault true
 normNFKC fi fi
 normErr RangeError
+maCount 3 a1 a 1 0
+maAll a=1,b=2,c=3
+maForof 9,8
+maEmpty 0
+maIdx 1,3
+maErr TypeError
