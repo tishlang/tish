@@ -3883,6 +3883,9 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                             let init = args.get(1).cloned();
                             arr_builtins::reduce_right(&bv, &cb, init.as_ref())
                         }),
+                        "keys" => make_native_fn(move |_| arr_builtins::keys(&bv)),
+                        "values" => make_native_fn(move |_| arr_builtins::values(&bv)),
+                        "entries" => make_native_fn(move |_| arr_builtins::entries(&bv)),
                         "forEach" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
                             #[cfg(not(target_arch = "wasm32"))]
@@ -4081,6 +4084,9 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let init = args.get(1).cloned();
                     arr_builtins::reduce_right(&Value::Array(a_clone.clone()), &cb, init.as_ref())
                 }),
+                "keys" => make_native_fn(move |_: &[Value]| arr_builtins::keys(&Value::Array(a_clone.clone()))),
+                "values" => make_native_fn(move |_: &[Value]| arr_builtins::values(&Value::Array(a_clone.clone()))),
+                "entries" => make_native_fn(move |_: &[Value]| arr_builtins::entries(&Value::Array(a_clone.clone()))),
                 "forEach" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
                     let arr = Value::Array(a_clone.clone());

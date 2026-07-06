@@ -2130,6 +2130,41 @@ impl Evaluator {
                                 }
                                 return Ok(acc);
                             }
+                            "keys" => {
+                                let len = arr.borrow().len();
+                                let it = tishlang_builtins::iterator::array_iterator(
+                                    (0..len).map(|i| tishlang_core::Value::Number(i as f64)).collect(),
+                                );
+                                return Ok(crate::value_convert::core_to_eval(it));
+                            }
+                            "values" => {
+                                let items: Vec<tishlang_core::Value> = arr
+                                    .borrow()
+                                    .iter()
+                                    .map(|v| {
+                                        crate::value_convert::eval_to_core(v)
+                                            .unwrap_or(tishlang_core::Value::Null)
+                                    })
+                                    .collect();
+                                let it = tishlang_builtins::iterator::array_iterator(items);
+                                return Ok(crate::value_convert::core_to_eval(it));
+                            }
+                            "entries" => {
+                                let items: Vec<tishlang_core::Value> = arr
+                                    .borrow()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, v)| {
+                                        tishlang_core::Value::Array(tishlang_core::VmRef::new(vec![
+                                            tishlang_core::Value::Number(i as f64),
+                                            crate::value_convert::eval_to_core(v)
+                                                .unwrap_or(tishlang_core::Value::Null),
+                                        ]))
+                                    })
+                                    .collect();
+                                let it = tishlang_builtins::iterator::array_iterator(items);
+                                return Ok(crate::value_convert::core_to_eval(it));
+                            }
                             "find" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
