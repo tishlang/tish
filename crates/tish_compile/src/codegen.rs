@@ -7161,6 +7161,17 @@ impl Codegen {
                                 obj_expr, callback, init_arg
                             ));
                         }
+                        "reduceRight" => {
+                            let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let init_arg = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
+                            return Ok(format!(
+                                "tishlang_runtime::array_reduce_right(&{}, &{}, {})",
+                                obj_expr, callback, init_arg
+                            ));
+                        }
                         "forEach" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(

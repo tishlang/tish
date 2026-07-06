@@ -3497,6 +3497,8 @@ console.log("gopn", Object.getOwnPropertyNames({a: 1, b: 2}).join(","))
 console.log("enc-comp", encodeURIComponent("a b&c=d/e?f"))
 console.log("dec-comp", decodeURIComponent("a%20b%26c%3Dd"))
 console.log("dec-uri", decodeURI("a%20b%26c"))
+console.log("rreduce", ["a","b","c"].reduceRight((a, x) => a + x), [1,2,3,4].reduceRight((a, x) => a - x))
+console.log("rreduce-init", ["a","b"].reduceRight((a, x) => a + x, "z"))
 }
 __perf_run_core_parity_builtins()
 

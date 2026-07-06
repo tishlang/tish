@@ -3878,6 +3878,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                             }
                             arr_builtins::reduce(&bv, &cb, init.as_ref())
                         }),
+                        "reduceRight" => make_native_fn(move |args| {
+                            let cb = args.first().cloned().unwrap_or(Value::Null);
+                            let init = args.get(1).cloned();
+                            arr_builtins::reduce_right(&bv, &cb, init.as_ref())
+                        }),
                         "forEach" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
                             #[cfg(not(target_arch = "wasm32"))]
@@ -4070,6 +4075,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         return v;
                     }
                     arr_builtins::reduce(&arr, &cb, init.as_ref())
+                }),
+                "reduceRight" => make_native_fn(move |args: &[Value]| {
+                    let cb = args.first().cloned().unwrap_or(Value::Null);
+                    let init = args.get(1).cloned();
+                    arr_builtins::reduce_right(&Value::Array(a_clone.clone()), &cb, init.as_ref())
                 }),
                 "forEach" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
