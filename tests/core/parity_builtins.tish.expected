@@ -22,6 +22,13 @@ sign-neg -1
 pad-empty x
 pad-space   x
 padend-empty x
+reduce-empty-throw TypeError
+reduce-empty-init 42
+reduce-empty-null null
+str-oob none
+str-neg none
+json-nul "\u0000"
+json-bs "\b"
 includes-nan true
 includes-no false
 parseint-hex 31

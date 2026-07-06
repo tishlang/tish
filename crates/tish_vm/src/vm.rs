@@ -1389,7 +1389,7 @@ mod hof_fusion {
     /// (which would pass a `Value::Bool`, not a number). No-initial-value semantics match the generic
     /// path: absent init (`Value::Null`) with a non-empty array seeds `acc = data[0]` and scans from
     /// index 1; an empty array with no init throws (bail to the generic path, which raises it).
-    pub(super) fn reduce(arr: &Value, cb: &Value, init: &Value) -> Option<Value> {
+    pub(super) fn reduce(arr: &Value, cb: &Value, initial: Option<&Value>) -> Option<Value> {
         let nf = fused_numeric_fn(cb)?;
         if nf.arity() > 3 || nf.result_is_bool() {
             return None;
@@ -1398,11 +1398,11 @@ mod hof_fusion {
         let arity = nf.arity();
         // Determine seed. Reduce with no initial value AND an empty array is a TypeError in JS — let
         // the generic path produce that exact throw rather than replicate it here.
-        let (start, mut acc) = match init {
-            Value::Null if !data.is_empty() => (1usize, data[0]),
-            Value::Null => return None, // empty + no init → generic path throws
-            Value::Number(n) => (0usize, *n),
-            _ => return None, // non-numeric explicit init → generic path (acc wouldn't stay f64)
+        let (start, mut acc) = match initial {
+            None if !data.is_empty() => (1usize, data[0]),
+            None => return None,             // empty + no init → generic path throws
+            Some(Value::Number(n)) => (0usize, *n),
+            Some(_) => return None, // non-numeric/explicit-null init → generic path (acc wouldn't stay f64)
         };
         let mut args = [0.0f64; 3];
         for (i, &x) in data.iter().enumerate().skip(start) {
@@ -3829,12 +3829,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         }),
                         "reduce" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
-                            let init = args.get(1).cloned().unwrap_or(Value::Null);
+                            let init = args.get(1).cloned(); // None = no initial value (empty array → throw)
                             #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(v) = hof_fusion::reduce(&bv, &cb, &init) {
+                            if let Some(v) = hof_fusion::reduce(&bv, &cb, init.as_ref()) {
                                 return v;
                             }
-                            arr_builtins::reduce(&bv, &cb, &init)
+                            arr_builtins::reduce(&bv, &cb, init.as_ref())
                         }),
                         "forEach" => make_native_fn(move |args| {
                             let cb = args.first().cloned().unwrap_or(Value::Null);
@@ -4001,13 +4001,13 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 }),
                 "reduce" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
-                    let init = args.get(1).cloned().unwrap_or(Value::Null);
+                    let init = args.get(1).cloned(); // None = no initial value (empty array → throw)
                     let arr = Value::Array(a_clone.clone());
                     #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(v) = hof_fusion::reduce(&arr, &cb, &init) {
+                    if let Some(v) = hof_fusion::reduce(&arr, &cb, init.as_ref()) {
                         return v;
                     }
-                    arr_builtins::reduce(&arr, &cb, &init)
+                    arr_builtins::reduce(&arr, &cb, init.as_ref())
                 }),
                 "forEach" => make_native_fn(move |args: &[Value]| {
                     let cb = args.first().cloned().unwrap_or(Value::Null);
@@ -4375,10 +4375,9 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
                 Value::Number(n) => {
                     let n = *n;
                     if n < 0.0 || n.fract() != 0.0 {
-                        return Err(format!(
-                            "String index must be non-negative integer, got {}",
-                            n
-                        ));
+                        // A negative / non-integer string index reads `null` (JS `undefined`), NOT a
+                        // throw — interp and native already return null; the vm must agree. (#437)
+                        return Ok(Value::Null);
                     }
                     n as usize
                 }
@@ -4393,7 +4392,8 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
             // O(n) `chars().count()` pre-check (#203).
             match str_builtins::nth_char(s, i) {
                 Some(c) => Ok(Value::String(tishlang_core::ArcStr::from(c.to_string()))),
-                None => Err("Index out of bounds".to_string()),
+                // Past the end → `null` (JS `undefined`), matching interp/native, not a throw. (#437)
+                None => Ok(Value::Null),
             }
         }
         // A missing own property returns `null`, not a thrown error — matching dot reads

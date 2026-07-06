@@ -7076,9 +7076,15 @@ impl Codegen {
                                 }
                             }
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            // `array_reduce` takes `Option<&Value>` init: `None` = no initial value, so an
+                            // empty array with no init throws (per JS) instead of returning `null`.
+                            let init_arg = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
                             return Ok(format!(
-                                "tishlang_runtime::array_reduce(&{}, &{}, &{})",
-                                obj_expr, callback, initial
+                                "tishlang_runtime::array_reduce(&{}, &{}, {})",
+                                obj_expr, callback, init_arg
                             ));
                         }
                         "forEach" => {

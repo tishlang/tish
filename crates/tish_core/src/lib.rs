@@ -12,7 +12,9 @@ mod value;
 mod vmref;
 
 pub use console_style::{format_value_styled, format_values_for_console, use_console_colors};
-pub use json::{json_parse, json_stringify, json_stringify_into, write_json_number};
+pub use json::{
+    escape_json_string_into, json_parse, json_stringify, json_stringify_into, write_json_number,
+};
 pub use shape::{ShapeId, DICT_SHAPE, EMPTY_SHAPE};
 pub use uri::{percent_decode, percent_encode};
 pub use arcstr::ArcStr;
@@ -159,6 +161,22 @@ pub fn stack_overflow_error() -> Value {
 /// aborting the process, so `value_call` on a non-function surfaces as a catchable error at the next
 /// pending-throw checkpoint rather than an uncatchable native panic.
 pub fn not_a_function_error(message: impl Into<String>) -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(
+        std::sync::Arc::from("name"),
+        Value::String("TypeError".into()),
+    );
+    e.insert(
+        std::sync::Arc::from("message"),
+        Value::String(message.into().into()),
+    );
+    Value::object(e)
+}
+
+/// A catchable `TypeError` with an arbitrary message (`{ name: "TypeError", message }`), matching the
+/// VM/interpreter/node shape. Used to PARK a pending throw from a shared builtin that returns a plain
+/// `Value` and so cannot signal an error with `Result` (e.g. `[].reduce(fn)` with no initial value).
+pub fn type_error(message: impl Into<String>) -> Value {
     let mut e = ObjectMap::default();
     e.insert(
         std::sync::Arc::from("name"),

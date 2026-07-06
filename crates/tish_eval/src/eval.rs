@@ -4226,14 +4226,16 @@ impl Evaluator {
                 tishlang_core::write_json_number(&mut s, *n);
                 s
             }
-            Value::String(s) => format!(
-                "\"{}\"",
-                s.replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\r', "\\r")
-                    .replace('\t', "\\t")
-            ),
+            Value::String(s) => {
+                // Use the shared core escaper so control chars (`\b`, `\f`, `\u00xx`) are escaped
+                // exactly like the vm/native path — the old hand-rolled `.replace()` chain missed
+                // them and produced invalid JSON (raw control bytes). #437
+                let mut out = String::with_capacity(s.len() + 2);
+                out.push('"');
+                tishlang_core::escape_json_string_into(&mut out, s);
+                out.push('"');
+                out
+            }
             Value::Array(arr) => {
                 let ptr = Rc::as_ptr(arr) as *const ();
                 if ancestors.contains(&ptr) {

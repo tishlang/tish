@@ -3384,6 +3384,18 @@ console.log("sign-neg", Math.sign(-5))
 console.log("pad-empty", "x".padStart(3, ""))
 console.log("pad-space", "x".padStart(3))
 console.log("padend-empty", "x".padEnd(3, ""))
+// [].reduce with no initial value throws TypeError; an explicit init (incl. null) is returned as-is.
+let redThrew = "no"
+try { [].reduce((a, b) => a + b) } catch (e) { redThrew = e.name }
+console.log("reduce-empty-throw", redThrew)
+console.log("reduce-empty-init", [].reduce((a, b) => a + b, 42))
+console.log("reduce-empty-null", [].reduce((a, b) => a + b, null))
+// Out-of-range / negative string index reads falsy (null in tish, undefined in node) — no throw.
+console.log("str-oob", "abc"[10] || "none")
+console.log("str-neg", "abc"[-1] || "none")
+// JSON.stringify escapes control chars (valid JSON), not raw bytes.
+console.log("json-nul", JSON.stringify(String.fromCharCode(0)))
+console.log("json-bs", JSON.stringify(String.fromCharCode(8)))
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))
