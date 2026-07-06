@@ -175,6 +175,64 @@ pub struct Program {
     pub statements: Vec<Statement>,
 }
 
+/// #469: adopt a Go/Rust/Swift-style `main` entry point.
+///
+/// tish runs top-level statements (JS module semantics), so `fn main() { … }` on its own defines a
+/// function that is never called — a footgun for devs coming from compiled languages (the native
+/// server case: `fn main() { serve(...) }` silently exits). This appends a synthetic `main()`
+/// invocation to the ENTRY program's top-level statements so a defined `main` actually runs: top-level
+/// statements still execute first (module init), then `main`.
+///
+/// Deliberately conservative to avoid a double-invocation: it fires ONLY when a top-level `main`
+/// function is declared AND the program does not already invoke `main()` itself at top level (the
+/// JS-habit `fn main(){…}; main()` shape). This must be applied to the entry module only (not imported
+/// modules) and identically for every backend — call it from `merge_modules` so interp/vm/native/js
+/// stay consistent by construction.
+///
+/// The synthetic call is a plain `main()` (never `await main()`), even for `async fn main`: a blocking
+/// server main never returns anyway, and the interpreter cannot `await` a user async function's result
+/// (a separate pre-existing gap), so an unwrapped call is the one form that behaves identically on
+/// every backend.
+///
+/// Note: this is a tish-specific divergence from JS/node (node does not auto-call `main`); test it via
+/// interp==vm==native cross-checks, and pair any `.tish` fixture with a `.js` that calls `main()`
+/// explicitly so the node reference matches.
+pub fn append_main_entry(statements: &mut Vec<Statement>) {
+    // A top-level `fn main` / `async fn main` declaration.
+    let has_main = statements.iter().any(|s| {
+        matches!(s, Statement::FunDecl { name, .. } if &**name == "main")
+    });
+    if !has_main {
+        return;
+    }
+    // Already invoked at top level? Then the user is driving it — don't double-call.
+    fn is_main_call(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call { callee, .. } => {
+                matches!(callee.as_ref(), Expr::Ident { name, .. } if &**name == "main")
+            }
+            Expr::Await { operand, .. } => is_main_call(operand),
+            _ => false,
+        }
+    }
+    let already_called = statements
+        .iter()
+        .any(|s| matches!(s, Statement::ExprStmt { expr, .. } if is_main_call(expr)));
+    if already_called {
+        return;
+    }
+    let span = Span::default();
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Arc::from("main"),
+            span,
+        }),
+        args: Vec::new(),
+        span,
+    };
+    statements.push(Statement::ExprStmt { expr: call, span });
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Block {

@@ -1,0 +1,11 @@
+// #469: a top-level `main` is auto-invoked (Go/Rust/Swift-style entry). Top-level statements run
+// first (module init), then `main`. tish-specific: the paired .js calls main() explicitly so the
+// node reference matches (node does not auto-call main).
+console.log("init")
+let counter = 0
+fn bump() { counter = counter + 1 }
+fn main() {
+  bump()
+  bump()
+  console.log("main", counter)
+}
