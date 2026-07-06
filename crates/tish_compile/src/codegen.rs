@@ -6875,9 +6875,23 @@ impl Codegen {
                             } else {
                                 "Value::Number(f64::INFINITY)".to_string()
                             };
+                            // Array lastIndexOf takes Option<&Value> fromIndex; string keeps &Value.
+                            let from_opt = match arg_exprs.get(1) {
+                                Some(e) => format!("Some(&{})", e),
+                                None => "None".to_string(),
+                            };
                             return Ok(format!(
-                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::String(_) => tishlang_runtime::string_last_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
-                                obj_expr, search, position
+                                "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_last_index_of(&_obj, &{}, {}), Value::String(_) => tishlang_runtime::string_last_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
+                                obj_expr, search, from_opt, search, position
+                            ));
+                        }
+                        "copyWithin" => {
+                            let t = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let s = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let e = arg_exprs.get(2).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_copy_within(&{}, &{}, &{}, &{})",
+                                obj_expr, t, s, e
                             ));
                         }
                         "includes" => {

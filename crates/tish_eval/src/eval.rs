@@ -1668,6 +1668,52 @@ impl Evaluator {
                                 }
                                 return Ok(Value::Number(-1.0));
                             }
+                            "lastIndexOf" => {
+                                let search = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow();
+                                let len = arr_borrow.len() as i64;
+                                let start = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len - 1),
+                                    Some(Value::Number(n)) => len + *n as i64,
+                                    _ => len - 1,
+                                };
+                                let mut i = start;
+                                while i >= 0 {
+                                    if let Some(v) = arr_borrow.get(i as usize) {
+                                        if v.strict_eq(&search) {
+                                            return Ok(Value::Number(i as f64));
+                                        }
+                                    }
+                                    i -= 1;
+                                }
+                                return Ok(Value::Number(-1.0));
+                            }
+                            "copyWithin" => {
+                                let mut v = arr.borrow_mut();
+                                let len = v.len() as i64;
+                                let norm = |x: Option<&Value>, dflt: i64| -> usize {
+                                    match x {
+                                        Some(Value::Number(n)) => {
+                                            let n = *n as i64;
+                                            (if n < 0 { len + n } else { n }).clamp(0, len) as usize
+                                        }
+                                        _ => dflt.clamp(0, len) as usize,
+                                    }
+                                };
+                                let t = norm(arg_vals.first(), 0);
+                                let s = norm(arg_vals.get(1), 0);
+                                let e = norm(arg_vals.get(2), len);
+                                let lu = len as usize;
+                                if s < e && t < lu {
+                                    let count = (e - s).min(lu - t);
+                                    let block: Vec<Value> = v[s..s + count].to_vec();
+                                    for (k, val) in block.into_iter().enumerate() {
+                                        v[t + k] = val;
+                                    }
+                                }
+                                drop(v);
+                                return Ok(Value::Array(arr.clone()));
+                            }
                             "includes" => {
                                 let search = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow();

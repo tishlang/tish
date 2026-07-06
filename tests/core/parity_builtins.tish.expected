@@ -43,6 +43,8 @@ num-nan true false false
 num-max 9007199254740991 -9007199254740991
 objis true false true
 arrof 1 1,2,3
+lastidx 4 -1 0
+copywithin 4,5,3,4,5
 includes-nan true
 includes-no false
 parseint-hex 31
