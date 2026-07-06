@@ -1164,6 +1164,11 @@ fn has_cycle_from(
 pub struct MergedProgram {
     pub program: Program,
     pub statement_sources: Vec<PathBuf>,
+    /// #295: the ENTRY module's exported `(local_name, exported_name)` pairs, excluding `default`
+    /// (handled separately as `export default`). Merge unwraps exports into plain top-level
+    /// declarations, so `--target js --format bundle` re-emits these as a trailing `export { … }` to
+    /// produce a valid ES module. Sorted by local name for deterministic output.
+    pub entry_exports: Vec<(String, String)>,
 }
 
 fn merge_push(
@@ -1982,9 +1987,26 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
             }
         }
     }
+    // #295: capture the ENTRY module's exports (the entry is last — deps are emitted first). Merge
+    // already built `module_exports[idx]` as exported_name -> local_binding; re-express as
+    // (local, exported) for the JS bundle emitter, excluding `default` (emitted as `export default`).
+    let entry_exports: Vec<(String, String)> = modules
+        .len()
+        .checked_sub(1)
+        .map(|last| {
+            let mut v: Vec<(String, String)> = module_exports[last]
+                .iter()
+                .filter(|(exported, _)| exported.as_str() != "default")
+                .map(|(exported, local)| (local.clone(), exported.clone()))
+                .collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
     Ok(MergedProgram {
         program: Program { statements },
         statement_sources,
+        entry_exports,
     })
 }
 
