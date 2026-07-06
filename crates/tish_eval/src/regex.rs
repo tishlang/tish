@@ -170,7 +170,25 @@ pub fn string_replace(input: &str, search: &Value, replace: &Value) -> Value {
             }
         }
         Value::String(pattern) => {
-            Value::String(input.replacen(pattern.as_ref(), &replacement, 1).into())
+            let p = pattern.as_ref();
+            if replacement.contains('$') && !p.is_empty() {
+                if let Some(m) = input.find(p) {
+                    let mut out = String::with_capacity(input.len());
+                    out.push_str(&input[..m]);
+                    out.push_str(&tishlang_builtins::string::expand_replacement(
+                        &replacement,
+                        p,
+                        &input[..m],
+                        &input[m + p.len()..],
+                    ));
+                    out.push_str(&input[m + p.len()..]);
+                    Value::String(out.into())
+                } else {
+                    Value::String(input.into())
+                }
+            } else {
+                Value::String(input.replacen(p, &replacement, 1).into())
+            }
         }
         _ => Value::String(input.into()),
     }

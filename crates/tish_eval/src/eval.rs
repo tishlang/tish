@@ -2494,6 +2494,17 @@ impl Evaluator {
                                         Some(Value::String(ss)) => ss.to_string(),
                                         _ => String::new(),
                                     };
+                                    if replacement.contains('$') && !search.is_empty() {
+                                        let sref = s.as_ref();
+                                        if let Some(m) = sref.find(&search) {
+                                            let mut out = String::with_capacity(sref.len());
+                                            out.push_str(&sref[..m]);
+                                            out.push_str(&tishlang_builtins::string::expand_replacement(
+                                                &replacement, &search, &sref[..m], &sref[m + search.len()..]));
+                                            out.push_str(&sref[m + search.len()..]);
+                                            return Ok(Value::String(out.into()));
+                                        }
+                                    }
                                     return Ok(Value::String(s.replacen(&search, &replacement, 1).into()));
                                 }
                                 #[cfg(feature = "regex")]
@@ -2508,6 +2519,21 @@ impl Evaluator {
                                     Some(Value::String(ss)) => ss.to_string(),
                                     _ => String::new(),
                                 };
+                                if replacement.contains('$') && !search.is_empty() {
+                                    let sref = s.as_ref();
+                                    let mut out = String::with_capacity(sref.len());
+                                    let (mut last, mut start) = (0usize, 0usize);
+                                    while let Some(pos) = sref[start..].find(&search) {
+                                        let m = start + pos;
+                                        out.push_str(&sref[last..m]);
+                                        out.push_str(&tishlang_builtins::string::expand_replacement(
+                                            &replacement, &search, &sref[..m], &sref[m + search.len()..]));
+                                        last = m + search.len();
+                                        start = last;
+                                    }
+                                    out.push_str(&sref[last..]);
+                                    return Ok(Value::String(out.into()));
+                                }
                                 return Ok(Value::String(s.replace(&search, &replacement).into()));
                             }
                             "charAt" => {
