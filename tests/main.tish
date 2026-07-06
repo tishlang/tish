@@ -3463,6 +3463,8 @@ console.log("num-isint", Number.isInteger(5), Number.isInteger(5.5), Number.isIn
 console.log("num-safe", Number.isSafeInteger(9007199254740991), Number.isSafeInteger(9007199254740993))
 console.log("num-nan", Number.isNaN(0/0), Number.isNaN("x"), Number.isFinite(1/0))
 console.log("num-max", Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER)
+console.log("objis", Object.is(NaN, NaN), Object.is(0, -0), Object.is(2, 2))
+console.log("arrof", Array.of(7).length, Array.of(1, 2, 3).join(","))
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))

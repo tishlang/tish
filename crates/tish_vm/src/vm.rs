@@ -776,6 +776,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::object_assign(args)),
     );
     object_methods.insert(
+        "is".into(),
+        Value::native(|args: &[Value]| globals_builtins::object_is(args)),
+    );
+    object_methods.insert(
         "fromEntries".into(),
         Value::native(|args: &[Value]| globals_builtins::object_from_entries(args)),
     );
@@ -799,6 +803,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     array_static.insert(
         "isArray".into(),
         Value::native(|args: &[Value]| globals_builtins::array_is_array(args)),
+    );
+    array_static.insert(
+        "of".into(),
+        Value::native(|args: &[Value]| globals_builtins::array_of(args)),
     );
     array_static.insert(
         Arc::from("__call"),

@@ -48,6 +48,31 @@ pub fn array_is_array(args: &[Value]) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Array(_)) | Some(Value::NumberArray(_))))
 }
 
+/// `Array.of(...items)` — build an array from the args (unlike `Array(n)`, a single number is an
+/// element, not a length: `Array.of(7)` is `[7]`).
+pub fn array_of(args: &[Value]) -> Value {
+    Value::Array(VmRef::new(args.to_vec()))
+}
+
+/// `Object.is(a, b)` — SameValue: like `===`, but NaN equals NaN and `+0` is NOT equal to `-0`.
+pub fn object_is(args: &[Value]) -> Value {
+    let a = args.first().unwrap_or(&Value::Null);
+    let b = args.get(1).unwrap_or(&Value::Null);
+    let same = match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if x.is_nan() && y.is_nan() {
+                true
+            } else if *x == 0.0 && *y == 0.0 {
+                x.is_sign_negative() == y.is_sign_negative()
+            } else {
+                x == y
+            }
+        }
+        _ => a.strict_eq(b),
+    };
+    Value::Bool(same)
+}
+
 /// String(value) — convert value to string (JS String constructor as function).
 /// Uses JS `ToString` (arrays comma-join recursively, objects → "[object Object]"),
 /// not the inspect/display form.

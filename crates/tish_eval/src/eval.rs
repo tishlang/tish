@@ -330,6 +330,7 @@ impl Evaluator {
             object.insert("values".into(), Value::Native(Self::object_values));
             object.insert("entries".into(), Value::Native(Self::object_entries));
             object.insert("assign".into(), Value::Native(Self::object_assign));
+            object.insert("is".into(), Value::Native(natives::object_is));
             object.insert(
                 "fromEntries".into(),
                 Value::Native(Self::object_from_entries),
@@ -342,6 +343,7 @@ impl Evaluator {
 
             let mut array_obj = PropMap::with_capacity(3);
             array_obj.insert("isArray".into(), Value::Native(natives::array_is_array));
+            array_obj.insert("of".into(), Value::Native(natives::array_of));
             // `Array(n)` and `new Array(n)` constructor (issue #72).
             array_obj.insert("__call".into(), Value::Native(natives::array_construct));
             array_obj.insert("__construct".into(), Value::Native(natives::array_construct));

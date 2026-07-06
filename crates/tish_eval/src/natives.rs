@@ -345,6 +345,30 @@ pub fn array_construct(args: &[Value]) -> Result<Value, String> {
     Ok(Value::array(args.to_vec()))
 }
 
+/// `Array.of(...items)` — args become elements (a single number is NOT a length, unlike `Array(n)`).
+pub fn array_of(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::array(args.to_vec()))
+}
+
+/// `Object.is(a, b)` — SameValue: like `===`, but NaN equals NaN and `+0` is not `-0`.
+pub fn object_is(args: &[Value]) -> Result<Value, String> {
+    let a = args.first().unwrap_or(&Value::Null);
+    let b = args.get(1).unwrap_or(&Value::Null);
+    let same = match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if x.is_nan() && y.is_nan() {
+                true
+            } else if *x == 0.0 && *y == 0.0 {
+                x.is_sign_negative() == y.is_sign_negative()
+            } else {
+                x == y
+            }
+        }
+        _ => a.strict_eq(b),
+    };
+    Ok(Value::Bool(same))
+}
+
 /// `String(value)` as a function: JS `ToString` coercion (arrays comma-join recursively,
 /// objects → "[object Object]", null → "null"), matching the VM/native `string_convert`.
 pub fn string_convert(args: &[Value]) -> Result<Value, String> {
