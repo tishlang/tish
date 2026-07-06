@@ -4028,6 +4028,15 @@ impl Evaluator {
     /// `.entries()` — into a `Vec` by calling `next()` until `done`. Returns `None` when `v`
     /// is not such an object. Shared by `for…of` and spread so both treat iterators like JS.
     fn drain_eval_iterator(&self, v: &Value) -> Option<Vec<Value>> {
+        // A string spreads as its characters (`[...s]`, `f(...s)`); for-of over a string is handled
+        // separately at the loop site, but spread routes through here. (#440)
+        if let Value::String(s) = v {
+            return Some(
+                s.chars()
+                    .map(|c| Value::String(std::sync::Arc::from(c.to_string())))
+                    .collect(),
+            );
+        }
         if !matches!(v, Value::Object(_)) {
             return None;
         }

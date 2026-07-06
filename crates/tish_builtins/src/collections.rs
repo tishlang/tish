@@ -320,6 +320,20 @@ pub fn set_instance(initial: &[Value]) -> Value {
             }),
         );
     }
+    // `__drain__`: the default-iteration array a Set yields (its elements). `drain_iterator`
+    // (and the interp/native equivalents) check `__drain__` FIRST, so exposing it here makes a
+    // Set directly iterable — `[...set]`, `for (x of set)`, `Array.from(set)` — across all three
+    // backends with no changes to any spread/for-of site. (#440)
+    {
+        let s = store.clone();
+        m.insert(
+            Arc::from("__drain__"),
+            Value::native(move |_args: &[Value]| {
+                let out: Vec<Value> = s.borrow().keys().map(|k| k.0.clone()).collect();
+                Value::Array(VmRef::new(out))
+            }),
+        );
+    }
 
     Value::object(m)
 }
@@ -439,6 +453,23 @@ pub fn map_instance(pairs: &[Value]) -> Value {
                     .map(|(k, v)| Value::Array(VmRef::new(vec![k.0.clone(), v.clone()])))
                     .collect();
                 crate::iterator::array_iterator(pairs)
+            }),
+        );
+    }
+    // `__drain__`: a Map's default iteration yields `[key, value]` entries. Exposed so the shared
+    // `drain_iterator` (checked first) makes a Map directly iterable — `[...map]`, `for (x of map)`,
+    // `Array.from(map)` — across interp/vm/native with no spread/for-of site changes. (#440)
+    {
+        let s = store.clone();
+        m.insert(
+            Arc::from("__drain__"),
+            Value::native(move |_args: &[Value]| {
+                let pairs: Vec<Value> = s
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| Value::Array(VmRef::new(vec![k.0.clone(), v.clone()])))
+                    .collect();
+                Value::Array(VmRef::new(pairs))
             }),
         );
     }

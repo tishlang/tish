@@ -982,6 +982,12 @@ pub fn object_has(obj: &Value, key: &Value) -> bool {
 /// A missing/absent `done` is treated as truthy so a malformed object can't spin forever;
 /// the native iterators always set `done`, so well-formed iteration is exact.
 pub fn drain_iterator(obj: &Value) -> Option<Vec<Value>> {
+    // A string iterates as its characters, each a single-char string (`[...s]`, `for (c of s)`,
+    // call-spread `f(...s)`, `Array.from(s)`). Every caller of this helper is a spread/for-of
+    // context, so treating a string as iterable here is always correct. (#440)
+    if let Value::String(s) = obj {
+        return Some(s.chars().map(|c| Value::String(c.to_string().into())).collect());
+    }
     if !matches!(obj, Value::Object(_)) {
         return None;
     }
