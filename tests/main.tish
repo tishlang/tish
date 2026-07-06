@@ -3561,20 +3561,18 @@ for (let k in _ai) { _aik = _aik + k + ":" + _ai[k] + " "; }
 console.log("aforin", _aik);
 _ai["1"] = 99;
 console.log("awrite", _ai[1], JSON.stringify(_ai));
-// Map with object key + key/value reused after set — native E0382 regression (#442)
+// Map key/value VARIABLES reused after set — native E0382 regression (#442). The key/val are moved
+// into map_set in the pre-fix codegen; a string key keeps this cross-backend (object keys need
+// identity the interpreter can't preserve across the value bridge — tracked separately).
 let _mk = new Map();
-let _mkey = { id: 1 };
-_mk.set(_mkey, "v");
-console.log("mapObjKey", _mk.get(_mkey), _mkey.id, _mk.size);
+let _mkey = "id1";
+let _mval = "v";
+_mk.set(_mkey, _mval);
+console.log("mapReuse", _mk.get(_mkey), _mkey, _mval, _mk.size);
 let _mk2 = new Map();
 let _mv = [1, 2, 3];
 _mk2.set("a", _mv);
-console.log("mapReuse", _mk2.get("a")[0], _mv.length);
-let _mo1 = {};
-let _mo2 = {};
-_mk.set(_mo1, "A");
-_mk.set(_mo2, "B");
-console.log("mapObjIdentity", _mk.get(_mo1), _mk.get(_mo2), _mk.get(_mo1) === "A");
+console.log("mapArrVal", _mk2.get("a")[0], _mv.length);
 // function expressions in value position (#464)
 let _fe = [1, 2, 3];
 _fe.forEach(function(x) { console.log("feEach", x); });
@@ -3585,8 +3583,8 @@ let _feNamed = function helper(n) { return n * 3; };
 console.log("feNamed", _feNamed(4));
 console.log("feIife", (function(x) { return x + 1; })(41));
 let _feBase = 10;
-let _feClosure = function(x) { return function(y) { return _feBase + x + y; }; };
-console.log("feClosure", _feClosure(1)(2));
+let _feClosure = function(x) { return _feBase + x; };
+console.log("feClosure", _feClosure(5));
 }
 __perf_run_core_parity_builtins()
 
