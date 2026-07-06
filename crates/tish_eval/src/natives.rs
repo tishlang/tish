@@ -305,6 +305,17 @@ math_unary!(math_atanh, atanh);
 math_unary!(math_cbrt, cbrt);
 math_unary!(math_log2, log2);
 math_unary!(math_log10, log10);
+math_unary!(math_expm1, exp_m1);
+math_unary!(math_log1p, ln_1p);
+
+pub fn math_clz32(args: &[Value]) -> Result<Value, String> {
+    let n = tishlang_core::to_uint32(get_num(args.first().unwrap_or(&Value::Null)));
+    Ok(Value::Number(n.leading_zeros() as f64))
+}
+pub fn math_fround(args: &[Value]) -> Result<Value, String> {
+    let x = get_num(args.first().unwrap_or(&Value::Null));
+    Ok(Value::Number(x as f32 as f64))
+}
 
 pub fn array_is_array(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Array(_)))))
