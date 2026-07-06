@@ -417,16 +417,25 @@ pub fn filter(arr: &Value, callback: &Value) -> Value {
     }
 }
 
-pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
+/// `initial` is `None` when no initial value was passed (`arr.reduce(fn)`) and `Some` for an explicit
+/// one (`arr.reduce(fn, x)`, INCLUDING `arr.reduce(fn, null)`). This distinction matters: reducing an
+/// empty array with NO initial value is a `TypeError` in JS, while an explicit initial (even `null`)
+/// is returned as-is. A `Value::Null` sentinel can't tell the two apart — hence `Option`.
+pub fn reduce(arr: &Value, callback: &Value, initial: Option<&Value>) -> Value {
     // Packed fast path: fold the `Vec<f64>` snapshot directly. Same no-initial rule as the boxed
     // path (absent init → first element as the seed, scan from index 1).
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         // `reduce` passes `(accumulator, element, index, array)` — the array is the 4th arg.
         let arr_value = arr.clone();
-        let (start_idx, mut acc) = if matches!(initial, Value::Null) && !data.is_empty() {
-            (1usize, Value::Number(data[0]))
-        } else {
-            (0usize, initial.clone())
+        let (start_idx, mut acc) = match initial {
+            Some(v) => (0usize, v.clone()),
+            None if !data.is_empty() => (1usize, Value::Number(data[0])),
+            None => {
+                tishlang_core::set_pending_throw(tishlang_core::type_error(
+                    "Reduce of empty array with no initial value",
+                ));
+                return Value::Null;
+            }
         };
         // `skip(start_idx)` preserves the true element index for the callback's 3rd arg.
         for (i, &x) in data.iter().enumerate().skip(start_idx) {
@@ -440,11 +449,15 @@ pub fn reduce(arr: &Value, callback: &Value, initial: &Value) -> Value {
         let arr_borrow = arr.borrow().clone(); // #382: snapshot; drop the guard before any callback
         let arr_value = Value::Array(arr.clone()); // 4th callback arg (JS `array`)
         let len = arr_borrow.len();
-        let (start_idx, mut acc) = if matches!(initial, Value::Null) && !arr_borrow.is_empty() {
-            // No initial value: use first element as acc, start from index 1
-            (1, arr_borrow[0].clone())
-        } else {
-            (0, initial.clone())
+        let (start_idx, mut acc) = match initial {
+            Some(v) => (0, v.clone()),
+            None if !arr_borrow.is_empty() => (1, arr_borrow[0].clone()),
+            None => {
+                tishlang_core::set_pending_throw(tishlang_core::type_error(
+                    "Reduce of empty array with no initial value",
+                ));
+                return Value::Null;
+            }
         };
         for i in start_idx..len {
             if tishlang_core::has_pending_throw() { return acc; } // #303
@@ -974,14 +987,14 @@ mod packed_hof_tests {
         let n = na(&[3.0, 1.0, 4.0, 1.0, 5.0]);
         let add = cb_num(|acc, x| acc + x);
         // With init.
-        assert_eq!(reduce(&n, &add, &Value::Number(0.0)).as_number(), Some(14.0));
-        // No init → first element seeds, scan from index 1 (same total here).
-        assert_eq!(reduce(&n, &add, &Value::Null).as_number(), Some(14.0));
+        assert_eq!(reduce(&n, &add, Some(&Value::Number(0.0))).as_number(), Some(14.0));
+        // No init (None) → first element seeds, scan from index 1 (same total here).
+        assert_eq!(reduce(&n, &add, None).as_number(), Some(14.0));
         // Index arg: callback (acc, _elem, index) — sum the indices 0..5 = 10.
         let sum_idx = Value::native(|a: &[Value]| {
             Value::Number(a[0].as_number().unwrap() + a[2].as_number().unwrap())
         });
-        assert_eq!(reduce(&n, &sum_idx, &Value::Number(0.0)).as_number(), Some(10.0));
+        assert_eq!(reduce(&n, &sum_idx, Some(&Value::Number(0.0))).as_number(), Some(10.0));
     }
 
     #[test]

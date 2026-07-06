@@ -224,7 +224,11 @@ fn json_stringify_into_guarded(buf: &mut String, value: &Value, ancestors: &mut 
 /// to `buf`. Optimised for the common case where the input is ASCII and
 /// contains no characters that need escaping — we fast-pass the bytes
 /// straight through, only falling into the per-char path on a hit.
-fn escape_json_string_into(buf: &mut String, s: &str) {
+/// Append `s` to `buf` as a JSON string body (WITHOUT the surrounding quotes), escaping `"`, `\`,
+/// and every control char < 0x20 (`\n \r \t \b \f`, else `\u00xx`). The single source of truth for
+/// JSON string escaping, shared by the vm/native path here and the interpreter's `JSON.stringify`
+/// (which otherwise hand-rolled an escaper that missed `\b`/`\f`/`\u00xx` and emitted invalid JSON).
+pub fn escape_json_string_into(buf: &mut String, s: &str) {
     let bytes = s.as_bytes();
     let mut start = 0usize;
     for (i, &b) in bytes.iter().enumerate() {
