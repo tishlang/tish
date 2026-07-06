@@ -61,3 +61,7 @@ negzero-template 0
 negzero-inspect -0
 cpat 97 99
 substr ell lo
+from-str a,b,c
+from-set 1,2,3
+from-len 0,10,20
+from-map 2,4,6

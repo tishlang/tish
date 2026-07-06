@@ -926,6 +926,9 @@ pub fn array_is_array(args: &[Value]) -> Value {
 pub fn array_of(args: &[Value]) -> Value {
     tishlang_builtins::globals::array_of(args)
 }
+pub fn array_from(args: &[Value]) -> Value {
+    tishlang_builtins::globals::array_from(args)
+}
 pub fn object_is(args: &[Value]) -> Value {
     tishlang_builtins::globals::object_is(args)
 }

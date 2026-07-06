@@ -809,6 +809,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::array_of(args)),
     );
     array_static.insert(
+        "from".into(),
+        Value::native(|args: &[Value]| globals_builtins::array_from(args)),
+    );
+    array_static.insert(
         Arc::from("__call"),
         Value::native(|args: &[Value]| construct_builtin::array_construct(args)),
     );
