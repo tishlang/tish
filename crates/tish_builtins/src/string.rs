@@ -525,12 +525,15 @@ fn pad_impl(s: &Value, target_len: &Value, pad: &Value, at_start: bool) -> Value
             Value::Number(n) => *n as usize,
             _ => return Value::String(s.clone()),
         };
+        // An *explicit* empty fill string means "no padding" (spec: `padStart(n, "")` → original,
+        // unchanged); only an ABSENT pad arg (`Value::Null`) defaults to a space. The old
+        // `if !p.is_empty()` guard conflated the two, space-padding on an explicit `""`.
         let pad_str = match pad {
-            Value::String(p) if !p.is_empty() => p.as_str(),
+            Value::String(p) => p.as_str(),
             _ => " ",
         };
         let char_count = s.chars().count();
-        if char_count >= target_len {
+        if char_count >= target_len || pad_str.is_empty() {
             return Value::String(s.clone());
         }
         let needed = target_len - char_count;

@@ -16,6 +16,12 @@ imul-small 12
 imul-u32 -5
 imul-over -1294967296
 imul-neg 25
+sign-neg0 -Infinity
+sign-pos0 Infinity
+sign-neg -1
+pad-empty x
+pad-space   x
+padend-empty x
 includes-nan true
 includes-no false
 parseint-hex 31

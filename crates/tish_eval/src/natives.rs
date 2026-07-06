@@ -276,7 +276,8 @@ pub fn math_sign(args: &[Value]) -> Result<Value, String> {
     } else if n < 0.0 {
         -1.0
     } else {
-        0.0
+        // ±0 → return the input so `Math.sign(-0)` is `-0` (per ES); bare `0.0` drops the sign.
+        n
     };
     Ok(Value::Number(sign))
 }

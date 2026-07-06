@@ -119,7 +119,9 @@ pub fn sign(args: &[Value]) -> Value {
     } else if n < 0.0 {
         -1.0
     } else {
-        0.0
+        // ±0 → return the input unchanged so `Math.sign(-0)` is `-0` (per ES);
+        // `n < 0.0` is false for -0, so it lands here — bare `0.0` would drop the sign.
+        n
     })
 }
 
