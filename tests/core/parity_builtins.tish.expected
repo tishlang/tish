@@ -41,6 +41,8 @@ num-isint true false false
 num-safe true false
 num-nan true false false
 num-max 9007199254740991 -9007199254740991
+objis true false true
+arrof 1 1,2,3
 includes-nan true
 includes-no false
 parseint-hex 31
