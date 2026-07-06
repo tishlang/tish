@@ -325,6 +325,43 @@ pub fn trim_start(s: &Value) -> Value {
     }
 }
 
+/// Pure `String.prototype.normalize` core (ECMA-262 §22.1.3.13). `form` is one of NFC/NFD/NFKC/NFKD;
+/// returns `None` for an unrecognized form so the caller can surface a `RangeError`. Shared by every
+/// backend so interp/vm/native stay byte-identical.
+pub fn normalize_form(s: &str, form: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+    match form {
+        "NFC" => Some(s.nfc().collect()),
+        "NFD" => Some(s.nfd().collect()),
+        "NFKC" => Some(s.nfkc().collect()),
+        "NFKD" => Some(s.nfkd().collect()),
+        _ => None,
+    }
+}
+
+/// `String.prototype.normalize(form?)` — core-`Value` entry (vm/native). An omitted form defaults to
+/// NFC; an invalid form parks a catchable `RangeError`.
+pub fn normalize(s: &Value, form: &Value) -> Value {
+    let input = match s {
+        Value::String(s) => s.as_ref(),
+        _ => return Value::Null,
+    };
+    let f: String = match form {
+        Value::Null => "NFC".to_string(),
+        Value::String(f) => f.to_string(),
+        v => v.to_display_string(),
+    };
+    match normalize_form(input, &f) {
+        Some(out) => Value::String(out.into()),
+        None => {
+            tishlang_core::set_pending_throw(tishlang_core::range_error(
+                "The normalization form should be one of NFC, NFD, NFKC, NFKD.",
+            ));
+            Value::Null
+        }
+    }
+}
+
 pub fn trim_end(s: &Value) -> Value {
     if let Value::String(s) = s {
         Value::String(s.trim_end().into())

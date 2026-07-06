@@ -6998,6 +6998,13 @@ impl Codegen {
                         "trimEnd" => {
                             return Ok(format!("tishlang_runtime::string_trim_end(&{})", obj_expr));
                         }
+                        "normalize" => {
+                            let form = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_normalize(&{}, &{})",
+                                obj_expr, form
+                            ));
+                        }
                         "codePointAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(

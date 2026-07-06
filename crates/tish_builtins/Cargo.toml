@@ -11,6 +11,7 @@ repository = { workspace = true }
 ahash = "0.8.11"
 indexmap = "2"
 rand = "0.10.1"
+unicode-normalization = "0.1.25"
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 
 [features]
