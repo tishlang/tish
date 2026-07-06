@@ -377,9 +377,23 @@ impl Evaluator {
                 true,
             );
 
-            // `Number(value)` coercion as a callable global (issue #36).
-            let mut number_obj = PropMap::with_capacity(1);
+            // `Number(value)` coercion as a callable global (issue #36) + the `Number.*` statics.
+            let mut number_obj = PropMap::with_capacity(15);
             number_obj.insert("__call".into(), Value::Native(natives::number_convert));
+            number_obj.insert("isInteger".into(), Value::Native(natives::number_is_integer));
+            number_obj.insert("isSafeInteger".into(), Value::Native(natives::number_is_safe_integer));
+            number_obj.insert("isNaN".into(), Value::Native(natives::number_is_nan));
+            number_obj.insert("isFinite".into(), Value::Native(natives::number_is_finite));
+            number_obj.insert("parseInt".into(), Value::Native(natives::parse_int));
+            number_obj.insert("parseFloat".into(), Value::Native(natives::parse_float));
+            number_obj.insert("MAX_SAFE_INTEGER".into(), Value::Number(9_007_199_254_740_991.0));
+            number_obj.insert("MIN_SAFE_INTEGER".into(), Value::Number(-9_007_199_254_740_991.0));
+            number_obj.insert("EPSILON".into(), Value::Number(f64::EPSILON));
+            number_obj.insert("MAX_VALUE".into(), Value::Number(f64::MAX));
+            number_obj.insert("MIN_VALUE".into(), Value::Number(5e-324));
+            number_obj.insert("POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY));
+            number_obj.insert("NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY));
+            number_obj.insert("NaN".into(), Value::Number(f64::NAN));
             s.set("Number".into(), Value::object(number_obj), true);
 
             s.set(

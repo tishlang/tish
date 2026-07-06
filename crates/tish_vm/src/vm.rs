@@ -816,12 +816,26 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     string_static.insert(Arc::from("__call"), string_convert_fn);
     g.insert("String".into(), value_object_from_map(string_static));
 
-    // Number(value) coercion as a callable global (issue #36).
+    // Number(value) coercion as a callable global (issue #36) + the `Number.*` statics.
     let mut number_static = ObjectMap::default();
     number_static.insert(
         Arc::from("__call"),
         Value::native(|args: &[Value]| globals_builtins::number_convert(args)),
     );
+    number_static.insert(Arc::from("isInteger"), Value::native(|a: &[Value]| globals_builtins::number_is_integer(a)));
+    number_static.insert(Arc::from("isSafeInteger"), Value::native(|a: &[Value]| globals_builtins::number_is_safe_integer(a)));
+    number_static.insert(Arc::from("isNaN"), Value::native(|a: &[Value]| globals_builtins::number_is_nan(a)));
+    number_static.insert(Arc::from("isFinite"), Value::native(|a: &[Value]| globals_builtins::number_is_finite(a)));
+    number_static.insert(Arc::from("parseInt"), Value::native(|a: &[Value]| globals_builtins::parse_int(a)));
+    number_static.insert(Arc::from("parseFloat"), Value::native(|a: &[Value]| globals_builtins::parse_float(a)));
+    number_static.insert(Arc::from("MAX_SAFE_INTEGER"), Value::Number(9_007_199_254_740_991.0));
+    number_static.insert(Arc::from("MIN_SAFE_INTEGER"), Value::Number(-9_007_199_254_740_991.0));
+    number_static.insert(Arc::from("EPSILON"), Value::Number(f64::EPSILON));
+    number_static.insert(Arc::from("MAX_VALUE"), Value::Number(f64::MAX));
+    number_static.insert(Arc::from("MIN_VALUE"), Value::Number(5e-324));
+    number_static.insert(Arc::from("POSITIVE_INFINITY"), Value::Number(f64::INFINITY));
+    number_static.insert(Arc::from("NEGATIVE_INFINITY"), Value::Number(f64::NEG_INFINITY));
+    number_static.insert(Arc::from("NaN"), Value::Number(f64::NAN));
     g.insert("Number".into(), value_object_from_map(number_static));
 
     // JSX / Lattish: stubs for bytecode VM when no DOM (e.g. console). Override via set_global in browser.

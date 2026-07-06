@@ -37,6 +37,10 @@ isnan-str false true false
 isfinite-str true false true
 trimstart [x  ]
 trimend [  x]
+num-isint true false false
+num-safe true false
+num-nan true false false
+num-max 9007199254740991 -9007199254740991
 includes-nan true
 includes-no false
 parseint-hex 31

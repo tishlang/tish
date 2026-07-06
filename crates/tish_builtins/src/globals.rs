@@ -83,6 +83,28 @@ pub fn to_number(v: &Value) -> f64 {
     }
 }
 
+/// `Number.isInteger(v)` — true iff `v` IS a finite Number with no fractional part. No coercion
+/// (`Number.isInteger("3")` is `false`, unlike a bare `isNaN`-style coercion).
+pub fn number_is_integer(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_finite() && n.fract() == 0.0))
+}
+
+/// `Number.isSafeInteger(v)` — `isInteger` AND exactly representable (|v| ≤ 2^53 − 1).
+pub fn number_is_safe_integer(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(),
+        Some(Value::Number(n)) if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0))
+}
+
+/// `Number.isNaN(v)` — true iff `v` IS the number NaN. No coercion (unlike the global `isNaN`).
+pub fn number_is_nan(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_nan()))
+}
+
+/// `Number.isFinite(v)` — true iff `v` is a finite Number. No coercion (unlike the global `isFinite`).
+pub fn number_is_finite(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_finite()))
+}
+
 /// Parse a string as JS `Number` does: trimmed; `""` → 0; `0x`/`0o`/`0b` radix prefixes;
 /// `Infinity`/`-Infinity`; plain decimal/float; anything else → NaN. Public so the
 /// tree-walk interpreter (distinct `Value` type) shares the exact coercion.

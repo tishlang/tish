@@ -935,6 +935,18 @@ pub fn string_convert(args: &[Value]) -> Value {
 pub fn number_convert(args: &[Value]) -> Value {
     builtins_number_convert(args)
 }
+pub fn number_is_integer(args: &[Value]) -> Value {
+    tishlang_builtins::globals::number_is_integer(args)
+}
+pub fn number_is_safe_integer(args: &[Value]) -> Value {
+    tishlang_builtins::globals::number_is_safe_integer(args)
+}
+pub fn number_is_nan(args: &[Value]) -> Value {
+    tishlang_builtins::globals::number_is_nan(args)
+}
+pub fn number_is_finite(args: &[Value]) -> Value {
+    tishlang_builtins::globals::number_is_finite(args)
+}
 
 #[cfg(feature = "process")]
 pub fn process_exit(args: &[Value]) -> Value {
