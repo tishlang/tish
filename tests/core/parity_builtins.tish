@@ -124,3 +124,13 @@ let _pe = "none"; try { (1).toPrecision(0); } catch (e) { _pe = e.name; }
 console.log("precErr", _pe);
 console.log("hasOwn", Object.hasOwn({a:1}, "a"), Object.hasOwn({a:1}, "b"), Object.hasOwn({a:1}, "toString"));
 console.log("hasOwnArr", Object.hasOwn([9,8], 0), Object.hasOwn([9,8], 5), Object.hasOwn([9], "length"));
+// String.normalize NFC/NFD/NFKC/NFKD (#437)
+let _nc = "\u00e9";      // composed e-acute
+let _nd = "e\u0301";     // decomposed e + combining acute
+console.log("normEq", _nc === _nd, _nc.length, _nd.length);
+console.log("normNFC", _nc.normalize("NFC") === _nd.normalize("NFC"), _nd.normalize("NFC").length);
+console.log("normNFD", _nc.normalize("NFD") === _nd.normalize("NFD"), _nc.normalize("NFD").length);
+console.log("normDefault", "\u00e9".normalize() === "\u00e9".normalize("NFC"));
+console.log("normNFKC", "\ufb01".normalize("NFKC"), "\ufb01".normalize("NFKD"));
+let _nerr = "none"; try { "x".normalize("BOGUS"); } catch (e) { _nerr = e.name; }
+console.log("normErr", _nerr);

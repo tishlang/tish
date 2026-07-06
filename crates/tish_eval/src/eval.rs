@@ -2573,6 +2573,26 @@ impl Evaluator {
                             "trimEnd" => {
                                 return Ok(Value::String(s.trim_end().into()));
                             }
+                            "normalize" => {
+                                let form = match arg_vals.first() {
+                                    None | Some(Value::Null) => "NFC".to_string(),
+                                    Some(Value::String(f)) => f.to_string(),
+                                    Some(v) => v.to_string(),
+                                };
+                                match tishlang_builtins::string::normalize_form(s, &form) {
+                                    Some(out) => return Ok(Value::String(out.into())),
+                                    None => {
+                                        let err = crate::natives::range_error_construct(&[
+                                            Value::String(
+                                                "The normalization form should be one of NFC, NFD, NFKC, NFKD."
+                                                    .into(),
+                                            ),
+                                        ])
+                                        .unwrap_or(Value::Null);
+                                        return Err(EvalError::Throw(err));
+                                    }
+                                }
+                            }
                             "toUpperCase" => {
                                 return Ok(Value::String(s.to_uppercase().into()));
                             }

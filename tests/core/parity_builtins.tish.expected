@@ -97,3 +97,9 @@ precBig 123.00 1.00e+6
 precErr RangeError
 hasOwn true false false
 hasOwnArr true false true
+normEq false 1 2
+normNFC true 1
+normNFD true 2
+normDefault true
+normNFKC fi fi
+normErr RangeError

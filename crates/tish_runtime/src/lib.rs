@@ -143,8 +143,9 @@ pub use tishlang_builtins::string::{
     slice as string_slice_impl, split as string_split_impl, split_limit as string_split_limit_impl,
     starts_with as string_starts_with_impl, substr as string_substr_impl,
     substring as string_substring_impl,
-    to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
-    trim as string_trim, trim_end as string_trim_end, trim_start as string_trim_start,
+    normalize as string_normalize, to_lower_case as string_to_lower_case,
+    to_upper_case as string_to_upper_case, trim as string_trim, trim_end as string_trim_end,
+    trim_start as string_trim_start,
 };
 
 // Wrapper functions to maintain API compatibility
