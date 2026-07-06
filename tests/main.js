@@ -3459,6 +3459,16 @@ console.log("scarr", JSON.stringify(structuredClone([1,[2,3]])));
 let _scc = { k: 1 }; _scc.self = _scc;
 let _scd = structuredClone(_scc);
 console.log("sccycle", _scd.self === _scd);
+// ES2023 change-array-by-copy — toReversed/toSorted/with/toSpliced (#437)
+let _bc = [3, 1, 2];
+console.log("bcSorted", JSON.stringify(_bc.toSorted()), JSON.stringify(_bc));
+console.log("bcSortedCmp", JSON.stringify([3,1,2,10].toSorted((x,y)=>x-y)));
+console.log("bcReversed", JSON.stringify(_bc.toReversed()), JSON.stringify(_bc));
+console.log("bcWith", JSON.stringify(_bc.with(1, 99)), JSON.stringify([1,2,3].with(-1, 9)));
+console.log("bcSpliced", JSON.stringify([1,2,3,4].toSpliced(1, 2, "a", "b")), JSON.stringify([1,2,3,4].toSpliced(1)));
+let _bcerr = "none";
+try { [1,2,3].with(5, 0); } catch (e) { _bcerr = e.name; }
+console.log("bcWithErr", _bcerr);
 }
 
 {

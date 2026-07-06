@@ -189,6 +189,22 @@ pub fn type_error(message: impl Into<String>) -> Value {
     Value::object(e)
 }
 
+/// A catchable `RangeError` with an arbitrary message (`{ name: "RangeError", message }`), matching the
+/// VM/interpreter/node shape. Used to PARK a pending throw from a shared builtin that returns a plain
+/// `Value` (e.g. `[1,2].with(5, x)` with an out-of-range index).
+pub fn range_error(message: impl Into<String>) -> Value {
+    let mut e = ObjectMap::default();
+    e.insert(
+        std::sync::Arc::from("name"),
+        Value::String("RangeError".into()),
+    );
+    e.insert(
+        std::sync::Arc::from("message"),
+        Value::String(message.into().into()),
+    );
+    Value::object(e)
+}
+
 /// A catchable `TypeError` for reading a property/index of the nullish value — the `{ name, message }`
 /// shape matches the VM/interpreter/node (`e.name === "TypeError"`). Used to PARK a pending throw in
 /// the native/runtime `get_prop`/`get_index` null arm (#425), so `null.length` / `null[0]` surface a

@@ -3939,6 +3939,21 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                             arr_builtins::flat_map(&bv, &cb)
                         }),
                         "reverse" => make_native_fn(move |_| arr_builtins::reverse(&bv)),
+                        "toReversed" => make_native_fn(move |_| arr_builtins::to_reversed(&bv)),
+                        "toSorted" => {
+                            make_native_fn(move |args| arr_builtins::to_sorted(&bv, args.first()))
+                        }
+                        "with" => make_native_fn(move |args| {
+                            let i = args.first().cloned().unwrap_or(Value::Null);
+                            let v = args.get(1).cloned().unwrap_or(Value::Null);
+                            arr_builtins::with(&bv, &i, &v)
+                        }),
+                        "toSpliced" => make_native_fn(move |args| {
+                            let start = args.first().cloned().unwrap_or(Value::Null);
+                            let dc = args.get(1).cloned();
+                            let items: Vec<Value> = args.iter().skip(2).cloned().collect();
+                            arr_builtins::to_spliced(&bv, &start, dc.as_ref(), &items)
+                        }),
                         "fill" => make_native_fn(move |args| {
                             let v = args.first().cloned().unwrap_or(Value::Null);
                             let s = args.get(1).cloned().unwrap_or(Value::Null);
@@ -4152,6 +4167,28 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     let delete_count = args.get(1).map(|v| v as &Value);
                     let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
                     arr_builtins::splice(
+                        &Value::Array(a_clone.clone()),
+                        start,
+                        delete_count,
+                        &items,
+                    )
+                }),
+                "toReversed" => make_native_fn(move |_: &[Value]| {
+                    arr_builtins::to_reversed(&Value::Array(a_clone.clone()))
+                }),
+                "toSorted" => make_native_fn(move |args: &[Value]| {
+                    arr_builtins::to_sorted(&Value::Array(a_clone.clone()), args.first())
+                }),
+                "with" => make_native_fn(move |args: &[Value]| {
+                    let i = args.first().cloned().unwrap_or(Value::Null);
+                    let v = args.get(1).cloned().unwrap_or(Value::Null);
+                    arr_builtins::with(&Value::Array(a_clone.clone()), &i, &v)
+                }),
+                "toSpliced" => make_native_fn(move |args: &[Value]| {
+                    let start = args.first().unwrap_or(&Value::Null);
+                    let delete_count = args.get(1).map(|v| v as &Value);
+                    let items: Vec<Value> = args.get(2..).unwrap_or(&[]).to_vec();
+                    arr_builtins::to_spliced(
                         &Value::Array(a_clone.clone()),
                         start,
                         delete_count,

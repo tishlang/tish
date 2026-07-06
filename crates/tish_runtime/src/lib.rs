@@ -126,6 +126,8 @@ pub use tishlang_builtins::array::{
     sort_by_keys as array_sort_by_keys, sort_default as array_sort_default,
     sort_numeric_asc as array_sort_numeric_asc, sort_numeric_desc as array_sort_numeric_desc,
     sort_with_comparator as array_sort_with_comparator, splice as array_splice_impl,
+    to_reversed as array_to_reversed, to_sorted as array_to_sorted,
+    to_spliced as array_to_spliced, with as array_with,
     unshift as array_unshift_impl,
 };
 
