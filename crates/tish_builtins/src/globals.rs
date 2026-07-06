@@ -162,6 +162,27 @@ fn deep_clone(v: &Value, seen: &mut Vec<(*const (), Value)>) -> Value {
     }
 }
 
+/// `Object.hasOwn(obj, key)` (ES2022) — true if `key` is an OWN property of `obj`. For arrays an
+/// in-range integer index or `"length"` counts; for plain objects, a key present in the string map.
+pub fn object_has_own(args: &[Value]) -> Value {
+    let key = match args.get(1) {
+        Some(Value::String(s)) => s.to_string(),
+        Some(Value::Number(n)) => tishlang_core::js_number_to_string(*n),
+        Some(v) => v.to_display_string(),
+        None => return Value::Bool(false),
+    };
+    match args.first() {
+        Some(Value::Object(obj)) => Value::Bool(obj.borrow().strings.contains_key(key.as_str())),
+        Some(Value::Array(arr)) => Value::Bool(
+            key == "length" || matches!(key.parse::<usize>(), Ok(i) if i < arr.borrow().len()),
+        ),
+        Some(Value::NumberArray(arr)) => Value::Bool(
+            key == "length" || matches!(key.parse::<usize>(), Ok(i) if i < arr.borrow().len()),
+        ),
+        _ => Value::Bool(false),
+    }
+}
+
 /// `Object.is(a, b)` — SameValue: like `===`, but NaN equals NaN and `+0` is NOT equal to `-0`.
 pub fn object_is(args: &[Value]) -> Value {
     let a = args.first().unwrap_or(&Value::Null);

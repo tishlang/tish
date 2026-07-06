@@ -114,3 +114,13 @@ console.log("bcSpliced", JSON.stringify([1,2,3,4].toSpliced(1, 2, "a", "b")), JS
 let _bcerr = "none";
 try { [1,2,3].with(5, 0); } catch (e) { _bcerr = e.name; }
 console.log("bcWithErr", _bcerr);
+// Number.toExponential/toPrecision (half-away ties) + Object.hasOwn (#437)
+console.log("exp", (12345).toExponential(2), (0.00001).toExponential(2), (2.5).toExponential(0));
+console.log("expNo", (12345).toExponential(), (1).toExponential());
+console.log("prec", (3.14159).toPrecision(3), (123.456).toPrecision(2), (0.0001234).toPrecision(2));
+console.log("precTie", (2.5).toPrecision(1), (1.25).toPrecision(2), (100.5).toPrecision(3), (2.675).toPrecision(3));
+console.log("precBig", (123).toPrecision(5), (1000000).toPrecision(3));
+let _pe = "none"; try { (1).toPrecision(0); } catch (e) { _pe = e.name; }
+console.log("precErr", _pe);
+console.log("hasOwn", Object.hasOwn({a:1}, "a"), Object.hasOwn({a:1}, "b"), Object.hasOwn({a:1}, "toString"));
+console.log("hasOwnArr", Object.hasOwn([9,8], 0), Object.hasOwn([9,8], 5), Object.hasOwn([9], "length"));

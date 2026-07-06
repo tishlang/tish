@@ -394,6 +394,23 @@ pub fn object_is(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(same))
 }
 
+/// `Object.hasOwn(obj, key)` (ES2022) — true if `key` is an OWN property of `obj`. Mirrors the shared
+/// `tishlang_builtins::globals::object_has_own` on the interpreter's `Value` type.
+pub fn object_has_own(args: &[Value]) -> Result<Value, String> {
+    let key = match args.get(1) {
+        Some(Value::String(s)) => s.to_string(),
+        Some(v) => v.to_string(),
+        None => return Ok(Value::Bool(false)),
+    };
+    Ok(match args.first() {
+        Some(Value::Object(obj)) => Value::Bool(obj.borrow().strings.contains_key(key.as_str())),
+        Some(Value::Array(arr)) => Value::Bool(
+            key == "length" || matches!(key.parse::<usize>(), Ok(i) if i < arr.borrow().len()),
+        ),
+        _ => Value::Bool(false),
+    })
+}
+
 /// `String(value)` as a function: JS `ToString` coercion (arrays comma-join recursively,
 /// objects → "[object Object]", null → "null"), matching the VM/native `string_convert`.
 pub fn string_convert(args: &[Value]) -> Result<Value, String> {

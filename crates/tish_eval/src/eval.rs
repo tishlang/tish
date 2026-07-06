@@ -338,6 +338,7 @@ impl Evaluator {
             object.insert("entries".into(), Value::Native(Self::object_entries));
             object.insert("assign".into(), Value::Native(Self::object_assign));
             object.insert("is".into(), Value::Native(natives::object_is));
+            object.insert("hasOwn".into(), Value::Native(natives::object_has_own));
             // getOwnPropertyNames ≈ keys for tish's plain objects (own string keys, insertion order).
             object.insert("getOwnPropertyNames".into(), Value::Native(Self::object_keys));
             object.insert(
@@ -2821,6 +2822,40 @@ impl Evaluator {
                             // Shared half-away-from-zero rounding so interp matches vm/native/node (#247).
                             let formatted = tishlang_builtins::number::to_fixed_str(*n, digits as usize);
                             return Ok(Value::String(formatted.into()));
+                        }
+                        if method_name.as_ref() == "toExponential" {
+                            let digits = arg_vals.first().and_then(|v| match v {
+                                Value::Number(d) => Some((*d as i32).clamp(0, 100) as usize),
+                                _ => None,
+                            });
+                            return Ok(Value::String(
+                                tishlang_builtins::number::to_exponential_str(*n, digits).into(),
+                            ));
+                        }
+                        if method_name.as_ref() == "toPrecision" {
+                            match arg_vals.first() {
+                                Some(Value::Number(p)) => {
+                                    let pi = *p as i32;
+                                    if !(1..=100).contains(&pi) && n.is_finite() {
+                                        let err = crate::natives::range_error_construct(&[
+                                            Value::String(
+                                                "toPrecision() argument must be between 1 and 100"
+                                                    .into(),
+                                            ),
+                                        ])
+                                        .unwrap_or(Value::Null);
+                                        return Err(EvalError::Throw(err));
+                                    }
+                                    return Ok(Value::String(
+                                        tishlang_builtins::number::to_precision_str(*n, pi).into(),
+                                    ));
+                                }
+                                _ => {
+                                    return Ok(Value::String(
+                                        tishlang_core::js_number_to_string(*n).into(),
+                                    ))
+                                }
+                            }
                         }
                         if method_name.as_ref() == "toString" {
                             // Shares the VM/native formatting via the backend-agnostic helper

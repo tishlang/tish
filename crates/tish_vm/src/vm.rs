@@ -796,6 +796,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::object_is(args)),
     );
     object_methods.insert(
+        "hasOwn".into(),
+        Value::native(|args: &[Value]| globals_builtins::object_has_own(args)),
+    );
+    object_methods.insert(
         "getOwnPropertyNames".into(),
         Value::native(|args: &[Value]| globals_builtins::object_keys(args)),
     );
@@ -4358,6 +4362,14 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "toFixed" => make_native_fn(move |args: &[Value]| {
                     let digits = args.first().unwrap_or(&Value::Null);
                     num_builtins::to_fixed(&Value::Number(n_val), digits)
+                }),
+                "toExponential" => make_native_fn(move |args: &[Value]| {
+                    let digits = args.first().unwrap_or(&Value::Null);
+                    num_builtins::to_exponential(&Value::Number(n_val), digits)
+                }),
+                "toPrecision" => make_native_fn(move |args: &[Value]| {
+                    let precision = args.first().unwrap_or(&Value::Null);
+                    num_builtins::to_precision(&Value::Number(n_val), precision)
                 }),
                 "toString" => make_native_fn(move |args: &[Value]| {
                     let radix = args.first().unwrap_or(&Value::Null);
