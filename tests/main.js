@@ -3522,6 +3522,18 @@ let _mo2 = {};
 _mk.set(_mo1, "A");
 _mk.set(_mo2, "B");
 console.log("mapObjIdentity", _mk.get(_mo1), _mk.get(_mo2), _mk.get(_mo1) === "A");
+// function expressions in value position (#464)
+let _fe = [1, 2, 3];
+_fe.forEach(function(x) { console.log("feEach", x); });
+console.log("feMap", _fe.map(function(x) { return x * 2; }).join(","));
+let _feAssigned = function(n) { return n + 100; };
+console.log("feAssigned", _feAssigned(5));
+let _feNamed = function helper(n) { return n * 3; };
+console.log("feNamed", _feNamed(4));
+console.log("feIife", (function(x) { return x + 1; })(41));
+let _feBase = 10;
+let _feClosure = function(x) { return function(y) { return _feBase + x + y; }; };
+console.log("feClosure", _feClosure(1)(2));
 }
 
 {

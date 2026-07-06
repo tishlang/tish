@@ -115,3 +115,11 @@ awrite 99 [10,99,30]
 mapObjKey v 1 1
 mapReuse 1 3
 mapObjIdentity A B true
+feEach 1
+feEach 2
+feEach 3
+feMap 2,4,6
+feAssigned 105
+feNamed 12
+feIife 42
+feClosure 13

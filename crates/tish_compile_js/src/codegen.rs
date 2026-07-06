@@ -690,6 +690,14 @@ impl Codegen {
             }
             Expr::Call { callee, args, .. } => {
                 let c = self.emit_expr(callee)?;
+                // An arrow-function callee (an IIFE — `(function(x){…})(n)` lowers to an arrow, as does
+                // `((x)=>…)(n)`) must be parenthesized: without it the call `(args)` binds to the arrow
+                // BODY, not the whole arrow — a `SyntaxError` for a block body, wrong result otherwise.
+                let c = if matches!(&**callee, Expr::ArrowFunction { .. }) {
+                    format!("({})", c)
+                } else {
+                    c
+                };
                 let arg_strs: Result<Vec<_>, _> =
                     args.iter().map(|a| self.emit_call_arg(a)).collect();
                 let arg_strs = arg_strs?.join(", ");
