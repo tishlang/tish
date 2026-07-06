@@ -3923,6 +3923,16 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                             let s = args.first().cloned().unwrap_or(Value::Null);
                             arr_builtins::index_of(&bv, &s, args.get(1))
                         }),
+                        "lastIndexOf" => make_native_fn(move |args| {
+                            let s = args.first().cloned().unwrap_or(Value::Null);
+                            arr_builtins::last_index_of(&bv, &s, args.get(1))
+                        }),
+                        "copyWithin" => make_native_fn(move |args| {
+                            let t = args.first().cloned().unwrap_or(Value::Null);
+                            let s = args.get(1).cloned().unwrap_or(Value::Null);
+                            let e = args.get(2).cloned().unwrap_or(Value::Null);
+                            arr_builtins::copy_within(&bv, &t, &s, &e)
+                        }),
                         "includes" => make_native_fn(move |args| {
                             let s = args.first().cloned().unwrap_or(Value::Null);
                             let f = args.get(1).cloned();
@@ -3995,6 +4005,16 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "indexOf" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);
                     arr_builtins::index_of(&Value::Array(a_clone.clone()), search, args.get(1))
+                }),
+                "lastIndexOf" => make_native_fn(move |args: &[Value]| {
+                    let search = args.first().unwrap_or(&Value::Null);
+                    arr_builtins::last_index_of(&Value::Array(a_clone.clone()), search, args.get(1))
+                }),
+                "copyWithin" => make_native_fn(move |args: &[Value]| {
+                    let t = args.first().cloned().unwrap_or(Value::Null);
+                    let s = args.get(1).cloned().unwrap_or(Value::Null);
+                    let e = args.get(2).cloned().unwrap_or(Value::Null);
+                    arr_builtins::copy_within(&Value::Array(a_clone.clone()), &t, &s, &e)
                 }),
                 "includes" => make_native_fn(move |args: &[Value]| {
                     let search = args.first().unwrap_or(&Value::Null);

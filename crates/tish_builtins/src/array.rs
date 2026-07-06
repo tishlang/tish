@@ -281,6 +281,55 @@ pub fn fill(arr: &Value, value: &Value, start: &Value, end: &Value) -> Value {
     }
 }
 
+pub fn last_index_of(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let Value::Array(arr) = arr {
+        let arr_borrow = arr.borrow();
+        let len = arr_borrow.len() as i64;
+        // Default fromIndex is len-1; positive clamps to len-1; negative counts back from the end.
+        let start = match from {
+            Some(Value::Number(n)) if *n >= 0.0 => (*n as i64).min(len - 1),
+            Some(Value::Number(n)) => len + *n as i64,
+            _ => len - 1,
+        };
+        let mut i = start;
+        while i >= 0 {
+            if let Some(v) = arr_borrow.get(i as usize) {
+                if v.strict_eq(search) {
+                    return Value::Number(i as f64);
+                }
+            }
+            i -= 1;
+        }
+    }
+    Value::Number(-1.0)
+}
+
+/// `copyWithin(target, start, end)` — copy the `[start, end)` block to `target`, in place; returns
+/// the array. Indices are clamped, negatives count from the end.
+pub fn copy_within(arr: &Value, target: &Value, start: &Value, end: &Value) -> Value {
+    let arr = as_boxed_array(arr);
+    let arr = &*arr;
+    if let Value::Array(a) = arr {
+        let mut v = a.borrow_mut();
+        let len = v.len();
+        let t = normalize_index(target, len as i64, 0);
+        let s = normalize_index(start, len as i64, 0);
+        let e = normalize_index(end, len as i64, len);
+        if s < e && t < len {
+            let count = (e - s).min(len - t);
+            let block: Vec<Value> = v[s..s + count].to_vec();
+            for (k, val) in block.into_iter().enumerate() {
+                v[t + k] = val;
+            }
+        }
+        drop(v);
+        return Value::Array(a.clone());
+    }
+    Value::Null
+}
+
 pub fn slice(arr: &Value, start: &Value, end: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {

@@ -57,6 +57,8 @@ console.log("num-nan", Number.isNaN(0/0), Number.isNaN("x"), Number.isFinite(1/0
 console.log("num-max", Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER)
 console.log("objis", Object.is(NaN, NaN), Object.is(0, -0), Object.is(2, 2))
 console.log("arrof", Array.of(7).length, Array.of(1, 2, 3).join(","))
+console.log("lastidx", [1,2,1,3,1].lastIndexOf(1), [1,2,3].lastIndexOf(5), [1,2,1].lastIndexOf(1,-2))
+console.log("copywithin", [1,2,3,4,5].copyWithin(0,3).join(","))
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))
