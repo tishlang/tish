@@ -2508,11 +2508,20 @@ impl<'a> Parser<'a> {
                         .to_string(),
                 )
             }
-            // `fn` / `type` as a value reference or single-param arrow head (issue #55).
-            // `fn`/`type` function-expressions don't exist and statement-leading decls are
-            // handled in parse_statement, so treating them as identifiers here is additive.
+            // `fn` / `type` as a value reference or single-param arrow head (issue #55), OR a function
+            // EXPRESSION `function (…) {…}` / named `function f(…) {…}` (#464). statement-leading
+            // `function`/`type` decls are handled in parse_statement.
             TokenKind::Ident | TokenKind::Fn | TokenKind::Type => {
                 let name = t.literal.clone().ok_or("Expected ident")?;
+                let is_fn_kw = t.kind == TokenKind::Fn;
+                // Function expression: `function` (`Fn`) followed by `(` (anonymous) or an identifier
+                // (named) has no other valid meaning in value position. `t` is no longer read past
+                // here, so borrowing `self` for the peek is sound.
+                if is_fn_kw
+                    && matches!(self.peek_kind(), Some(TokenKind::LParen | TokenKind::Ident))
+                {
+                    return self.parse_function_expr_tail(&span, false);
+                }
                 // Check if this is a single-param arrow function: x => ...
                 if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
                     self.advance(); // consume =>
@@ -2763,6 +2772,48 @@ impl<'a> Parser<'a> {
                 end,
             },
         }))
+    }
+
+    /// Parse a `function` EXPRESSION after its `function` token has been consumed (#464):
+    /// `[name] (params) [: RetType] { body }`. Lowers to an `ArrowFunction` with a block body so every
+    /// backend reuses the existing arrow path. An optional name is parsed for source fidelity but not
+    /// bound in scope, so a named function expression cannot yet self-reference by that name (a
+    /// documented follow-up). `this`/`arguments` follow arrow semantics — fine for the common callback
+    /// / IIFE / assigned-callback uses.
+    fn parse_function_expr_tail(
+        &mut self,
+        start_span: &Span,
+        async_: bool,
+    ) -> Result<Expr, String> {
+        // Optional name (named function expression).
+        if matches!(self.peek_kind(), Some(TokenKind::Ident)) {
+            self.advance();
+        }
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            params.push(self.parse_fun_param()?);
+            if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                self.expect(TokenKind::Comma)?;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        // Optional return-type annotation (`: T`) — parsed and discarded (ArrowFunction carries none).
+        if matches!(self.peek_kind(), Some(TokenKind::Colon)) {
+            self.advance();
+            self.parse_type_annotation()?;
+        }
+        let block = self.parse_block()?;
+        let end = self.previous_span_end();
+        Ok(Expr::ArrowFunction {
+            async_,
+            params,
+            body: ArrowBody::Block(Box::new(block)),
+            span: Span {
+                start: start_span.start,
+                end,
+            },
+        })
     }
 
     /// Parse the body of an arrow function (either expression or block)
