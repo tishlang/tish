@@ -2818,6 +2818,35 @@ impl Evaluator {
                                 return Ok(Value::Null);
                             }
                             #[cfg(feature = "regex")]
+                            "matchAll" => {
+                                let regexp = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                match crate::regex::string_match_all(s, &regexp) {
+                                    Ok(matches) => {
+                                        let core_matches: Vec<tishlang_core::Value> = matches
+                                            .iter()
+                                            .map(|m| {
+                                                crate::value_convert::eval_to_core(m)
+                                                    .unwrap_or(tishlang_core::Value::Null)
+                                            })
+                                            .collect();
+                                        let it = tishlang_builtins::iterator::array_iterator(
+                                            core_matches,
+                                        );
+                                        return Ok(crate::value_convert::core_to_eval(it));
+                                    }
+                                    Err(()) => {
+                                        let err = crate::natives::type_error_construct(&[
+                                            Value::String(
+                                                "String.prototype.matchAll called with a non-global RegExp argument"
+                                                    .into(),
+                                            ),
+                                        ])
+                                        .unwrap_or(Value::Null);
+                                        return Err(EvalError::Throw(err));
+                                    }
+                                }
+                            }
+                            #[cfg(feature = "regex")]
                             "search" => {
                                 if let Some(regexp) = arg_vals.first() {
                                     return Ok(crate::regex::string_search(s, regexp));

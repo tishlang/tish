@@ -7067,6 +7067,13 @@ impl Codegen {
                                 obj_expr, regexp
                             ));
                         }
+                        "matchAll" if self.has_feature("regex") => {
+                            let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::string_match_all_regex(&{}, &{})",
+                                obj_expr, regexp
+                            ));
+                        }
                         "search" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(

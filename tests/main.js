@@ -3489,6 +3489,17 @@ console.log("normDefault", "\u00e9".normalize() === "\u00e9".normalize("NFC"));
 console.log("normNFKC", "\ufb01".normalize("NFKC"), "\ufb01".normalize("NFKD"));
 let _nerr = "none"; try { "x".normalize("BOGUS"); } catch (e) { _nerr = e.name; }
 console.log("normErr", _nerr);
+// String.matchAll — iterator of exec-style match objects (#437)
+let _ma = [..."a1b2c3".matchAll(/([a-z])(\d)/g)];
+console.log("maCount", _ma.length, _ma[0][0], _ma[0][1], _ma[0][2], _ma[0].index);
+console.log("maAll", _ma.map(m => m[1] + "=" + m[2]).join(","));
+let _mao = [];
+for (const m of "x9y8".matchAll(/(\d)/g)) { _mao.push(m[1]); }
+console.log("maForof", _mao.join(","));
+console.log("maEmpty", [..."abc".matchAll(/\d/g)].length);
+console.log("maIdx", [..."aXbXc".matchAll(/X/g)].map(m => m.index).join(","));
+let _maerr = "none"; try { [..."ab".matchAll(/a/)]; } catch (e) { _maerr = e.name; }
+console.log("maErr", _maerr);
 }
 
 {
