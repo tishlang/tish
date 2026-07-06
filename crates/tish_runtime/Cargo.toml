@@ -52,7 +52,9 @@ http-hyper = [
     "tokio/rt",
     "tokio/io-util",
 ]
-fs = []
+# `fs/promises` returns settled promises, so fs pulls in the promise machinery.
+# `mkdtemp` needs a random suffix (predictable/timestamp names are a temp-dir security smell).
+fs = ["promise", "dep:rand"]
 process = []
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
@@ -81,6 +83,8 @@ reqwest = { version = "0.13.2", default-features = false, features = ["rustls", 
 futures = { version = "0.3.32", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
+# fs feature only: random suffix for `mkdtemp`.
+rand = { version = "0.10.1", optional = true }
 socket2 = { version = "0.5", features = ["all"], optional = true }
 libc = { version = "0.2", optional = true }
 arc-swap = { version = "1", optional = true }

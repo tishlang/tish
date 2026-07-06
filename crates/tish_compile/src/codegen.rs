@@ -1610,13 +1610,59 @@ impl Codegen {
     fn builtin_native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
         let init = match spec {
             "tish:fs" if self.has_feature("fs") => match export_name {
-                    "readFile" => Some("Value::native(|args: &[Value]| tish_read_file(args))"),
-                    "writeFile" => Some("Value::native(|args: &[Value]| tish_write_file(args))"),
+                    // tish names → the dual fs_ext functions (sync, or Node callback if a fn is passed)
+                    "readFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file(args))"),
+                    "writeFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::write_file(args))"),
                     "fileExists" => Some("Value::native(|args: &[Value]| tish_file_exists(args))"),
                     "isDir" => Some("Value::native(|args: &[Value]| tish_is_dir(args))"),
-                    "readDir" => Some("Value::native(|args: &[Value]| tish_read_dir(args))"),
-                    "readFileBytes" => Some("Value::native(|args: &[Value]| tish_read_file_bytes(args))"),
-                    "mkdir" => Some("Value::native(|args: &[Value]| tish_mkdir(args))"),
+                    "readDir" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readdir(args))"),
+                    "readFileBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_bytes(args))"),
+                    // Node-compatible names + new methods (sync) — issue #122
+                    "readFileSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file(args))"),
+                    "readFileBytesSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_bytes(args))"),
+                    "writeFileSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::write_file(args))"),
+                    "appendFile" | "appendFileSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::append_file(args))"),
+                    "existsSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::exists(args))"),
+                    "mkdir" | "mkdirSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdir(args))"),
+                    "readdir" | "readdirSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readdir(args))"),
+                    "stat" | "statSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::stat(args))"),
+                    "lstat" | "lstatSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::lstat(args))"),
+                    "rm" | "rmSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rm(args))"),
+                    "rmdir" | "rmdirSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rmdir(args))"),
+                    "unlink" | "unlinkSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::unlink(args))"),
+                    "rename" | "renameSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rename(args))"),
+                    "copyFile" | "copyFileSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::copy_file(args))"),
+                    "realpath" | "realpathSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::realpath(args))"),
+                    "readlink" | "readlinkSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readlink(args))"),
+                    "truncate" | "truncateSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::truncate(args))"),
+                    "mkdtemp" | "mkdtempSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdtemp(args))"),
+                    "cp" | "cpSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::cp(args))"),
+                    "access" | "accessSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::access(args))"),
+                    "constants" => Some("tishlang_runtime::fs_ext::constants()"),
+                    _ => None,
+                },
+            "tish:fs/promises" if self.has_feature("fs") => match export_name {
+                    "readFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_promise(args))"),
+                    "readFileBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::read_file_bytes_promise(args))"),
+                    "writeFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::write_file_promise(args))"),
+                    "appendFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::append_file_promise(args))"),
+                    "mkdir" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdir_promise(args))"),
+                    "readdir" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readdir_promise(args))"),
+                    "stat" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::stat_promise(args))"),
+                    "lstat" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::lstat_promise(args))"),
+                    "rm" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rm_promise(args))"),
+                    "rmdir" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rmdir_promise(args))"),
+                    "unlink" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::unlink_promise(args))"),
+                    "rename" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::rename_promise(args))"),
+                    "copyFile" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::copy_file_promise(args))"),
+                    "realpath" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::realpath_promise(args))"),
+                    "readlink" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readlink_promise(args))"),
+                    "truncate" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::truncate_promise(args))"),
+                    "mkdtemp" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdtemp_promise(args))"),
+                    "cp" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::cp_promise(args))"),
+                    "access" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::access_promise(args))"),
+                    "exists" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::exists_promise(args))"),
+                    "constants" => Some("tishlang_runtime::fs_ext::constants()"),
                     _ => None,
                 },
             "tish:http" if self.has_feature("http") => match export_name {
@@ -2214,6 +2260,11 @@ impl Codegen {
             } else {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
+        }
+        // `fs/promises` (and any promise-using async program) needs the await machinery even
+        // without http. `fs` implies the runtime `promise` feature, so these resolve.
+        if self.is_async && !self.has_feature("http") && self.has_feature("fs") {
+            self.write("use tishlang_runtime::{promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
         }
         if self.has_feature("fs") {
             self.write("use tishlang_runtime::{read_file as tish_read_file, read_file_bytes as tish_read_file_bytes, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");

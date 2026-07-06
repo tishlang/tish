@@ -1227,12 +1227,85 @@ impl Evaluator {
                         Value::Native(natives::read_file_bytes),
                     );
                     exports.insert("mkdir".into(), Value::Native(natives::mkdir));
+                    // Node-compatible names + new methods (sync) — issue #122
+                    use natives::fsx;
+                    exports.insert("readFileSync".into(), Value::Native(fsx::read_file));
+                    exports.insert("readFileBytesSync".into(), Value::Native(fsx::read_file_bytes));
+                    exports.insert("writeFileSync".into(), Value::Native(fsx::write_file));
+                    exports.insert("appendFile".into(), Value::Native(fsx::append_file));
+                    exports.insert("appendFileSync".into(), Value::Native(fsx::append_file));
+                    exports.insert("existsSync".into(), Value::Native(fsx::exists));
+                    exports.insert("mkdirSync".into(), Value::Native(fsx::mkdir));
+                    exports.insert("readdir".into(), Value::Native(fsx::readdir));
+                    exports.insert("readdirSync".into(), Value::Native(fsx::readdir));
+                    exports.insert("stat".into(), Value::Native(fsx::stat));
+                    exports.insert("statSync".into(), Value::Native(fsx::stat));
+                    exports.insert("lstat".into(), Value::Native(fsx::lstat));
+                    exports.insert("lstatSync".into(), Value::Native(fsx::lstat));
+                    exports.insert("rm".into(), Value::Native(fsx::rm));
+                    exports.insert("rmSync".into(), Value::Native(fsx::rm));
+                    exports.insert("rmdir".into(), Value::Native(fsx::rmdir));
+                    exports.insert("rmdirSync".into(), Value::Native(fsx::rmdir));
+                    exports.insert("unlink".into(), Value::Native(fsx::unlink));
+                    exports.insert("unlinkSync".into(), Value::Native(fsx::unlink));
+                    exports.insert("rename".into(), Value::Native(fsx::rename));
+                    exports.insert("renameSync".into(), Value::Native(fsx::rename));
+                    exports.insert("copyFile".into(), Value::Native(fsx::copy_file));
+                    exports.insert("copyFileSync".into(), Value::Native(fsx::copy_file));
+                    exports.insert("realpath".into(), Value::Native(fsx::realpath));
+                    exports.insert("realpathSync".into(), Value::Native(fsx::realpath));
+                    exports.insert("readlink".into(), Value::Native(fsx::readlink));
+                    exports.insert("readlinkSync".into(), Value::Native(fsx::readlink));
+                    exports.insert("truncate".into(), Value::Native(fsx::truncate));
+                    exports.insert("truncateSync".into(), Value::Native(fsx::truncate));
+                    exports.insert("mkdtemp".into(), Value::Native(fsx::mkdtemp));
+                    exports.insert("mkdtempSync".into(), Value::Native(fsx::mkdtemp));
+                    exports.insert("cp".into(), Value::Native(fsx::cp));
+                    exports.insert("cpSync".into(), Value::Native(fsx::cp));
+                    exports.insert("access".into(), Value::Native(fsx::access));
+                    exports.insert("accessSync".into(), Value::Native(fsx::access));
+                    exports.insert("constants".into(), fsx::constants());
                     Ok(Value::object(exports))
                 }
                 #[cfg(not(feature = "fs"))]
                 {
                     return Err(EvalError::Error(
                         "tish:fs requires the fs feature. Rebuild with: cargo build -p tishlang --features fs".into(),
+                    ));
+                }
+            }
+            "tish:fs/promises" => {
+                #[cfg(feature = "fs")]
+                {
+                    use natives::fsx;
+                    let mut exports: PropMap = PropMap::default();
+                    exports.insert("readFile".into(), Value::Native(fsx::read_file_p));
+                    exports.insert("readFileBytes".into(), Value::Native(fsx::read_file_bytes_p));
+                    exports.insert("writeFile".into(), Value::Native(fsx::write_file_p));
+                    exports.insert("appendFile".into(), Value::Native(fsx::append_file_p));
+                    exports.insert("exists".into(), Value::Native(fsx::exists_p));
+                    exports.insert("mkdir".into(), Value::Native(fsx::mkdir_p));
+                    exports.insert("readdir".into(), Value::Native(fsx::readdir_p));
+                    exports.insert("stat".into(), Value::Native(fsx::stat_p));
+                    exports.insert("lstat".into(), Value::Native(fsx::lstat_p));
+                    exports.insert("rm".into(), Value::Native(fsx::rm_p));
+                    exports.insert("rmdir".into(), Value::Native(fsx::rmdir_p));
+                    exports.insert("unlink".into(), Value::Native(fsx::unlink_p));
+                    exports.insert("rename".into(), Value::Native(fsx::rename_p));
+                    exports.insert("copyFile".into(), Value::Native(fsx::copy_file_p));
+                    exports.insert("realpath".into(), Value::Native(fsx::realpath_p));
+                    exports.insert("readlink".into(), Value::Native(fsx::readlink_p));
+                    exports.insert("truncate".into(), Value::Native(fsx::truncate_p));
+                    exports.insert("mkdtemp".into(), Value::Native(fsx::mkdtemp_p));
+                    exports.insert("cp".into(), Value::Native(fsx::cp_p));
+                    exports.insert("access".into(), Value::Native(fsx::access_p));
+                    exports.insert("constants".into(), fsx::constants());
+                    Ok(Value::object(exports))
+                }
+                #[cfg(not(feature = "fs"))]
+                {
+                    return Err(EvalError::Error(
+                        "tish:fs/promises requires the fs feature. Rebuild with: cargo build -p tishlang --features fs".into(),
                     ));
                 }
             }
@@ -3835,7 +3908,31 @@ impl Evaluator {
                 }
                 Err(EvalError::Error("Not a function".to_string()))
             }
-            Value::Native(native_fn) => native_fn(args).map_err(EvalError::Error),
+            Value::Native(native_fn) => {
+                // #122: Node fs callback form — `readFile(path, (err, data) => …)`. The self-less
+                // `Value::Native` bridge can't invoke an eval callback (a core `Callable` can't
+                // re-enter the interpreter), so handle it here where `&self` is available: run the
+                // op's core on the non-callback args, split its Result into `(err, data)`, and call
+                // the callback. Matches the VM/native backends (fs_ext runs the callback in-core).
+                #[cfg(feature = "fs")]
+                if let Some(cb @ Value::Function { .. }) = args.last() {
+                    if let Some(core_op) = natives::fsx::callback_core(*native_fn) {
+                        let cb = cb.clone();
+                        let core_args = args[..args.len() - 1]
+                            .iter()
+                            .map(crate::value_convert::eval_to_core)
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(EvalError::Error)?;
+                        let (err, data) = match core_op(&core_args) {
+                            Ok(v) => (Value::Null, crate::value_convert::core_to_eval(v)),
+                            Err(e) => (crate::value_convert::core_to_eval(e), Value::Null),
+                        };
+                        self.call_func(&cb, &[err, data])?;
+                        return Ok(Value::Null);
+                    }
+                }
+                native_fn(args).map_err(EvalError::Error)
+            }
             #[cfg(feature = "http")]
             Value::PromiseResolver(r) => {
                 let value = args.first().cloned().unwrap_or(Value::Null);

@@ -1,0 +1,21 @@
+// Issue #122: the async `node:fs/promises` surface — await on the same methods, and `access`
+// rejects on a missing path. Operates under $FS_TMP.
+import { writeFile, readFile, stat, mkdir, readdir, rm, access } from "node:fs/promises"
+import { process } from "tish:process"
+
+async fn main() {
+  let d = process.env.FS_TMP
+  await writeFile(d + "/p.txt", "async hello")
+  console.log("read=" + (await readFile(d + "/p.txt")))
+  let st = await stat(d + "/p.txt")
+  console.log("size=" + String(st.size))
+  await mkdir(d + "/pd")
+  await writeFile(d + "/pd/x", "x")
+  console.log("dir=" + (await readdir(d + "/pd")).join(","))
+  let rejected = false
+  try { await access(d + "/missing") } catch (e) { rejected = true }
+  console.log("access-missing-rejected=" + String(rejected))
+  await rm(d + "/pd", { recursive: true })
+  console.log("done")
+}
+main()

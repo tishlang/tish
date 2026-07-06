@@ -22,7 +22,8 @@ http = [
     "tishlang_core/send-values",
     "tishlang_builtins/send-values",
 ]
-fs = []
+# fs bridges to tishlang_runtime::fs_ext for the Node-compatible surface (#122).
+fs = ["dep:tishlang_runtime", "tishlang_runtime/fs"]
 process = []
 tty = ["dep:tishlang_runtime", "tishlang_runtime/tty"]
 regex = ["tishlang_core/regex"]

@@ -548,6 +548,109 @@ pub fn read_file_bytes(args: &[Value]) -> Result<Value, String> {
     }
 }
 
+// ── Node-compatible fs surface (#122) — bridged to tishlang_runtime::fs_ext so the interpreter
+// shares one implementation with the VM/native backends. eval args -> core, call, core -> eval.
+#[cfg(feature = "fs")]
+macro_rules! fs_bridge {
+    ($name:ident => $core:path) => {
+        pub fn $name(args: &[Value]) -> Result<Value, String> {
+            let core_args = args
+                .iter()
+                .map(crate::value_convert::eval_to_core)
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(crate::value_convert::core_to_eval($core(&core_args)))
+        }
+    };
+}
+
+#[cfg(feature = "fs")]
+pub mod fsx {
+    use super::Value;
+    use tishlang_runtime::fs_ext as fx;
+    // sync
+    fs_bridge!(read_file => fx::read_file);
+    fs_bridge!(read_file_bytes => fx::read_file_bytes);
+    fs_bridge!(write_file => fx::write_file);
+    fs_bridge!(append_file => fx::append_file);
+    fs_bridge!(exists => fx::exists);
+    fs_bridge!(mkdir => fx::mkdir);
+    fs_bridge!(readdir => fx::readdir);
+    fs_bridge!(stat => fx::stat);
+    fs_bridge!(lstat => fx::lstat);
+    fs_bridge!(rm => fx::rm);
+    fs_bridge!(rmdir => fx::rmdir);
+    fs_bridge!(unlink => fx::unlink);
+    fs_bridge!(rename => fx::rename);
+    fs_bridge!(copy_file => fx::copy_file);
+    fs_bridge!(realpath => fx::realpath);
+    fs_bridge!(readlink => fx::readlink);
+    fs_bridge!(truncate => fx::truncate);
+    fs_bridge!(mkdtemp => fx::mkdtemp);
+    fs_bridge!(cp => fx::cp);
+    fs_bridge!(access => fx::access);
+    // promises
+    fs_bridge!(read_file_p => fx::read_file_promise);
+    fs_bridge!(read_file_bytes_p => fx::read_file_bytes_promise);
+    fs_bridge!(write_file_p => fx::write_file_promise);
+    fs_bridge!(append_file_p => fx::append_file_promise);
+    fs_bridge!(exists_p => fx::exists_promise);
+    fs_bridge!(mkdir_p => fx::mkdir_promise);
+    fs_bridge!(readdir_p => fx::readdir_promise);
+    fs_bridge!(stat_p => fx::stat_promise);
+    fs_bridge!(lstat_p => fx::lstat_promise);
+    fs_bridge!(rm_p => fx::rm_promise);
+    fs_bridge!(rmdir_p => fx::rmdir_promise);
+    fs_bridge!(unlink_p => fx::unlink_promise);
+    fs_bridge!(rename_p => fx::rename_promise);
+    fs_bridge!(copy_file_p => fx::copy_file_promise);
+    fs_bridge!(realpath_p => fx::realpath_promise);
+    fs_bridge!(readlink_p => fx::readlink_promise);
+    fs_bridge!(truncate_p => fx::truncate_promise);
+    fs_bridge!(mkdtemp_p => fx::mkdtemp_promise);
+    fs_bridge!(cp_p => fx::cp_promise);
+    fs_bridge!(access_p => fx::access_promise);
+    pub fn constants() -> Value {
+        crate::value_convert::core_to_eval(fx::constants())
+    }
+
+    /// Core op behind a Node-callback-style fs function (Ok = data, Err = error value), if `f` is one.
+    /// The interpreter binds fs to self-less `Value::Native`s that can't invoke an eval callback, so
+    /// `call_func` uses this to run the sync op and split its Result into `(err, data)` for the
+    /// callback form (#122). Covers both the old tish aliases (`readFile` → `natives::read_file`) and
+    /// the `fsx::*` bridges. `exists`/`access` are omitted — they answer a boolean and never error.
+    pub type CoreOp = fn(&[tishlang_core::Value]) -> Result<tishlang_core::Value, tishlang_core::Value>;
+    pub fn callback_core(f: crate::value::NativeFn) -> Option<CoreOp> {
+        use std::ptr::fn_addr_eq;
+        type NF = crate::value::NativeFn;
+        // Node names bound to the old tish aliases (natives::*).
+        if fn_addr_eq(f, super::read_file as NF) { return Some(fx::read_file_core); }
+        if fn_addr_eq(f, super::write_file as NF) { return Some(fx::write_file_core); }
+        if fn_addr_eq(f, super::read_file_bytes as NF) { return Some(fx::read_file_bytes_core); }
+        if fn_addr_eq(f, super::read_dir as NF) { return Some(fx::readdir_core); }
+        if fn_addr_eq(f, super::mkdir as NF) { return Some(fx::mkdir_core); }
+        // The `fsx::*` bridges (Node *Sync names and the ops with no old alias).
+        if fn_addr_eq(f, read_file as NF) { return Some(fx::read_file_core); }
+        if fn_addr_eq(f, write_file as NF) { return Some(fx::write_file_core); }
+        if fn_addr_eq(f, append_file as NF) { return Some(fx::append_file_core); }
+        if fn_addr_eq(f, read_file_bytes as NF) { return Some(fx::read_file_bytes_core); }
+        if fn_addr_eq(f, readdir as NF) { return Some(fx::readdir_core); }
+        if fn_addr_eq(f, stat as NF) { return Some(fx::stat_core); }
+        if fn_addr_eq(f, lstat as NF) { return Some(fx::lstat_core); }
+        if fn_addr_eq(f, mkdir as NF) { return Some(fx::mkdir_core); }
+        if fn_addr_eq(f, rm as NF) { return Some(fx::rm_core); }
+        if fn_addr_eq(f, rmdir as NF) { return Some(fx::rmdir_core); }
+        if fn_addr_eq(f, unlink as NF) { return Some(fx::unlink_core); }
+        if fn_addr_eq(f, rename as NF) { return Some(fx::rename_core); }
+        if fn_addr_eq(f, copy_file as NF) { return Some(fx::copy_file_core); }
+        if fn_addr_eq(f, cp as NF) { return Some(fx::cp_core); }
+        if fn_addr_eq(f, realpath as NF) { return Some(fx::realpath_core); }
+        if fn_addr_eq(f, readlink as NF) { return Some(fx::readlink_core); }
+        if fn_addr_eq(f, truncate as NF) { return Some(fx::truncate_core); }
+        if fn_addr_eq(f, mkdtemp as NF) { return Some(fx::mkdtemp_core); }
+        None
+    }
+}
+
 #[cfg(feature = "fs")]
 pub fn write_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();
