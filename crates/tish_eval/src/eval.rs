@@ -1815,6 +1815,91 @@ impl Evaluator {
                                 arr.borrow_mut().reverse();
                                 return Ok(obj.clone());
                             }
+                            "toReversed" => {
+                                // ES2023: a reversed COPY; the receiver is untouched.
+                                let mut v = arr.borrow().clone();
+                                v.reverse();
+                                return Ok(Value::Array(Rc::new(RefCell::new(v))));
+                            }
+                            "toSorted" => {
+                                // ES2023: a sorted COPY. Uses the general comparator/default path (the
+                                // numeric fast-paths in `sort` are speed-only and give identical order).
+                                let comparator = arg_vals.into_iter().next();
+                                let arr_values: Vec<Value> = arr.borrow().clone();
+                                let len = arr_values.len();
+                                let mut indices: Vec<usize> = (0..len).collect();
+                                if let Some(cmp_fn) = comparator {
+                                    let mut pending: Option<EvalError> = None;
+                                    indices.sort_by(|&i, &j| {
+                                        if pending.is_some() {
+                                            return std::cmp::Ordering::Equal;
+                                        }
+                                        match self.call_func(&cmp_fn, &[arr_values[i].clone(), arr_values[j].clone()]) {
+                                            Ok(Value::Number(n)) if n < 0.0 => std::cmp::Ordering::Less,
+                                            Ok(Value::Number(n)) if n > 0.0 => std::cmp::Ordering::Greater,
+                                            Ok(_) => std::cmp::Ordering::Equal,
+                                            Err(e) => { pending = Some(e); std::cmp::Ordering::Equal }
+                                        }
+                                    });
+                                    if let Some(e) = pending {
+                                        return Err(e);
+                                    }
+                                } else {
+                                    indices.sort_by(|&i, &j| {
+                                        arr_values[i].to_string().cmp(&arr_values[j].to_string())
+                                    });
+                                }
+                                let sorted: Vec<Value> =
+                                    indices.into_iter().map(|i| arr_values[i].clone()).collect();
+                                return Ok(Value::Array(Rc::new(RefCell::new(sorted))));
+                            }
+                            "with" => {
+                                // ES2023: a COPY with one index replaced; negative index counts from the
+                                // end; out-of-range throws a catchable RangeError (matches vm/native/node).
+                                let index = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let value = arg_vals.get(1).cloned().unwrap_or(Value::Null);
+                                let mut v = arr.borrow().clone();
+                                let len = v.len() as i64;
+                                let rel = match index {
+                                    Value::Number(n) if n.is_finite() => n as i64,
+                                    _ => 0,
+                                };
+                                let actual = if rel >= 0 { rel } else { len + rel };
+                                if actual < 0 || actual >= len {
+                                    let err = crate::natives::range_error_construct(&[Value::String(
+                                        format!("Invalid index : {}", rel).into(),
+                                    )])
+                                    .unwrap_or(Value::Null);
+                                    return Err(EvalError::Throw(err));
+                                }
+                                v[actual as usize] = value;
+                                return Ok(Value::Array(Rc::new(RefCell::new(v))));
+                            }
+                            "toSpliced" => {
+                                // ES2023: a COPY with the splice applied; returns the resulting array
+                                // (splice returns the removed elements). Same normalization as `splice`.
+                                let mut result = arr.borrow().clone();
+                                let len = result.len() as i64;
+                                let start = match arg_vals.first() {
+                                    Some(Value::Number(n)) => {
+                                        let n = *n as i64;
+                                        if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                                    }
+                                    _ => 0,
+                                };
+                                let delete_count = match arg_vals.get(1) {
+                                    Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+                                    _ => (len as usize).saturating_sub(start),
+                                };
+                                let actual_delete = delete_count.min(result.len().saturating_sub(start));
+                                result.drain(start..start + actual_delete);
+                                if arg_vals.len() > 2 {
+                                    for (i, item) in arg_vals[2..].iter().cloned().enumerate() {
+                                        result.insert(start + i, item);
+                                    }
+                                }
+                                return Ok(Value::Array(Rc::new(RefCell::new(result))));
+                            }
                             "fill" => {
                                 // Array.prototype.fill(value, start?, end?) — in place (issue #76).
                                 let value = arg_vals.first().cloned().unwrap_or(Value::Null);

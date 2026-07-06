@@ -6928,6 +6928,9 @@ impl Codegen {
                         "reverse" => {
                             return Ok(format!("tishlang_runtime::array_reverse(&{})", obj_expr));
                         }
+                        "toReversed" => {
+                            return Ok(format!("tishlang_runtime::array_to_reversed(&{})", obj_expr));
+                        }
                         "fill" => {
                             let value = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let start = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
@@ -7285,6 +7288,38 @@ impl Codegen {
                             return Ok(format!(
                                 "tishlang_runtime::array_splice(&{}, &{}, {}, {})",
                                 obj_expr, start, delete_count, items
+                            ));
+                        }
+                        "toSpliced" => {
+                            let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
+                            let delete_count = arg_exprs.get(1).map(|d| format!("Some(&{})", d)).unwrap_or_else(|| "None".to_string());
+                            let items = if arg_exprs.len() > 2 {
+                                let items_vec = arg_exprs[2..].iter()
+                                    .map(|a| format!("{}.clone()", a))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("&[{}]", items_vec)
+                            } else {
+                                "&[]".to_string()
+                            };
+                            return Ok(format!(
+                                "tishlang_runtime::array_to_spliced(&{}, &{}, {}, {})",
+                                obj_expr, start, delete_count, items
+                            ));
+                        }
+                        "toSorted" => {
+                            let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_to_sorted(&{}, {})",
+                                obj_expr, comparator
+                            ));
+                        }
+                        "with" => {
+                            let index = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            let value = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
+                            return Ok(format!(
+                                "tishlang_runtime::array_with(&{}, &{}, &{})",
+                                obj_expr, index, value
                             ));
                         }
                         "flat" => {
@@ -8502,6 +8537,7 @@ impl Codegen {
                 | "normalize" | "localeCompare" | "map" | "filter" | "reduce" | "reduceRight"
                 | "forEach" | "find" | "findIndex" | "findLast" | "findLastIndex" | "some" | "every"
                 | "join" | "flat" | "flatMap" | "keys" | "values" | "entries"
+                | "toReversed" | "toSorted" | "with" | "toSpliced"
         )
     }
 

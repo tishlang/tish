@@ -226,6 +226,57 @@ pub fn reverse(arr: &Value) -> Value {
     }
 }
 
+/// `Array.prototype.toReversed()` — a reversed COPY (ES2023); the receiver is untouched.
+pub fn to_reversed(arr: &Value) -> Value {
+    let mut v = snapshot_values(arr);
+    v.reverse();
+    Value::Array(VmRef::new(v))
+}
+
+/// `Array.prototype.toSorted(cmp?)` — a sorted COPY (ES2023); the receiver is untouched. Sorting runs
+/// on the copy via the same comparator/default machinery as `sort`.
+pub fn to_sorted(arr: &Value, comparator: Option<&Value>) -> Value {
+    let copy = Value::Array(VmRef::new(snapshot_values(arr)));
+    match comparator {
+        Some(cmp @ Value::Function(_)) => sort_with_comparator(&copy, cmp),
+        _ => sort_default(&copy),
+    }
+}
+
+/// `Array.prototype.with(index, value)` — a COPY with `index` replaced (ES2023). A negative index
+/// counts from the end; an out-of-range index parks a catchable `RangeError` (matches node's message).
+pub fn with(arr: &Value, index: &Value, value: &Value) -> Value {
+    let mut v = snapshot_values(arr);
+    let len = v.len() as i64;
+    let rel = match index {
+        Value::Number(n) if n.is_finite() => *n as i64,
+        _ => 0,
+    };
+    let actual = if rel >= 0 { rel } else { len + rel };
+    if actual < 0 || actual >= len {
+        tishlang_core::set_pending_throw(tishlang_core::range_error(format!(
+            "Invalid index : {}",
+            rel
+        )));
+        return Value::Null;
+    }
+    v[actual as usize] = value.clone();
+    Value::Array(VmRef::new(v))
+}
+
+/// `Array.prototype.toSpliced(start, deleteCount?, ...items)` — a COPY with the splice applied (ES2023);
+/// unlike `splice` (which returns the removed elements) this returns the resulting array.
+pub fn to_spliced(
+    arr: &Value,
+    start: &Value,
+    delete_count: Option<&Value>,
+    items: &[Value],
+) -> Value {
+    let copy = Value::Array(VmRef::new(snapshot_values(arr)));
+    splice(&copy, start, delete_count, items);
+    copy
+}
+
 /// Fisher-Yates shuffle. Returns a new shuffled array (does not mutate).
 pub fn shuffle(arr: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
