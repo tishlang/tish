@@ -112,3 +112,6 @@ maErr TypeError
 aidx 10 20 30 true
 aforin 0:10 1:20 2:30 
 awrite 99 [10,99,30]
+mapObjKey v 1 1
+mapReuse 1 3
+mapObjIdentity A B true

@@ -6819,9 +6819,15 @@ impl Codegen {
                                     return Ok(format!("tish_map_get({}, {})", map_ref, key_ref));
                                 }
                                 "set" if args.len() == 2 => {
+                                    // Borrow the key/val places (like `get`/`has`) so a keyed local
+                                    // isn't MOVED into the call and can still be used afterward — the
+                                    // runtime `map_set` clones on insert (#442). `&Value` args also
+                                    // route native-typed operands through the boxed path correctly.
+                                    let key_ref = self.emit_borrowed_arg(&args[0])?;
+                                    let val_ref = self.emit_borrowed_arg(&args[1])?;
                                     return Ok(format!(
                                         "tish_map_set({}, {}, {})",
-                                        map_ref, arg_exprs[0], arg_exprs[1]
+                                        map_ref, key_ref, val_ref
                                     ));
                                 }
                                 "values" if args.is_empty() => {

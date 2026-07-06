@@ -3561,6 +3561,20 @@ for (let k in _ai) { _aik = _aik + k + ":" + _ai[k] + " "; }
 console.log("aforin", _aik);
 _ai["1"] = 99;
 console.log("awrite", _ai[1], JSON.stringify(_ai));
+// Map with object key + key/value reused after set — native E0382 regression (#442)
+let _mk = new Map();
+let _mkey = { id: 1 };
+_mk.set(_mkey, "v");
+console.log("mapObjKey", _mk.get(_mkey), _mkey.id, _mk.size);
+let _mk2 = new Map();
+let _mv = [1, 2, 3];
+_mk2.set("a", _mv);
+console.log("mapReuse", _mk2.get("a")[0], _mv.length);
+let _mo1 = {};
+let _mo2 = {};
+_mk.set(_mo1, "A");
+_mk.set(_mo2, "B");
+console.log("mapObjIdentity", _mk.get(_mo1), _mk.get(_mo2), _mk.get(_mo1) === "A");
 }
 __perf_run_core_parity_builtins()
 
