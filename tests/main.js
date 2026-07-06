@@ -3404,6 +3404,8 @@ console.log("endsw-pos", "abc".endsWith("ab", 2))
 // Global isNaN/isFinite coerce their arg via ToNumber (like Number()).
 console.log("isnan-str", isNaN("3"), isNaN("x"), isNaN(""))
 console.log("isfinite-str", isFinite("3"), isFinite("x"), isFinite(""))
+console.log("trimstart", "[" + "  x  ".trimStart() + "]")
+console.log("trimend", "[" + "  x  ".trimEnd() + "]")
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))

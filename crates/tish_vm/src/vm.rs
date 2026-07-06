@@ -4142,6 +4142,12 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                 "trim" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::trim(&Value::String(s_clone.clone()))
                 }),
+                "trimStart" => make_native_fn(move |_args: &[Value]| {
+                    str_builtins::trim_start(&Value::String(s_clone.clone()))
+                }),
+                "trimEnd" => make_native_fn(move |_args: &[Value]| {
+                    str_builtins::trim_end(&Value::String(s_clone.clone()))
+                }),
                 "toUpperCase" => make_native_fn(move |_args: &[Value]| {
                     str_builtins::to_upper_case(&Value::String(s_clone.clone()))
                 }),

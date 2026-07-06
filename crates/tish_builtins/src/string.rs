@@ -317,6 +317,22 @@ pub fn trim(s: &Value) -> Value {
     }
 }
 
+pub fn trim_start(s: &Value) -> Value {
+    if let Value::String(s) = s {
+        Value::String(s.trim_start().into())
+    } else {
+        Value::Null
+    }
+}
+
+pub fn trim_end(s: &Value) -> Value {
+    if let Value::String(s) = s {
+        Value::String(s.trim_end().into())
+    } else {
+        Value::Null
+    }
+}
+
 pub fn to_upper_case(s: &Value) -> Value {
     if let Value::String(s) = s {
         Value::String(s.to_uppercase().into())
