@@ -230,12 +230,31 @@ fn truncate_core(args: &[Value]) -> Result<Value, Value> {
         .map_err(io_err)
 }
 
-/// `mkdtemp(prefix)` — create a uniquely-named temp dir, return its path.
+/// `mkdtemp(prefix)` — create a uniquely-named temp dir and return its path. Node appends 6 RANDOM
+/// characters; a timestamp suffix is both predictable (a temp-dir security smell) and collision-prone
+/// under rapid calls. Use a random suffix and rely on `create_dir`'s exclusive semantics, retrying on
+/// the astronomically-rare collision.
 fn mkdtemp_core(args: &[Value]) -> Result<Value, Value> {
     let prefix = path_arg(args, 0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let path = format!("{}{:x}", prefix, nanos);
-    std::fs::create_dir(&path).map(|_| Value::String(path.into())).map_err(io_err)
+    for _ in 0..16 {
+        // 10 base-36 chars derived from a random u64 (~51 bits of entropy).
+        let mut n: u64 = rand::random();
+        let mut suffix = String::with_capacity(10);
+        for _ in 0..10 {
+            suffix.push(char::from_digit((n % 36) as u32, 36).unwrap());
+            n /= 36;
+        }
+        let path = format!("{}{}", prefix, suffix);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(Value::String(path.into())),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io_err(e)),
+        }
+    }
+    Err(io_err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "mkdtemp: could not create a unique temporary directory",
+    )))
 }
 
 /// `cp(src, dest[, { recursive }])` — copy a file, or a directory tree when recursive.
