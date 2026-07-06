@@ -380,6 +380,43 @@ pub fn ends_with(s: &Value, search: &Value, end_position: Option<&Value>) -> Val
     }
 }
 
+/// Expand a string replacement's `$` patterns for one match: `$$`→`$`, `$&`→the match, `` $` ``→the
+/// text before it, `$'`→the text after it. Any other `$x` is literal. (String-search `replace`; the
+/// numbered `$1` captures only apply to regex replacements.)
+pub fn expand_replacement(repl: &str, matched: &str, before: &str, after: &str) -> String {
+    if !repl.contains('$') {
+        return repl.to_string();
+    }
+    let mut out = String::with_capacity(repl.len());
+    let mut chars = repl.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            match chars.peek() {
+                Some('$') => {
+                    out.push('$');
+                    chars.next();
+                }
+                Some('&') => {
+                    out.push_str(matched);
+                    chars.next();
+                }
+                Some('`') => {
+                    out.push_str(before);
+                    chars.next();
+                }
+                Some('\'') => {
+                    out.push_str(after);
+                    chars.next();
+                }
+                _ => out.push('$'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn replace_impl(s: &Value, search: &Value, replacement: &Value, all: bool) -> Value {
     if let Value::String(s) = s {
         let search_str = match search {
@@ -390,12 +427,37 @@ fn replace_impl(s: &Value, search: &Value, replacement: &Value, all: bool) -> Va
             Value::String(ss) => ss.as_str(),
             _ => "",
         };
-        let result = if all {
-            s.replace(search_str, repl_str)
-        } else {
-            s.replacen(search_str, repl_str, 1)
-        };
-        Value::String(result.into())
+        // Fast path: no `$` in the replacement (and non-empty search) → the library replace.
+        if !repl_str.contains('$') || search_str.is_empty() {
+            let result = if all {
+                s.replace(search_str, repl_str)
+            } else {
+                s.replacen(search_str, repl_str, 1)
+            };
+            return Value::String(result.into());
+        }
+        // `$`-expansion path: expand per match against the original string's before/after context.
+        let sref = s.as_str();
+        let mut out = String::with_capacity(sref.len());
+        let mut last = 0usize;
+        let mut start = 0usize;
+        while let Some(pos) = sref[start..].find(search_str) {
+            let m = start + pos;
+            out.push_str(&sref[last..m]);
+            out.push_str(&expand_replacement(
+                repl_str,
+                search_str,
+                &sref[..m],
+                &sref[m + search_str.len()..],
+            ));
+            last = m + search_str.len();
+            start = last;
+            if !all {
+                break;
+            }
+        }
+        out.push_str(&sref[last..]);
+        Value::String(out.into())
     } else {
         Value::Null
     }
