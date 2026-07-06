@@ -1623,7 +1623,58 @@ impl Evaluator {
                 {
                     let obj = self.eval_expr(object)?;
                     let arg_vals = self.eval_call_args(args)?;
-                    
+
+                    // `Array.from(source, mapFn?)` — handled inline so the mapFn callback runs with the
+                    // interpreter context (a plain native has no `self`). Covers array / string / Set /
+                    // Map / iterator (via `__drain__`) and array-like `{ length }`. (#440)
+                    if let Expr::Ident { name, .. } = object.as_ref() {
+                        if name.as_ref() == "Array" && method_name.as_ref() == "from" {
+                            let source = arg_vals.first().cloned().unwrap_or(Value::Null);
+                            let items: Vec<Value> = match &source {
+                                Value::Array(a) => a.borrow().clone(),
+                                Value::String(s) => s
+                                    .chars()
+                                    .map(|c| Value::String(std::sync::Arc::from(c.to_string())))
+                                    .collect(),
+                                _ => {
+                                    if let Some(d) = self.drain_eval_iterator(&source) {
+                                        d
+                                    } else if matches!(&source, Value::Object(_)) {
+                                        let len = self
+                                            .get_prop(&source, "length")
+                                            .ok()
+                                            .and_then(|v| match v {
+                                                Value::Number(n) if n.is_finite() && n >= 0.0 => {
+                                                    Some(n as usize)
+                                                }
+                                                _ => None,
+                                            })
+                                            .unwrap_or(0);
+                                        (0..len)
+                                            .map(|i| {
+                                                self.get_prop(&source, &i.to_string())
+                                                    .unwrap_or(Value::Null)
+                                            })
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    }
+                                }
+                            };
+                            let out = match arg_vals.get(1) {
+                                Some(f) if !matches!(f, Value::Null) => {
+                                    let mut o = Vec::with_capacity(items.len());
+                                    for (i, item) in items.into_iter().enumerate() {
+                                        o.push(self.call_func(f, &[item, Value::Number(i as f64)])?);
+                                    }
+                                    o
+                                }
+                                _ => items,
+                            };
+                            return Ok(Value::array(out));
+                        }
+                    }
+
                     // Array methods
                     if let Value::Array(arr) = &obj {
                         match method_name.as_ref() {

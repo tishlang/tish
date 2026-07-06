@@ -54,6 +54,47 @@ pub fn array_of(args: &[Value]) -> Value {
     Value::Array(VmRef::new(args.to_vec()))
 }
 
+/// `Array.from(source, mapFn?)` — build an array from an iterable (array, string, Set/Map, or any
+/// `__drain__`/`next` iterator — via the shared iterator protocol) or an array-like `{ length }`
+/// object, optionally mapping each element through `mapFn(item, index)`.
+pub fn array_from(args: &[Value]) -> Value {
+    let source = args.first().cloned().unwrap_or(Value::Null);
+    let items: Vec<Value> = match &source {
+        Value::Array(a) => a.borrow().clone(),
+        Value::NumberArray(a) => a.borrow().iter().map(|n| Value::Number(*n)).collect(),
+        // `drain_iterator` covers String (chars), Set/Map, and any iterator object.
+        other => {
+            if let Some(d) = tishlang_core::drain_iterator(other) {
+                d
+            } else if matches!(other, Value::Object(_)) {
+                let len = tishlang_core::object_get(other, &Value::String("length".into()))
+                    .and_then(|v| match v {
+                        Value::Number(n) if n.is_finite() && n >= 0.0 => Some(n as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                (0..len)
+                    .map(|i| {
+                        tishlang_core::object_get(other, &Value::String(i.to_string().into()))
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+    };
+    let out: Vec<Value> = match args.get(1) {
+        Some(Value::Function(f)) => items
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| f.call(&[x, Value::Number(i as f64)]))
+            .collect(),
+        _ => items,
+    };
+    Value::Array(VmRef::new(out))
+}
+
 /// `Object.is(a, b)` — SameValue: like `===`, but NaN equals NaN and `+0` is NOT equal to `-0`.
 pub fn object_is(args: &[Value]) -> Value {
     let a = args.first().unwrap_or(&Value::Null);
