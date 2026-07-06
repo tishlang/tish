@@ -67,3 +67,7 @@ from-len 0,10,20
 from-map 2,4,6
 rep-amp a[-]b-c a[-]b[-]c
 rep-ctx aac acc a$c
+clz32 31 32 0
+fround 1.100000023841858 5.5
+expm1 0 0
+gopn a,b

@@ -1,7 +1,7 @@
 //! Math builtin functions.
 
 use crate::helpers::extract_num;
-use tishlang_core::{to_int32, Value};
+use tishlang_core::{to_int32, to_uint32, Value};
 
 macro_rules! math_unary {
     ($name:ident, $op:ident) => {
@@ -28,6 +28,20 @@ math_unary!(log2, log2);
 math_unary!(exp, exp);
 math_unary!(trunc, trunc);
 math_unary!(cbrt, cbrt);
+math_unary!(expm1, exp_m1);
+math_unary!(log1p, ln_1p);
+
+/// `Math.clz32(x)` — count leading zero bits of `ToUint32(x)` (0..=32).
+pub fn clz32(args: &[Value]) -> Value {
+    let n = to_uint32(extract_num(args.first()).unwrap_or(0.0));
+    Value::Number(n.leading_zeros() as f64)
+}
+
+/// `Math.fround(x)` — round `x` to the nearest 32-bit float, back to f64.
+pub fn fround(args: &[Value]) -> Value {
+    let x = extract_num(args.first()).unwrap_or(f64::NAN);
+    Value::Number(x as f32 as f64)
+}
 
 // --- f64-domain semantics (single source of truth) -------------------------------------------------
 // These hold the JS-specific Math rules so every backend agrees: the vm/native paths call the

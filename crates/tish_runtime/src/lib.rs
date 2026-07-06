@@ -905,6 +905,14 @@ runtime_math_unary!(math_atanh, atanh);
 runtime_math_unary!(math_cbrt, cbrt);
 runtime_math_unary!(math_log2, log2);
 runtime_math_unary!(math_log10, log10);
+runtime_math_unary!(math_expm1, exp_m1);
+runtime_math_unary!(math_log1p, ln_1p);
+pub fn math_clz32(args: &[Value]) -> Value {
+    tishlang_builtins::math::clz32(args)
+}
+pub fn math_fround(args: &[Value]) -> Value {
+    tishlang_builtins::math::fround(args)
+}
 
 pub fn json_stringify(args: &[Value]) -> Value {
     let v = args.first().cloned().unwrap_or(Value::Null);

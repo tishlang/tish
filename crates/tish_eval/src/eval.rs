@@ -282,6 +282,10 @@ impl Evaluator {
             math.insert("acosh".into(), Value::Native(natives::math_acosh));
             math.insert("atanh".into(), Value::Native(natives::math_atanh));
             math.insert("cbrt".into(), Value::Native(natives::math_cbrt));
+            math.insert("expm1".into(), Value::Native(natives::math_expm1));
+            math.insert("log1p".into(), Value::Native(natives::math_log1p));
+            math.insert("clz32".into(), Value::Native(natives::math_clz32));
+            math.insert("fround".into(), Value::Native(natives::math_fround));
             math.insert("log2".into(), Value::Native(natives::math_log2));
             math.insert("log10".into(), Value::Native(natives::math_log10));
             math.insert("PI".into(), Value::Number(std::f64::consts::PI));
@@ -331,6 +335,8 @@ impl Evaluator {
             object.insert("entries".into(), Value::Native(Self::object_entries));
             object.insert("assign".into(), Value::Native(Self::object_assign));
             object.insert("is".into(), Value::Native(natives::object_is));
+            // getOwnPropertyNames ≈ keys for tish's plain objects (own string keys, insertion order).
+            object.insert("getOwnPropertyNames".into(), Value::Native(Self::object_keys));
             object.insert(
                 "fromEntries".into(),
                 Value::Native(Self::object_from_entries),

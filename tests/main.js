@@ -3437,6 +3437,10 @@ console.log("from-len", Array.from({length: 3}, (x, i) => i * 10).join(","))
 console.log("from-map", Array.from([1,2,3], x => x * 2).join(","))
 console.log("rep-amp", "a-b-c".replace("-", "[$&]"), "a-b-c".replaceAll("-", "[$&]"))
 console.log("rep-ctx", "abc".replace("b", "$`"), "abc".replace("b", "$'"), "abc".replace("b", "$$"))
+console.log("clz32", Math.clz32(1), Math.clz32(0), Math.clz32(0xffffffff))
+console.log("fround", Math.fround(1.1), Math.fround(5.5))
+console.log("expm1", Math.expm1(0), Math.log1p(0))
+console.log("gopn", Object.getOwnPropertyNames({a: 1, b: 2}).join(","))
 }
 
 {

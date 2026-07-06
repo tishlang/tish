@@ -634,6 +634,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     math_unary!("cbrt", cbrt);
     math_unary!("log2", log2);
     math_unary!("log10", log10);
+    math_unary!("expm1", exp_m1);
+    math_unary!("log1p", ln_1p);
+    math.insert("clz32".into(), Value::native(|a: &[Value]| math_builtins::clz32(a)));
+    math.insert("fround".into(), Value::native(|a: &[Value]| math_builtins::fround(a)));
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
     g.insert("Math".into(), value_object_from_map(math));
@@ -778,6 +782,10 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     object_methods.insert(
         "is".into(),
         Value::native(|args: &[Value]| globals_builtins::object_is(args)),
+    );
+    object_methods.insert(
+        "getOwnPropertyNames".into(),
+        Value::native(|args: &[Value]| globals_builtins::object_keys(args)),
     );
     object_methods.insert(
         "fromEntries".into(),
