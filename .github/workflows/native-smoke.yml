@@ -1,0 +1,54 @@
+# Serve correctness smoke test — the standing CI guard that `serve(port, handler)` actually binds and
+# serves on BOTH HTTP backends (tiny_http default + hyper), compiled to a native Rust binary. Guards
+# issue #469 (native serve was silently exiting) and keeps the hyper backend from bit-rotting, since
+# it is compiled only under `--feature http-hyper` and so is invisible to the default build/tests.
+#
+# Runs on Linux (the deployment / hyper-per-core target). No load generation here — this is a
+# correctness gate (routes return the right bodies, the process stays up), not a benchmark; throughput
+# lives in http-perf.yml.
+name: Native smoke (CLI + fs + HTTP×2)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/tish_runtime/**"
+      - "crates/tish_compile/**"
+      - "crates/tish_eval/**"
+      - "crates/tish_vm/**"
+      - "crates/tish_core/**"
+      - "tests/http/**"
+      - "tests/native_smoke/**"
+      - "scripts/test_serve_smoke.sh"
+      - "scripts/test_native_smoke.sh"
+      - ".github/workflows/native-smoke.yml"
+
+concurrency:
+  group: native-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-smoke:
+    name: Native apps — CLI + fs + serve (tiny_http + hyper)
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 30
+    env:
+      # Fleet-safe target-cpu (#223): the default `native` SIGILLs on the virtualized fleet.
+      # No sccache: it flakes the `tish build --native-backend rust` server compile (see http-perf.yml).
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Build tish (release)
+        run: cargo build --release -p tishlang --bin tish
+
+      - name: Native smoke — CLI + fs + serve (both backends)
+        run: bash scripts/test_native_smoke.sh

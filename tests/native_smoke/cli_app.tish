@@ -1,0 +1,15 @@
+// Native CLI smoke — computation, recursion, array/string builtins, process.env, clean exit.
+// Uses the `fn main()` entry idiom (#469 auto-main). Build: --feature process.
+fn fib(n) {
+  if (n < 2) { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+fn main() {
+  let nums = [5, 3, 8, 1, 9, 2]
+  console.log("sorted:", nums.toSorted((a, b) => a - b).join(","))
+  console.log("sum:", nums.reduce((a, b) => a + b, 0))
+  console.log("fib10:", fib(10))
+  console.log("upper:", "native".toUpperCase())
+  let name = "SMOKE_NAME" in process.env ? process.env.SMOKE_NAME : "world"
+  console.log("hello:", name)
+}

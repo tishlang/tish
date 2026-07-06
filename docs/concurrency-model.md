@@ -194,7 +194,7 @@ accepted the connection** — no cross-thread queue (`worker_loop_direct`, `http
 `let response_value = handler(&[req_value]);` is the bytecode VM executing the user handler to
 completion on that thread. N threads/processes ⇒ N requests truly in parallel. (The opt-in hyper
 backend funnels to a single VM dispatcher thread reached over an mpsc channel,
-`http_hyper.rs:187-198`.)
+`http_hyper.rs` `serve`'s dispatcher loop.)
 
 ### 3d. Async I/O inside a handler
 
