@@ -4494,12 +4494,13 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
         Value::NumberArray(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
-                _ => {
-                    return Err(format!(
-                        "Array index must be number, got {}",
-                        idx.type_name()
-                    ))
-                }
+                // A canonical integer string key ("0","1",…) indexes the array (#432); any other key
+                // reads Null (JS reads a missing property as undefined) rather than throwing.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Ok(Value::Null),
+                },
+                _ => return Ok(Value::Null),
             };
             // NaN is used as the hole marker (sparse-array positions); reads return Null.
             Ok(a.borrow()
@@ -4516,12 +4517,12 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
         Value::Array(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
-                _ => {
-                    return Err(format!(
-                        "Array index must be number, got {}",
-                        idx.type_name()
-                    ));
-                }
+                // Canonical integer string key → index (#432); any other key reads Null, not a throw.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Ok(Value::Null),
+                },
+                _ => return Ok(Value::Null),
             };
             Ok(a.borrow().get(i).cloned().unwrap_or(Value::Null))
         }
@@ -4608,6 +4609,12 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
         Value::NumberArray(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
+                // Canonical integer string key → index (#432); a non-index string key can't be stored
+                // in a Vec-backed array, so the write is a no-op (rather than a throw).
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Ok(()),
+                },
                 _ => {
                     return Err(format!(
                         "Array index must be number, got {}",
@@ -4648,6 +4655,11 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
         Value::Array(a) => {
             let i = match idx {
                 Value::Number(n) => *n as usize,
+                // Canonical integer string key → index (#432); a non-index string key is a no-op write.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Ok(()),
+                },
                 _ => {
                     return Err(format!(
                         "Array index must be number, got {}",

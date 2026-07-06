@@ -189,6 +189,18 @@ pub fn type_error(message: impl Into<String>) -> Value {
     Value::object(e)
 }
 
+/// A string key names a canonical array index iff it is a non-negative integer whose decimal form
+/// round-trips and is below the array-index ceiling (`2³²−1`): `"0"`, `"12"` → `Some`; `"01"`, `"-1"`,
+/// `"1.5"`, `"foo"`, `" 1"`, `""` → `None`. Shared so `arr["0"] === arr[0]` on every backend (#432).
+pub fn str_to_array_index(s: &str) -> Option<usize> {
+    let i: usize = s.parse().ok()?;
+    if i < 4_294_967_295 && i.to_string() == s {
+        Some(i)
+    } else {
+        None
+    }
+}
+
 /// A catchable `RangeError` with an arbitrary message (`{ name: "RangeError", message }`), matching the
 /// VM/interpreter/node shape. Used to PARK a pending throw from a shared builtin that returns a plain
 /// `Value` (e.g. `[1,2].with(5, x)` with an out-of-range index).

@@ -1361,6 +1361,11 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
         Value::Array(arr) => {
             let idx = match index {
                 Value::Number(n) => *n as usize,
+                // Canonical integer string key ("0","1",…) indexes the array (#432); other keys → Null.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Value::Null,
+                },
                 _ => return Value::Null,
             };
             arr.borrow().get(idx).cloned().unwrap_or(Value::Null)
@@ -1369,6 +1374,10 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
         Value::NumberArray(arr) => {
             let idx = match index {
                 Value::Number(n) => *n as usize,
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return Value::Null,
+                },
                 _ => return Value::Null,
             };
             arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
@@ -1469,6 +1478,11 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
         Value::Array(arr) => {
             let index = match idx {
                 Value::Number(n) => *n as usize,
+                // Canonical integer string key → index (#432); a non-index string key is a no-op write.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return val,
+                },
                 _ => panic!("Array index must be number"),
             };
             let mut arr_mut = arr.borrow_mut();
@@ -1485,6 +1499,11 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
         Value::NumberArray(arr) => {
             let index = match idx {
                 Value::Number(n) => *n as usize,
+                // Canonical integer string key → index (#432); a non-index string key is a no-op write.
+                Value::String(s) => match tishlang_core::str_to_array_index(s) {
+                    Some(i) => i,
+                    None => return val,
+                },
                 _ => panic!("Array index must be number"),
             };
             let mut arr_mut = arr.borrow_mut();
