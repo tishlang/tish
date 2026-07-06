@@ -527,6 +527,42 @@ pub fn reduce(arr: &Value, callback: &Value, initial: Option<&Value>) -> Value {
     }
 }
 
+/// `reduceRight(cb, initial?)` — like [`reduce`] but folds right-to-left. `initial` is `None` when
+/// omitted (empty array + no initial → catchable TypeError).
+pub fn reduce_right(arr: &Value, callback: &Value, initial: Option<&Value>) -> Value {
+    let data = snapshot_values(arr);
+    if let Value::Function(cb) = callback {
+        let arr_value = arr.clone();
+        let len = data.len();
+        let (start, mut acc) = match initial {
+            Some(v) => (len, v.clone()),
+            None if len > 0 => (len - 1, data[len - 1].clone()),
+            None => {
+                tishlang_core::set_pending_throw(tishlang_core::type_error(
+                    "Reduce of empty array with no initial value",
+                ));
+                return Value::Null;
+            }
+        };
+        let mut i = start;
+        while i > 0 {
+            i -= 1;
+            if tishlang_core::has_pending_throw() {
+                return acc;
+            }
+            acc = cb.call(&[
+                acc,
+                data[i].clone(),
+                Value::Number(i as f64),
+                arr_value.clone(),
+            ]);
+        }
+        acc
+    } else {
+        Value::Null
+    }
+}
+
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         let arr_value = arr.clone(); // 3rd callback arg (JS `array`)

@@ -2109,6 +2109,27 @@ impl Evaluator {
                                 }
                                 return Ok(acc);
                             }
+                            "reduceRight" => {
+                                let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
+                                let arr_borrow = arr.borrow().clone();
+                                let arr_value = Value::Array(arr.clone());
+                                let len = arr_borrow.len();
+                                // With an initial value, fold indices len-1..0; without, seed from the
+                                // last element and fold len-2..0. Empty + no init → TypeError.
+                                let (mut acc, start) = if arg_vals.len() > 1 {
+                                    (arg_vals[1].clone(), len)
+                                } else if len > 0 {
+                                    (arr_borrow[len - 1].clone(), len - 1)
+                                } else {
+                                    return Err(EvalError::Error("Reduce of empty array with no initial value".to_string()));
+                                };
+                                let mut i = start;
+                                while i > 0 {
+                                    i -= 1;
+                                    acc = self.call_func(&callback, &[acc, arr_borrow[i].clone(), Value::Number(i as f64), arr_value.clone()])?;
+                                }
+                                return Ok(acc);
+                            }
                             "find" => {
                                 let callback = arg_vals.first().cloned().unwrap_or(Value::Null);
                                 let arr_borrow = arr.borrow().clone(); // snapshot; drop borrow before callbacks
