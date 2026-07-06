@@ -1,0 +1,8 @@
+set-spread 1,2,3
+map-spread a:1|b:2
+str-spread a,b,c
+mixed 0,1,2,3,9
+callspread-max 3
+set-forof 10,20,30
+str-forof x.y.z.
+map-forof-keys a,b

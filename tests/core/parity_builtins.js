@@ -15,6 +15,20 @@ console.log("hypot-empty", Math.hypot())
 console.log("hypot-nan", Math.hypot(0 / 0, 4))
 console.log("hypot-inf", Math.hypot(1 / 0, 0 / 0))
 console.log("atan2", Math.atan2(1, 1))
+// Math.imul: exact 32-bit multiply (ToInt32 both operands, wrapping) — NOT a saturating cast. The
+// large-arg cases (args >= 2^31) are the ones the old `as i32` cast got wrong; all backends now agree.
+console.log("imul-small", Math.imul(3, 4))
+console.log("imul-u32", Math.imul(0xffffffff, 5))
+console.log("imul-over", Math.imul(3000000000, 1))
+console.log("imul-neg", Math.imul(-5, -5))
+// Math.sign preserves the sign of -0 (1/-0 = -Infinity distinguishes -0 from +0).
+console.log("sign-neg0", 1 / Math.sign(-0))
+console.log("sign-pos0", 1 / Math.sign(0))
+console.log("sign-neg", Math.sign(-5))
+// padStart/padEnd with an explicit empty fill add NO padding; an absent fill defaults to a space.
+console.log("pad-empty", "x".padStart(3, ""))
+console.log("pad-space", "x".padStart(3))
+console.log("padend-empty", "x".padEnd(3, ""))
 console.log("includes-nan", [1, 0 / 0].includes(0 / 0))
 console.log("includes-no", [1, 2].includes(3))
 console.log("parseint-hex", parseInt("0x1F", 16))

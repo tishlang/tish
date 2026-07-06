@@ -12228,6 +12228,18 @@ impl Codegen {
                 }
                 _ => false,
             },
+            // `Math.imul(a, b)` — an exact int32-domain node (emits an i32 `wrapping_mul`, see
+            // `emit_int32_operand`), so it participates in an int32 chain when both operands are
+            // themselves int32-lowerable. Lets `h = Math.imul(h, K) >>> 0` keep `h` in a register
+            // across the loop instead of narrowing/widening `h` on every op.
+            Expr::Call { callee, args, .. } => {
+                matches!(callee.as_ref(),
+                    Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. }
+                        if m.as_ref() == "imul"
+                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math"))
+                    && matches!(args.as_slice(), [CallArg::Expr(a0), CallArg::Expr(a1)]
+                        if self.i32_chain_lowerable(a0, var) && self.i32_chain_lowerable(a1, var))
+            }
             _ => false,
         }
     }
@@ -13388,6 +13400,22 @@ impl Codegen {
                                 "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
                                     | "trunc" | "log"
                             )
+                        {
+                            return RustType::F64;
+                        }
+                    }
+                }
+                // Two-arg `Math.imul(a, b)` → an exact 32-bit product (a number). Modelled so a value
+                // fed by it (`h = Math.imul(h, K) >>> 0`) is not demoted to a boxed `Value`.
+                if let [CallArg::Expr(_), CallArg::Expr(_)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if method.as_ref() == "imul"
+                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
                         {
                             return RustType::F64;
                         }
@@ -15827,12 +15855,16 @@ impl Codegen {
                     }
                     Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                         matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
-                            && args.len() == 1
-                            && matches!(
-                                m.as_ref(),
-                                "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp"
-                                    | "trunc" | "log"
-                            )
+                            && ((args.len() == 1
+                                && matches!(
+                                    m.as_ref(),
+                                    "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil"
+                                        | "exp" | "trunc" | "log"
+                                ))
+                                // 2-arg `Math.imul` inlines to an exact i32 wrapping multiply — a
+                                // native-safe numeric primitive (no dispatch), so a fn using it (FNV
+                                // with imul, xmur3/mulberry32 PRNGs) stays eligible for native typing.
+                                || (args.len() == 2 && m.as_ref() == "imul"))
                     }
                     _ => false,
                 }
@@ -20879,6 +20911,30 @@ impl Codegen {
                 return Ok(Some(code));
             }
         }
+        // `Math.imul(a, b)` in an int32 context → the raw i32 `wrapping_mul` (no f64 excursion, no
+        // `to_int32` round-trip on the product), when both operands are themselves int32-lowerable.
+        // JS ES6 semantics (ToInt32 both operands, wrapping 32-bit multiply, signed result) are carried
+        // by the operands' own int32 lowering. Keeps `h = Math.imul(h, K) >>> 0` fully register-domain.
+        if let Expr::Call { callee, args, .. } = e {
+            if let [CallArg::Expr(a0), CallArg::Expr(a1)] = args.as_slice() {
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: m, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if m.as_ref() == "imul"
+                        && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                    {
+                        let ai = self.emit_int32_operand(a0)?;
+                        let bi = self.emit_int32_operand(a1)?;
+                        if let (Some(ai), Some(bi)) = (ai, bi) {
+                            return Ok(Some(format!("(({}).wrapping_mul({}))", ai, bi)));
+                        }
+                    }
+                }
+            }
+        }
         // Integer-literal leaf: `ToInt32(<int literal>)` is a compile-time constant — emit it
         // directly (`v as i32` = modulo 2^32 = JS ToInt32 of the integer) instead of a runtime
         // `to_int32(1_f64)` call. Removes the constant round-trip in masks/shift-counts
@@ -21446,6 +21502,35 @@ impl Codegen {
                                 ),
                                 RustType::F64,
                             ));
+                        }
+                    }
+                }
+                // `Math.imul(a, b)` → an inline exact 32-bit wrapping multiply (ES6: ToInt32 both
+                // operands, wrapping i32 multiply, signed int32 result). Both args go through
+                // `emit_int32_operand` — the SAME ToInt32 lowering the bitwise path uses — so this is
+                // bit-for-bit identical to the boxed `tish_math_imul` and to V8: typed==boxed==node
+                // holds. It eliminates the per-call arg boxing + `value_call` a hot hashing/PRNG loop
+                // (xmur3, mulberry32, FNV-with-imul) would otherwise pay. A general primitive (fires
+                // for any `Math.imul`), not a fixture-specific kernel emission (cf. #317). Falls
+                // through to the boxed call when an operand isn't int32-lowerable.
+                if let [CallArg::Expr(a0), CallArg::Expr(a1)] = args.as_slice() {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: method, .. },
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if method.as_ref() == "imul"
+                            && matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                        {
+                            let ai = self.emit_int32_operand(a0)?;
+                            let bi = self.emit_int32_operand(a1)?;
+                            if let (Some(ai), Some(bi)) = (ai, bi) {
+                                return Ok((
+                                    format!("(({}).wrapping_mul({}) as f64)", ai, bi),
+                                    RustType::F64,
+                                ));
+                            }
                         }
                     }
                 }

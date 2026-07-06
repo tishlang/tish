@@ -262,6 +262,7 @@ impl Evaluator {
             math.insert("round".into(), Value::Native(natives::math_round));
             math.insert("random".into(), Value::Native(natives::math_random));
             math.insert("pow".into(), Value::Native(natives::math_pow));
+            math.insert("imul".into(), Value::Native(natives::math_imul));
             math.insert("hypot".into(), Value::Native(natives::math_hypot));
             math.insert("asin".into(), Value::Native(natives::math_asin));
             math.insert("acos".into(), Value::Native(natives::math_acos));
@@ -4027,6 +4028,15 @@ impl Evaluator {
     /// `.entries()` — into a `Vec` by calling `next()` until `done`. Returns `None` when `v`
     /// is not such an object. Shared by `for…of` and spread so both treat iterators like JS.
     fn drain_eval_iterator(&self, v: &Value) -> Option<Vec<Value>> {
+        // A string spreads as its characters (`[...s]`, `f(...s)`); for-of over a string is handled
+        // separately at the loop site, but spread routes through here. (#440)
+        if let Value::String(s) = v {
+            return Some(
+                s.chars()
+                    .map(|c| Value::String(std::sync::Arc::from(c.to_string())))
+                    .collect(),
+            );
+        }
         if !matches!(v, Value::Object(_)) {
             return None;
         }

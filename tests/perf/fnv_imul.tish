@@ -1,0 +1,19 @@
+// GAUNTLET: FNV-1a hashing written the idiomatic ES6 way — a 32-bit `Math.imul` multiply instead of
+// plain `h * 16777619`. This is the *correct* way to write a 32-bit hash in JS: plain `*` silently
+// loses precision once the product exceeds 2^53 (V8 and tish both round, so the low bits — the ones
+// `>>> 0` keeps — are wrong), whereas `Math.imul` is defined as an exact 32-bit wrapping multiply.
+// Exercises the typed-native inline `Math.imul` lowering (an i32 `wrapping_mul`, no per-call boxing
+// or `value_call`) against the boxed builtin and V8 — all three agree on the exact 32-bit result.
+function fnv1a_imul(n) {
+  let h = 2166136261
+  for (let i = 0; i < n; i++) {
+    h = h ^ (i & 255)
+    h = Math.imul(h, 16777619) >>> 0
+    h = ((h << 13) | (h >>> 19)) >>> 0
+  }
+  return h >>> 0
+}
+
+let t0 = Date.now()
+let check = fnv1a_imul(20000000)
+console.log("GAUNTLET fnv_imul " + (Date.now() - t0) + " " + check)

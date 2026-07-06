@@ -258,7 +258,9 @@ impl MathUnaryFn {
                 }
             }
             MathUnaryFn::Trunc => x.trunc(),
-            // JS `Math.sign` (matches `tishlang_builtins::math::sign`): NaN→NaN, else ±1, and 0/-0→+0.
+            // JS `Math.sign` (matches `tishlang_builtins::math::sign`): NaN→NaN, else ±1; and for
+            // ±0 return `x` unchanged so `Math.sign(-0)` is `-0` (`x < 0.0` is false for -0, so it
+            // lands in the else — bare `0.0` would drop the sign).
             MathUnaryFn::Sign => {
                 if x.is_nan() {
                     f64::NAN
@@ -267,7 +269,7 @@ impl MathUnaryFn {
                 } else if x < 0.0 {
                     -1.0
                 } else {
-                    0.0
+                    x
                 }
             }
             MathUnaryFn::Sin => x.sin(),
