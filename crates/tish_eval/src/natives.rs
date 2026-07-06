@@ -376,6 +376,21 @@ pub fn to_number(v: &Value) -> f64 {
     }
 }
 
+// `Number.*` static predicates — no coercion (the coercing forms are the bare globals).
+pub fn number_is_integer(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_finite() && n.fract() == 0.0)))
+}
+pub fn number_is_safe_integer(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(matches!(args.first(),
+        Some(Value::Number(n)) if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0)))
+}
+pub fn number_is_nan(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_nan())))
+}
+pub fn number_is_finite(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Number(n)) if n.is_finite())))
+}
+
 pub fn string_from_char_code(args: &[Value]) -> Result<Value, String> {
     let s: String = args
         .iter()
