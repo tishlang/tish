@@ -33,6 +33,8 @@ idxof-from 2
 idxof-neg 3
 startsw-pos true
 endsw-pos true
+isnan-str false true false
+isfinite-str true false true
 includes-nan true
 includes-no false
 parseint-hex 31

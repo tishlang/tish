@@ -31,19 +31,16 @@ pub fn encode_uri(args: &[Value]) -> Value {
     Value::String(percent_encode(&s).into())
 }
 
-/// isFinite(value)
+/// isFinite(value) — coerces via ToNumber (like `Number()`), then tests finiteness. `isFinite("3")`
+/// is `true`, `isFinite("x")`/`isFinite()` is `false`. (The non-coercing form is `Number.isFinite`.)
 pub fn is_finite(args: &[Value]) -> Value {
-    Value::Bool(
-        args.first()
-            .is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite())),
-    )
+    Value::Bool(args.first().map_or(f64::NAN, to_number).is_finite())
 }
 
-/// isNaN(value)
+/// isNaN(value) — coerces via ToNumber, then tests NaN. `isNaN("3")` is `false`; an absent arg
+/// (undefined) coerces to NaN → `true`. (The non-coercing form is `Number.isNaN`.)
 pub fn is_nan(args: &[Value]) -> Value {
-    Value::Bool(args.first().is_none_or(|v| {
-        matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))
-    }))
+    Value::Bool(args.first().map_or(f64::NAN, to_number).is_nan())
 }
 
 /// Array.isArray(value)
@@ -64,8 +61,14 @@ pub fn string_convert(args: &[Value]) -> Value {
 /// otherwise NaN); arrays/objects go via their string form (so `Number([5])` → 5,
 /// `Number([])` → 0, objects → NaN).
 pub fn number_convert(args: &[Value]) -> Value {
-    let v = args.first().unwrap_or(&Value::Null);
-    let n = match v {
+    Value::Number(to_number(args.first().unwrap_or(&Value::Null)))
+}
+
+/// JS `ToNumber(v)`: Number → itself; Bool → 1/0; Null → 0; String → parsed (trimmed, `0x`/`0b`/`0o`
+/// and `Infinity`; `""` → 0, else NaN); anything else via its string form. The single ToNumber path
+/// shared by `Number()`, `isNaN`/`isFinite`, etc.
+pub fn to_number(v: &Value) -> f64 {
+    match v {
         Value::Number(n) => *n,
         Value::Bool(b) => {
             if *b {
@@ -77,8 +80,7 @@ pub fn number_convert(args: &[Value]) -> Value {
         Value::Null => 0.0,
         Value::String(s) => parse_numeric_string(s),
         other => parse_numeric_string(&other.to_js_string()),
-    };
-    Value::Number(n)
+    }
 }
 
 /// Parse a string as JS `Number` does: trimmed; `""` → 0; `0x`/`0o`/`0b` radix prefixes;

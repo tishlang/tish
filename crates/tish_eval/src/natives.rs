@@ -73,17 +73,13 @@ pub fn parse_float(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn is_finite(args: &[Value]) -> Result<Value, String> {
-    let b = args
-        .first()
-        .is_some_and(|v| matches!(v, Value::Number(n) if n.is_finite()));
-    Ok(Value::Bool(b))
+    // Global isFinite coerces via ToNumber (like Number()); absent arg (undefined) → NaN → false.
+    Ok(Value::Bool(args.first().map_or(f64::NAN, to_number).is_finite()))
 }
 
 pub fn is_nan(args: &[Value]) -> Result<Value, String> {
-    let b = args.first().is_none_or(|v| {
-        matches!(v, Value::Number(n) if n.is_nan()) || !matches!(v, Value::Number(_))
-    });
-    Ok(Value::Bool(b))
+    // Global isNaN coerces via ToNumber; absent arg (undefined) → NaN → true.
+    Ok(Value::Bool(args.first().map_or(f64::NAN, to_number).is_nan()))
 }
 
 pub fn boolean_native(args: &[Value]) -> Result<Value, String> {
@@ -359,8 +355,13 @@ pub fn string_convert(args: &[Value]) -> Result<Value, String> {
 /// `Number(value)` coercion (issue #36) — shares the string parser with the VM/native
 /// backend so the result is byte-identical.
 pub fn number_convert(args: &[Value]) -> Result<Value, String> {
-    let v = args.first().unwrap_or(&Value::Null);
-    let n = match v {
+    Ok(Value::Number(to_number(args.first().unwrap_or(&Value::Null))))
+}
+
+/// JS `ToNumber(v)` for the interpreter's Value — shares the string parser with the VM/native path
+/// so `Number()`, `isNaN`, `isFinite` are byte-identical across backends.
+pub fn to_number(v: &Value) -> f64 {
+    match v {
         Value::Number(n) => *n,
         Value::Bool(b) => {
             if *b {
@@ -372,8 +373,7 @@ pub fn number_convert(args: &[Value]) -> Result<Value, String> {
         Value::Null => 0.0,
         Value::String(s) => tishlang_builtins::globals::parse_numeric_string(s),
         other => tishlang_builtins::globals::parse_numeric_string(&other.to_js_string()),
-    };
-    Ok(Value::Number(n))
+    }
 }
 
 pub fn string_from_char_code(args: &[Value]) -> Result<Value, String> {
