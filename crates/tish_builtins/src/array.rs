@@ -563,6 +563,28 @@ pub fn reduce_right(arr: &Value, callback: &Value, initial: Option<&Value>) -> V
     }
 }
 
+/// `arr.keys()` — an iterator over the indices `0..len`.
+pub fn keys(arr: &Value) -> Value {
+    let len = snapshot_values(arr).len();
+    crate::iterator::array_iterator((0..len).map(|i| Value::Number(i as f64)).collect())
+}
+
+/// `arr.values()` — an iterator over the elements.
+pub fn values(arr: &Value) -> Value {
+    crate::iterator::array_iterator(snapshot_values(arr))
+}
+
+/// `arr.entries()` — an iterator over `[index, element]` pairs.
+pub fn entries(arr: &Value) -> Value {
+    crate::iterator::array_iterator(
+        snapshot_values(arr)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| Value::Array(VmRef::new(vec![Value::Number(i as f64), v])))
+            .collect(),
+    )
+}
+
 pub fn for_each(arr: &Value, callback: &Value) -> Value {
     if let Some((data, cb)) = packed_snapshot(arr, callback) {
         let arr_value = arr.clone(); // 3rd callback arg (JS `array`)

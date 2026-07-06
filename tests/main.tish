@@ -3499,6 +3499,9 @@ console.log("dec-comp", decodeURIComponent("a%20b%26c%3Dd"))
 console.log("dec-uri", decodeURI("a%20b%26c"))
 console.log("rreduce", ["a","b","c"].reduceRight((a, x) => a + x), [1,2,3,4].reduceRight((a, x) => a - x))
 console.log("rreduce-init", ["a","b"].reduceRight((a, x) => a + x, "z"))
+console.log("akeys", [...["a","b","c"].keys()].join(","))
+console.log("avalues", [...["a","b","c"].values()].join(","))
+console.log("aentries", [...["a","b"].entries()].map(e => e.join(":")).join("|"))
 }
 __perf_run_core_parity_builtins()
 

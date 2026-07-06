@@ -76,3 +76,6 @@ dec-comp a b&c=d
 dec-uri a b%26c
 rreduce cba -2
 rreduce-init zba
+akeys 0,1,2
+avalues a,b,c
+aentries 0:a|1:b

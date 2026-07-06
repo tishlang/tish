@@ -120,7 +120,7 @@ pub use tishlang_builtins::array::{
     join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
     fill as array_fill, last_index_of as array_last_index_of, copy_within as array_copy_within,
     reduce as array_reduce, reduce_right as array_reduce_right, reverse as array_reverse,
-    shift as array_shift,
+    keys as array_keys, values as array_values, entries as array_entries, shift as array_shift,
     shuffle as array_shuffle, slice as array_slice_impl, snapshot_values as array_snapshot_values,
     as_f64_snapshot as array_as_f64_snapshot, some as array_some,
     sort_by_keys as array_sort_by_keys, sort_default as array_sort_default,

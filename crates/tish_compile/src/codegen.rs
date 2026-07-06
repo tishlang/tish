@@ -7172,6 +7172,15 @@ impl Codegen {
                                 obj_expr, callback, init_arg
                             ));
                         }
+                        "keys" => {
+                            return Ok(format!("tishlang_runtime::array_keys(&{})", obj_expr));
+                        }
+                        "values" => {
+                            return Ok(format!("tishlang_runtime::array_values(&{})", obj_expr));
+                        }
+                        "entries" => {
+                            return Ok(format!("tishlang_runtime::array_entries(&{})", obj_expr));
+                        }
                         "forEach" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             return Ok(format!(
