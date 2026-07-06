@@ -175,9 +175,13 @@ pub fn map_get(map: &Value, key: &Value) -> Value {
 }
 
 /// Direct `Map.prototype.set` (mutates in place; returns `undefined` = `Null`).
-pub fn map_set(map: &Value, key: Value, val: Value) -> Value {
+///
+/// Takes the key/val by reference and clones on insert (the map owns its entries). Passing by
+/// reference lets the native emitter BORROW the caller's place instead of moving it, so
+/// `m.set(k, v); …use k…` no longer produces `E0382 use of moved value` in the generated Rust (#442).
+pub fn map_set(map: &Value, key: &Value, val: &Value) -> Value {
     if let Some(s) = map_store(map) {
-        s.borrow_mut().insert(Key(key), val);
+        s.borrow_mut().insert(Key(key.clone()), val.clone());
     }
     Value::Null
 }
