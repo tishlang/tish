@@ -928,6 +928,13 @@ pub(crate) struct Codegen {
     module_const_f64_aliases: std::collections::HashMap<String, String>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
     map_instance_locals: std::collections::HashSet<String>,
+    /// #456 regression guard: locals initialized with `new Map()` OR `new Set()`. Arrays have no
+    /// runtime method table (`get_prop` returns Null for a method name), so `keys`/`values`/`entries`
+    /// MUST use the array fast-path — but that same fast-path would hijack a Map/Set's own
+    /// `keys`/`values`/`entries` (which DO resolve as bound methods via `get_prop`). So the array
+    /// fast-path fires by default and is suppressed only for a known collection local, which then
+    /// falls through to the generic bound-method call.
+    collection_instance_locals: std::collections::HashSet<String>,
     /// String-scan hoist: inside a `for (i; i < s.length; …)` loop over an invariant native `String`
     /// `s`, the loop body's `s.charCodeAt/charAt/at(i)` route to O(1) `Vec<char>` slice ops instead
     /// of `str_char_code_at`'s `chars().nth(i)` = O(i). Maps the source ident → the hoisted `_scN`
@@ -1154,6 +1161,7 @@ impl Codegen {
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
             map_instance_locals: std::collections::HashSet::new(),
+            collection_instance_locals: std::collections::HashSet::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             native_fn_body_emit: false,
@@ -4638,6 +4646,11 @@ impl Codegen {
                     if Self::expr_is_map_construct(init_e) {
                         self.map_instance_locals.insert(name.to_string());
                     }
+                    // #456 regression: a `new Map()`/`new Set()` local must not have its
+                    // keys/values/entries hijacked by the array fast-path.
+                    if Self::expr_is_map_construct(init_e) || Self::expr_is_set_construct(init_e) {
+                        self.collection_instance_locals.insert(name.to_string());
+                    }
                 }
 
                 // `let cum = cumulative_nv(&probs)` inherits `probs`' fixed length for in-bounds reads.
@@ -7214,13 +7227,17 @@ impl Codegen {
                                 obj_expr, callback, init_arg
                             ));
                         }
-                        "keys" => {
+                        // keys/values/entries exist on BOTH arrays and Map/Set. Arrays have no runtime
+                        // method table, so they need this fast-path; a known Map/Set local instead
+                        // falls through to the generic bound-method call (its get_prop resolves them).
+                        // (#456 regression — the unguarded arms hijacked `m.keys()`/`s.values()`.)
+                        "keys" if !self.kve_defers_to_generic(object.as_ref()) => {
                             return Ok(format!("tishlang_runtime::array_keys(&{})", obj_expr));
                         }
-                        "values" => {
+                        "values" if !self.kve_defers_to_generic(object.as_ref()) => {
                             return Ok(format!("tishlang_runtime::array_values(&{})", obj_expr));
                         }
-                        "entries" => {
+                        "entries" if !self.kve_defers_to_generic(object.as_ref()) => {
                             return Ok(format!("tishlang_runtime::array_entries(&{})", obj_expr));
                         }
                         "forEach" => {
@@ -14841,6 +14858,32 @@ impl Codegen {
                 ..
             } if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Map")
         )
+    }
+
+    fn expr_is_set_construct(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::New {
+                callee,
+                ..
+            } if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Set")
+        )
+    }
+
+    /// #456 regression guard: should `<object>.keys()/.values()/.entries()` DEFER to the generic
+    /// bound-method call instead of the array fast-path? True when `object` is not an array:
+    /// - the `Object` global (`Object.keys/values/entries` are STATICS → `tish_object_*`),
+    /// - a known `new Map()`/`new Set()` local, or a direct `new Map(…)`/`new Set(…)` receiver
+    ///   (their keys/values/entries resolve as bound methods via `get_prop`).
+    /// Arrays (everything else) keep the fast-path — they have no runtime method table.
+    fn kve_defers_to_generic(&self, object: &Expr) -> bool {
+        match object {
+            Expr::Ident { name, .. } => {
+                let n = name.as_ref();
+                n == "Object" || self.collection_instance_locals.contains(n)
+            }
+            _ => Self::expr_is_map_construct(object) || Self::expr_is_set_construct(object),
+        }
     }
 
     /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
