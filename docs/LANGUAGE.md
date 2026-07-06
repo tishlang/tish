@@ -79,6 +79,22 @@ Requires **`http` feature**.
 - **`fetchAll(requests[])`** → **`Promise`** array of the same response shape.
 - **`serve(port, handler)`** — server **`req.body`** / response **`body`** are **strings** (not the client stream shape).
 
+### Native HTTP servers
+
+A tish HTTP server compiles to a standalone native binary. Write the handler, call `serve(port, handler)` — either at the top level or from a `fn main() { … }` entry (auto-invoked; see **Entry point (`main`)** above) — and build:
+
+```bash
+tish build server.tish -o server --target native --feature http --feature process
+PORT=8080 ./server          # binds and serves until terminated
+```
+
+Two backends share the same `serve` API and can be produced from one source:
+
+- **`tiny_http`** (default) — prefork across worker processes (`SO_REUSEPORT`); handlers run in parallel per process. No extra flags.
+- **`hyper`** (opt-in) — async, non-blocking, single tokio runtime per core, for high-concurrency Linux deployments. Compile with `--feature http-hyper` and select at runtime with `TISH_HTTP_BACKEND=hyper` (HTTP/1.1). The same binary runs either backend, so you can A/B without rebuilding.
+
+Both backends are guarded in CI (`scripts/test_serve_smoke.sh` / the *Native smoke* workflow) against static, JSON, and dynamic routes.
+
 **Top-level `await`:** supported by the interpreter (`tish run …`, module programs) and inside an `async fn main` entry (which the native backend lowers to the generated binary's `async fn main`). The interpreter cannot yet `await` a *user* async function's result — use `await` on the built-in promises (`fetch`, `reader.read()`, …).
 
 **See also:** [`tish_runtime/tests/fetch_readable_stream.rs`](https://github.com/tishlang/tish/blob/main/crates/tish_runtime/tests/fetch_readable_stream.rs) (chunked client body over `getReader()`).
