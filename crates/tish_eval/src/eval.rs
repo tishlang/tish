@@ -240,6 +240,7 @@ impl Evaluator {
             s.set("encodeURI".into(), Value::Native(natives::encode_uri), true);
             s.set("encodeURIComponent".into(), Value::Native(natives::encode_uri_component), true);
             s.set("decodeURIComponent".into(), Value::Native(natives::decode_uri_component), true);
+            s.set("structuredClone".into(), Value::Native(natives::structured_clone), true);
             s.set(
                 "htmlEscape".into(),
                 Value::Native(natives::html_escape),

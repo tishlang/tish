@@ -660,3 +660,53 @@ pub fn tty_read(args: &[Value]) -> Result<Value, String> {
         None => Value::Null,
     })
 }
+
+/// `structuredClone(value)` — recursive deep copy of arrays/objects/primitives with cycles preserved
+/// (a repeated reference clones to the same new node). Matches the shared vm/native impl in
+/// `tishlang_builtins::globals::structured_clone`; functions and exotic types are shared/shallow.
+pub fn structured_clone(args: &[Value]) -> Result<Value, String> {
+    let mut seen: Vec<(*const (), Value)> = Vec::new();
+    Ok(deep_clone(args.first().unwrap_or(&Value::Null), &mut seen))
+}
+
+fn deep_clone(v: &Value, seen: &mut Vec<(*const (), Value)>) -> Value {
+    use std::rc::Rc;
+    match v {
+        Value::Array(a) => {
+            let ptr = Rc::as_ptr(a) as *const ();
+            if let Some((_, c)) = seen.iter().find(|(p, _)| *p == ptr) {
+                return c.clone();
+            }
+            let new = Value::array(Vec::new());
+            if let Value::Array(na) = &new {
+                seen.push((ptr, new.clone()));
+                let src = a.borrow().clone();
+                let cloned: Vec<Value> = src.iter().map(|e| deep_clone(e, seen)).collect();
+                *na.borrow_mut() = cloned;
+            }
+            new
+        }
+        Value::Object(o) => {
+            let ptr = Rc::as_ptr(o) as *const ();
+            if let Some((_, c)) = seen.iter().find(|(p, _)| *p == ptr) {
+                return c.clone();
+            }
+            let entries: Vec<(std::sync::Arc<str>, Value)> = o
+                .borrow()
+                .strings
+                .iter()
+                .map(|(k, val)| (k.clone(), val.clone()))
+                .collect();
+            let new = Value::object(crate::value::PropMap::default());
+            if let Value::Object(no) = &new {
+                seen.push((ptr, new.clone()));
+                for (k, val) in entries {
+                    let cloned = deep_clone(&val, seen);
+                    no.borrow_mut().strings.insert(k, cloned);
+                }
+            }
+            new
+        }
+        other => other.clone(),
+    }
+}
