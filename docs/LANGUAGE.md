@@ -27,6 +27,8 @@ Tish is a minimal JS/TS-like language: same source runs in a **tree-walking inte
 
 **Functions:** `fn name(a, b) { … }`, single-expr body `fn f(x) = x * 2`, arrows `let g = (a, b) => a + b`, `async fn …` with `await`.
 
+**Entry point (`main`):** a program is its top-level statements (module semantics) — they run top to bottom. As a convenience for compiled-language habits, if the top level declares a `main` function (`fn main` / `async fn main`) and never calls it itself, tish **auto-invokes `main()`** after the top-level statements (so `fn main() { serve(8080, handler) }` on its own actually runs). Auto-invocation is suppressed if you already call `main()` yourself. Consistent across every backend (interpreter, VM, native, JS). This is a tish convention — plain JavaScript does not auto-call `main`.
+
 **Control flow:** `if`/`else`, `while`, `do`/`while`, C-style `for` (comma-separated init declarators: `for (let i = 0, n = len; …)`), `for (let|const x of …)` over arrays, strings, and **iterators** (e.g. `Map`/`Set` `.values()` / `.keys()` / `.entries()`), `switch`, `try`/`catch`.
 
 **Blocks:** `{ … }` **or** indentation (lexer emits `Indent`/`Dedent`). **1 tab = 1 level; 2 spaces = 1 level.** **Debug:** set **`TISH_IGNORE_INDENT=1`** (or `tish dump-ast --ignore-indent`) to ignore indentation and delimit blocks by braces only — handy for isolating whether a nested-block transpilation issue comes from indentation grouping.
@@ -77,7 +79,7 @@ Requires **`http` feature**.
 - **`fetchAll(requests[])`** → **`Promise`** array of the same response shape.
 - **`serve(port, handler)`** — server **`req.body`** / response **`body`** are **strings** (not the client stream shape).
 
-**Top-level `await`:** interpreter `tish run …` (module programs). **Native compile:** `async fn main()` + `await` inside.
+**Top-level `await`:** supported by the interpreter (`tish run …`, module programs) and inside an `async fn main` entry (which the native backend lowers to the generated binary's `async fn main`). The interpreter cannot yet `await` a *user* async function's result — use `await` on the built-in promises (`fetch`, `reader.read()`, …).
 
 **See also:** [`tish_runtime/tests/fetch_readable_stream.rs`](https://github.com/tishlang/tish/blob/main/crates/tish_runtime/tests/fetch_readable_stream.rs) (chunked client body over `getReader()`).
 

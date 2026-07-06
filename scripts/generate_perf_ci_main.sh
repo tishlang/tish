@@ -20,9 +20,11 @@ list_pairs_to_stdout() {
       base=$(basename "$tish" .tish)
       # recursion_stress: pathological depth. jit_probe: on-demand JIT diagnostic with a
       # multi-million-iteration loop (would dominate the suite). jit_regression: correctness
-      # guard, not a benchmark. None belong in the bundled perf run.
+      # guard, not a benchmark. main_entry: declares a top-level `fn main` that tish auto-invokes
+      # (#469) — bundling it would auto-run main in the concatenated program and collide with any
+      # other `main`. None belong in the bundled perf run.
       case "$base" in
-        recursion_stress | jit_probe | jit_regression) continue ;;
+        recursion_stress | jit_probe | jit_regression | main_entry) continue ;;
       esac
       js=""
       if [[ -f "$d/${base}.mjs" ]]; then

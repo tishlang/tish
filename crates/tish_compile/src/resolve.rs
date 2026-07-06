@@ -1711,6 +1711,14 @@ pub(crate) fn rewrite_expr_scope(expr: &mut Expr, active: &HashMap<String, Arc<s
 /// Import statements are rewritten as bindings from already-emitted dep exports.
 /// Export statements are unwrapped (the inner declaration is emitted).
 pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, String> {
+    // #469: give the ENTRY module a Go/Rust/Swift-style `main` entry point. The entry is the last
+    // module (post-order dependency load order), and this runs BEFORE private-binding isolation so the
+    // synthetic `main()` call is renamed in lockstep with the `main` declaration if isolation renames
+    // it. Every backend consumes the merged program, so this keeps interp/vm/native/js consistent.
+    if let Some(entry) = modules.last_mut() {
+        tishlang_ast::append_main_entry(&mut entry.program.statements);
+    }
+
     // #97: isolate module-private top-level bindings before they are flattened together.
     isolate_private_top_level_bindings(&mut modules);
 
