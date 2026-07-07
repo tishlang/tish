@@ -337,6 +337,12 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "execFile" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::process_exec_file(args)
             })),
+            "execCapture" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::process_exec_capture(args)
+            })),
+            "execFileCapture" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::process_exec_file_capture(args)
+            })),
             "argv" => Some(Value::Array(VmRef::new(
                 tishlang_core::process_argv()
                     .into_iter()
@@ -365,6 +371,16 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
                 m.insert(
                     "execFile".into(),
                     Value::native(|args: &[Value]| tishlang_runtime::process_exec_file(args)),
+                );
+                m.insert(
+                    "execCapture".into(),
+                    Value::native(|args: &[Value]| tishlang_runtime::process_exec_capture(args)),
+                );
+                m.insert(
+                    "execFileCapture".into(),
+                    Value::native(|args: &[Value]| {
+                        tishlang_runtime::process_exec_file_capture(args)
+                    }),
                 );
                 m.insert(
                     "argv".into(),
@@ -958,6 +974,14 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         process_obj.insert(
             "execFile".into(),
             Value::native(|args: &[Value]| tishlang_runtime::process_exec_file(args)),
+        );
+        process_obj.insert(
+            "execCapture".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::process_exec_capture(args)),
+        );
+        process_obj.insert(
+            "execFileCapture".into(),
+            Value::native(|args: &[Value]| tishlang_runtime::process_exec_file_capture(args)),
         );
         process_obj.insert(
             "argv".into(),

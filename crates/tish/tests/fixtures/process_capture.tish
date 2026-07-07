@@ -1,0 +1,16 @@
+// Issue #475: process.execCapture / execFileCapture return { code, stdout, stderr }.
+import { execFileCapture, execCapture } from "tish:process"
+
+let ok = execFileCapture("echo", ["hi"])
+console.log("ok=" + ok.code + "," + ok.stdout.trim() + "," + (ok.stderr === ""))
+
+let bad = execFileCapture("false", [])
+console.log("bad=" + bad.code)
+
+let miss = execFileCapture("/no/such/prog/xyz", [])
+console.log("miss=" + miss.code + "," + (miss.stderr !== ""))
+
+let shell = execCapture("echo a; echo b 1>&2")
+console.log("shell=" + shell.code + "," + shell.stdout.trim() + "," + shell.stderr.trim())
+
+console.log("done")
