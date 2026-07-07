@@ -74,10 +74,6 @@ jobs:
             npm: "@tishlang/create-tish-app"
             type: source
             dir: create-tish-app
-          - label: "@tishlang/vite-plugin-tish"
-            npm: "@tishlang/vite-plugin-tish"
-            type: source
-            dir: vite-plugin-tish
           # Unscoped alias of create-tish-app — published as its own package, non-fatal.
           - label: "create-tish-app (unscoped)"
             npm: "create-tish-app"
