@@ -1049,9 +1049,75 @@ pub fn process_exec_file(args: &[Value]) -> Value {
     }
 }
 
+/// Build the `{ code: number, stdout: string, stderr: string }` capture object (#475). stdout/stderr
+/// are lossy-UTF-8 decoded, matching the `fs` string convention (invalid bytes → replacement chars,
+/// never dropped output).
+#[cfg(feature = "process")]
+fn process_capture_obj(code: i32, stdout: String, stderr: String) -> Value {
+    let mut m = tishlang_core::ObjectMap::default();
+    m.insert("code".into(), Value::Number(code as f64));
+    m.insert("stdout".into(), Value::String(stdout.into()));
+    m.insert("stderr".into(), Value::String(stderr.into()));
+    Value::object(m)
+}
+
+/// Build the capture object from a `Command::output()` result. `code` is the exit status, or `-1`
+/// when the process was killed by a signal or failed to spawn (spawn failure puts the OS error in
+/// `stderr`).
+#[cfg(feature = "process")]
+fn process_capture_result(out: std::io::Result<std::process::Output>) -> Value {
+    match out {
+        Ok(o) => process_capture_obj(
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => process_capture_obj(-1, String::new(), e.to_string()),
+    }
+}
+
+/// `process.execCapture(cmd)` — run `sh -c cmd` and CAPTURE its output as
+/// `{ code: number, stdout: string, stderr: string }` (Rust `Command::output`; Node
+/// `execSync`/`spawnSync({ encoding })`). Use `execFileCapture` for untrusted arguments — this shell
+/// form interprets metacharacters.
+#[cfg(feature = "process")]
+pub fn process_exec_capture(args: &[Value]) -> Value {
+    use std::process::Command;
+    let cmd = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    if cmd.is_empty() {
+        return process_capture_obj(0, String::new(), String::new());
+    }
+    process_capture_result(Command::new("sh").arg("-c").arg(&cmd).output())
+}
+
+/// `process.execFileCapture(program, [args])` — run a program directly, WITHOUT a shell, capturing
+/// output as `{ code, stdout, stderr }`. Arguments are passed verbatim, so shell metacharacters in
+/// untrusted data are never interpreted — the safe capturing counterpart for input-derived args
+/// (#384, #475). This is the primitive for shelling out to a CLI and reading its output (e.g.
+/// `git status --porcelain`).
+#[cfg(feature = "process")]
+pub fn process_exec_file_capture(args: &[Value]) -> Value {
+    use std::process::Command;
+    let program = args
+        .first()
+        .map(|v| v.to_display_string())
+        .unwrap_or_default();
+    if program.is_empty() {
+        return process_capture_obj(0, String::new(), String::new());
+    }
+    let argv: Vec<String> = match args.get(1) {
+        Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
+        _ => Vec::new(),
+    };
+    process_capture_result(Command::new(&program).args(&argv).output())
+}
+
 #[cfg(all(test, feature = "process", unix))]
 mod execfile_tests_384 {
-    use super::process_exec_file;
+    use super::{process_exec_file, process_exec_file_capture};
     use tishlang_core::{Value, VmRef};
 
     #[test]
@@ -1064,6 +1130,47 @@ mod execfile_tests_384 {
         assert!(matches!(process_exec_file(&[Value::String("echo".into()), args]), Value::Number(n) if n == 0.0));
         // empty program is a no-op returning 0, matching `exec`.
         assert!(matches!(process_exec_file(&[]), Value::Number(n) if n == 0.0));
+    }
+
+    // #475: `{ code, stdout, stderr }` capture.
+    fn fields(v: &Value) -> (f64, String, String) {
+        let Value::Object(o) = v else {
+            panic!("execFileCapture must return an object, got {v:?}")
+        };
+        let b = o.borrow();
+        let num = |k: &str| match b.strings.get(k) {
+            Some(Value::Number(n)) => *n,
+            _ => f64::NAN,
+        };
+        let string = |k: &str| match b.strings.get(k) {
+            Some(Value::String(s)) => s.to_string(),
+            _ => String::new(),
+        };
+        (num("code"), string("stdout"), string("stderr"))
+    }
+
+    #[test]
+    fn execfile_capture_returns_code_stdout_stderr() {
+        // Success: stdout captured, code 0, stderr empty.
+        let args = Value::Array(VmRef::new(vec![Value::String("captured".into())]));
+        let (code, out, err) =
+            fields(&process_exec_file_capture(&[Value::String("echo".into()), args]));
+        assert_eq!(code, 0.0);
+        assert_eq!(out.trim(), "captured");
+        assert_eq!(err, "");
+        // Non-zero exit is reported, not an error.
+        let (code, _, _) = fields(&process_exec_file_capture(&[Value::String("false".into())]));
+        assert_eq!(code, 1.0);
+        // Spawn failure → code -1 with the OS error in stderr (never panics).
+        let (code, out, err) =
+            fields(&process_exec_file_capture(&[Value::String("/no/such/prog/xyz".into())]));
+        assert_eq!(code, -1.0);
+        assert!(out.is_empty());
+        assert!(!err.is_empty());
+        // Empty program → 0 / empty (mirrors execFile).
+        let (code, out, err) = fields(&process_exec_file_capture(&[]));
+        assert_eq!(code, 0.0);
+        assert!(out.is_empty() && err.is_empty());
     }
 }
 

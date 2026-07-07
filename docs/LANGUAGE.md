@@ -107,7 +107,7 @@ Both backends are guarded in CI (`scripts/test_serve_smoke.sh` / the *Native smo
 |------|---------|
 | `http` | `fetch`, `fetchAll`, `serve`, `Promise`, timers |
 | `fs` | `readFile`, `writeFile`, `readDir`, `mkdir` |
-| `process` | `process.exit`, `env`, `argv` |
+| `process` | `process.exit`, `env`, `argv`, `cwd`, `exec`/`execFile` (exit code), `execCapture`/`execFileCapture` (→ `{ code, stdout, stderr }`) |
 | `regex` | `RegExp` |
 | `full` | all of the above |
 

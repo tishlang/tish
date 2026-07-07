@@ -523,6 +523,60 @@ pub fn process_exec_file(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Number(output.status.code().unwrap_or(1) as f64))
 }
 
+/// `{ code, stdout, stderr }` capture object (#475) — lossy-UTF-8 streams (fs convention). Insertion
+/// order (code, stdout, stderr) matches the vm/native builders so JSON.stringify agrees cross-backend.
+#[cfg(feature = "process")]
+fn process_capture_obj(code: i32, stdout: String, stderr: String) -> Value {
+    let mut m = crate::value::PropMap::default();
+    m.insert("code".into(), Value::Number(code as f64));
+    m.insert("stdout".into(), Value::String(stdout.into()));
+    m.insert("stderr".into(), Value::String(stderr.into()));
+    Value::object(m)
+}
+
+#[cfg(feature = "process")]
+fn process_capture_result(out: std::io::Result<std::process::Output>) -> Value {
+    match out {
+        Ok(o) => process_capture_obj(
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => process_capture_obj(-1, String::new(), e.to_string()),
+    }
+}
+
+/// `process.execCapture(cmd)` — `sh -c cmd`, capturing `{ code, stdout, stderr }` (#475).
+#[cfg(feature = "process")]
+pub fn process_exec_capture(args: &[Value]) -> Result<Value, String> {
+    use std::process::Command;
+    let cmd = args.first().map(|v| v.to_string()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Ok(process_capture_obj(0, String::new(), String::new()));
+    }
+    Ok(process_capture_result(
+        Command::new("sh").arg("-c").arg(&cmd).output(),
+    ))
+}
+
+/// `process.execFileCapture(program, [args])` — no-shell run with output capture (safe for untrusted
+/// args, #384/#475). Returns `{ code, stdout, stderr }`.
+#[cfg(feature = "process")]
+pub fn process_exec_file_capture(args: &[Value]) -> Result<Value, String> {
+    use std::process::Command;
+    let program = args.first().map(|v| v.to_string()).unwrap_or_default();
+    if program.is_empty() {
+        return Ok(process_capture_obj(0, String::new(), String::new()));
+    }
+    let argv: Vec<String> = match args.get(1) {
+        Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    Ok(process_capture_result(
+        Command::new(&program).args(&argv).output(),
+    ))
+}
+
 #[cfg(feature = "fs")]
 pub fn read_file(args: &[Value]) -> Result<Value, String> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();
