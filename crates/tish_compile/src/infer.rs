@@ -284,16 +284,45 @@ fn param_infer_program(program: Program) -> Program {
     // panic on / turn to NaN where JS keeps the value. Skip those fns (they stay fully boxed). Same
     // set `collect_native_fns` uses to refuse the M5 native form.
     let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
+    // Soundness (#477): a fn referenced as a first-class VALUE — passed as a call ARGUMENT
+    // (`serve(port, handler)`), assigned, returned, or stored, i.e. any use that is NOT a direct
+    // `f(...)` call — escapes into the boxed `Value::Function` path and is later invoked via
+    // `.call(&[Value])` with arbitrary runtime Values (a `serve` handler is called with the request
+    // OBJECT). Such a fn's params CANNOT be soundly `: number`-shadowed: the escaping boxed closure
+    // unboxes arg0 as `match … Value::Number(n) => *n, _ => panic!("expected number")` and would panic
+    // on the first non-numeric call. `fns_called_with_nonnumeric_arg` only catches SYNTACTIC
+    // non-numeric call args — it can't see this value-escape — so exclude escaping fns explicitly.
+    // Over-approximation is safe: an escaping fn just stays fully boxed (correct, at worst slower).
+    let escaping = escaping_fn_names(&program.statements);
     Program {
         statements: program
             .statements
             .into_iter()
-            .map(|s| pi_stmt(s, &nonnumeric))
+            .map(|s| pi_stmt(s, &nonnumeric, &escaping))
             .collect(),
     }
 }
 
-fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>) -> Statement {
+/// Names of fns referenced as a first-class VALUE anywhere in the program — any use of the name that
+/// is NOT a direct `f(...)` call (a bare-ident call argument like `serve(port, handler)`, an
+/// assignment, a return, storage in an object/array). Such a fn is reachable via the boxed
+/// `Value::Function` `.call(&[Value])` path with arbitrary runtime Values, so its params must stay
+/// boxed and are never `: number`-shadowed. Backed by the same `fn_name_uses` escape counter the
+/// inliner uses. See `param_infer_program`. (#477)
+fn escaping_fn_names(statements: &[Statement]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for s in statements {
+        if let Statement::FunDecl { name, .. } = s {
+            let (_, others) = fn_name_uses(statements, name.as_ref());
+            if others > 0 {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>, escaping: &HashSet<String>) -> Statement {
     if let Statement::FunDecl {
         async_,
         name,
@@ -305,8 +334,10 @@ fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>) -> Statement {
         span,
     } = s
     {
-        // A fn reached with a non-numeric arg somewhere: leave its params dynamic (boxed).
-        if nonnumeric.contains(name.as_ref()) {
+        // A fn reached with a non-numeric arg somewhere, OR escaping as a first-class value
+        // (#477 — a `serve` handler / stored callback invoked via the boxed path with arbitrary
+        // Values): leave its params dynamic (boxed).
+        if nonnumeric.contains(name.as_ref()) || escaping.contains(name.as_ref()) {
             return Statement::FunDecl {
                 async_,
                 name,
@@ -3680,6 +3711,12 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
     // would otherwise emit a `match … panic!("expected number")` coercion on the String. Same set the
     // M4 `param_infer` path uses (infer.rs:273).
     let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
+    // Soundness (#477): a fn referenced as a first-class VALUE (a `serve` handler / stored callback)
+    // is invoked via the boxed `Value::Function` path with arbitrary runtime Values, so — exactly as
+    // in `param_infer_program` — its params must NOT get an S-0 `: number` shadow either. Without this
+    // an UNUSED param (vacuously "numeric" under `pus_stmt`) would be stamped `: number` and the
+    // escaping boxed closure would `panic!("expected number")` on the request object.
+    let escaping = escaping_fn_names(&program.statements);
 
     // ---- S-0 + S-A: per top-level function, find numeric params and a return shape.
     for s in &program.statements {
@@ -3731,7 +3768,10 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
                     }
                 }
             }
-            if !numeric_params.is_empty() && !nonnumeric.contains(name.as_ref()) {
+            if !numeric_params.is_empty()
+                && !nonnumeric.contains(name.as_ref())
+                && !escaping.contains(name.as_ref())
+            {
                 analysis.fn_numeric_params.insert(name.to_string(), numeric_params);
             }
             // S-A: a single all-f64 object-literal return shape ⇒ a struct alias.
@@ -4676,6 +4716,54 @@ mod param_infer_tests {
         // copied to a local — the copy relaxation must not mask a genuinely non-numeric use.
         let src = "fn g(x) { let r = x; return r + \"!\" }";
         assert_eq!(inferred_param(src, "g", "x"), None);
+    }
+
+    /// Final annotation name (if any) for `fn <fn_name>`'s `<param>` after the FULL pipeline
+    /// (`infer_program`: M4 `param_infer` + local/struct + S-0 aggregate).
+    fn end_to_end_param_ann(src: &str, fn_name: &str, param: &str) -> Option<String> {
+        let prog = infer_program(&parse(src).unwrap());
+        for s in &prog.statements {
+            if let Statement::FunDecl { name, params, .. } = s {
+                if name.as_ref() == fn_name {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            if tp.name.as_ref() == param {
+                                return tp.type_ann.as_ref().map(|a| match a {
+                                    TypeAnnotation::Simple(s, _) => s.to_string(),
+                                    _ => "<complex>".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn escaping_value_fn_param_stays_boxed_477() {
+        // #477: `handler` is passed as a call ARGUMENT (escapes as a first-class value, exactly like a
+        // `serve` handler). Its `req` param is UNUSED and the body is all-numeric — so BOTH the M4
+        // `param_infer` and the S-0 aggregate paths would otherwise stamp it `: number`. Because the
+        // fn is invoked via the boxed `Value::Function` path with arbitrary runtime Values, `req` MUST
+        // stay dynamic across the WHOLE pipeline (else the boxed closure panics "expected number" on
+        // the request object). Locks both promotion sites.
+        let src = "fn handler(req) { let s = 200; return s } \
+                   fn callWith(f, a) { return f(a) } \
+                   console.log(callWith(handler, { method: \"GET\" }))";
+        assert_eq!(end_to_end_param_ann(src, "handler", "req"), None);
+    }
+
+    #[test]
+    fn non_escaping_numeric_fn_keeps_native_fast_path_477() {
+        // CONTROL (no over-broad regression): a fn only ever called DIRECTLY with numbers still gets
+        // its `: number` native fast path — the #477 fix narrows promotion to escaping fns only.
+        let src = "fn square(n) { return n * n } console.log(square(7))";
+        assert_eq!(
+            end_to_end_param_ann(src, "square", "n").as_deref(),
+            Some("number")
+        );
     }
 }
 
