@@ -101,7 +101,13 @@ jobs:
 
       - name: Upgrade npm for OIDC trusted publishing (needs >= 11.5.1)
         run: |
-          npm install -g npm@latest
+          # Pinned to the 11.x line, NOT `npm@latest`: npm 12.0.0 (2026-07-09) raised its
+          # own engines.node floor to `^22.22.2 || ^24.15.0 || >=26.0.0`, which excludes the
+          # Node 22.22.0 this runner has hosted-tool-cached — `npm install -g npm@latest`
+          # then fails with EBADENGINE before any package publishes. 11.x's floor
+          # (`^20.17.0 || >=22.9.0`) is satisfied by the runner's Node 22, and 11.18.0+
+          # still satisfies the >=11.5.1 OIDC trusted-publishing requirement.
+          npm install -g "npm@^11"
           npm --version
 
       - name: Determine version and whether it is already published
