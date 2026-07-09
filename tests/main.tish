@@ -3900,6 +3900,42 @@ console.log(JSON.stringify("a,,b".split(",")))
 }
 __perf_run_core_parity_string_split()
 
+fn __perf_run_core_parity_value_fn_nonnumeric_arg() {
+// #477: a fn used as a first-class VALUE (passed as a call argument — exactly how a `serve` handler
+// is registered) is invoked via the boxed Value::Function path with arbitrary runtime args (e.g. the
+// request OBJECT). Native codegen must NOT native-promote such a fn's params to `f64` (which unboxes
+// arg0 as `match … Value::Number(n) => *n, _ => panic!("expected number")`) — they must stay boxed.
+// Server-free reproduction of the serve panic; identical output across interp/vm/native + node.
+
+// `req` is UNUSED and the body is all-numeric — pre-fix the param was inferred `: number`, so the
+// escaping boxed closure panicked "expected number" when called with the object below.
+fn handler(req) {
+  let status = 200
+  let body = "ok"
+  return status
+}
+
+// Invokes its fn argument via the boxed path with a non-numeric (object) value.
+fn callWith(f, arg) {
+  return f(arg)
+}
+
+console.log(callWith(handler, { method: "GET", path: "/" }))
+
+// Escaping fn that reads its param as an object property — also stays boxed.
+fn describe(req) {
+  return req.method
+}
+console.log(callWith(describe, { method: "POST" }))
+
+// A NON-escaping fn (only ever called directly with numbers) keeps its native f64 fast path.
+fn square(n) {
+  return n * n
+}
+console.log(square(7))
+}
+__perf_run_core_parity_value_fn_nonnumeric_arg()
+
 fn __perf_run_core_rest_param_empty() {
 // Regression: a rest parameter called with NO trailing args must bind to an
 // empty array (`[]`), so `for-of` over it runs zero times. The bytecode VM used

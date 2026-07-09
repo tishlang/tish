@@ -3836,6 +3836,31 @@ console.log(JSON.stringify("a,,b".split(",")))
 }
 
 {
+// Node oracle for parity_value_fn_nonnumeric_arg.tish (#477).
+function handler(req) {
+  let status = 200
+  let body = "ok"
+  return status
+}
+
+function callWith(f, arg) {
+  return f(arg)
+}
+
+console.log(callWith(handler, { method: "GET", path: "/" }))
+
+function describe(req) {
+  return req.method
+}
+console.log(callWith(describe, { method: "POST" }))
+
+function square(n) {
+  return n * n
+}
+console.log(square(7))
+}
+
+{
 // Regression: a rest parameter called with NO trailing args must bind to an
 // empty array (`[]`), so `for-of` over it runs zero times. The bytecode VM used
 // to do one spurious iteration (reading arr[0] -> null) and print NaN.
