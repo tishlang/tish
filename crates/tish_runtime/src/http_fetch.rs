@@ -10,7 +10,10 @@ use futures::Stream;
 use futures::StreamExt;
 use tishlang_core::{NativeFn, ObjectMap, TishOpaque, TishPromise, Value};
 
-use crate::http::{build_error_response, extract_body, extract_headers, extract_method};
+use crate::http::{
+    build_error_response, extract_body, extract_headers, extract_method, extract_multipart,
+    MultipartPart,
+};
 
 // --- Promises (Send payloads only; Value built on awaiting thread) ---
 
@@ -479,6 +482,7 @@ async fn send_request_parts(
     method: String,
     headers: Vec<(String, String)>,
     body: Option<String>,
+    multipart: Option<Vec<MultipartPart>>,
 ) -> Result<reqwest::Response, String> {
     if fetch_block_private() {
         ssrf_preflight(&url).await?;
@@ -496,7 +500,39 @@ async fn send_request_parts(
     for (key, value) in headers {
         req = req.header(key, value);
     }
-    if let Some(body) = body {
+    // A `multipart` option takes precedence over `body` — it builds a multipart/form-data request
+    // (reqwest sets the Content-Type + boundary). File parts are read as bytes, so binary uploads work.
+    if let Some(parts) = multipart {
+        let mut form = reqwest::multipart::Form::new();
+        for part in parts {
+            match part {
+                MultipartPart::Text { name, value } => {
+                    form = form.text(name, value);
+                }
+                MultipartPart::File {
+                    name,
+                    path,
+                    filename,
+                    content_type,
+                } => {
+                    let bytes = std::fs::read(&path)
+                        .map_err(|e| format!("multipart file '{path}': {e}"))?;
+                    let fname = filename.unwrap_or_else(|| {
+                        std::path::Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| name.clone())
+                    });
+                    let mut p = reqwest::multipart::Part::bytes(bytes).file_name(fname);
+                    if let Some(ct) = content_type {
+                        p = p.mime_str(&ct).map_err(|e| e.to_string())?;
+                    }
+                    form = form.part(name, p);
+                }
+            }
+        }
+        req = req.multipart(form);
+    } else if let Some(body) = body {
         req = req.body(body);
     }
     req.send().await.map_err(|e| e.to_string())
@@ -517,10 +553,11 @@ pub fn fetch_promise_from_args(args: Vec<Value>) -> Value {
     let method = extract_method(args.get(1));
     let headers = extract_headers(args.get(1));
     let body = extract_body(args.get(1));
+    let multipart = extract_multipart(args.get(1));
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::http::RUNTIME.with(|rt| {
         rt.spawn(async move {
-            let r = send_request_parts(url, method, headers, body).await;
+            let r = send_request_parts(url, method, headers, body, multipart).await;
             let _ = tx.send(r);
         });
     });
@@ -541,7 +578,13 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
         }
     };
     #[allow(clippy::type_complexity)]
-    let mut parts: Vec<(String, String, Vec<(String, String)>, Option<String>)> = Vec::new();
+    let mut parts: Vec<(
+        String,
+        String,
+        Vec<(String, String)>,
+        Option<String>,
+        Option<Vec<MultipartPart>>,
+    )> = Vec::new();
     for req in requests {
         let (url, opt) = match &req {
             Value::String(s) => (s.to_string(), None),
@@ -576,14 +619,15 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
         let method = extract_method(opt.as_ref());
         let headers = extract_headers(opt.as_ref());
         let body = extract_body(opt.as_ref());
-        parts.push((url, method, headers, body));
+        let multipart = extract_multipart(opt.as_ref());
+        parts.push((url, method, headers, body, multipart));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::http::RUNTIME.with(|rt| {
         rt.spawn(async move {
             let futs: Vec<_> = parts
                 .into_iter()
-                .map(|(url, m, h, b)| send_request_parts(url, m, h, b))
+                .map(|(url, m, h, b, mp)| send_request_parts(url, m, h, b, mp))
                 .collect();
             let results = futures::future::join_all(futs).await;
             let mapped: Vec<Result<reqwest::Response, String>> = results.into_iter().collect();

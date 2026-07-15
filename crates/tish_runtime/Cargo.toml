@@ -79,7 +79,7 @@ ws = [
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_builtins = { path = "../tish_builtins", version = ">=0.1" }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
-reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream"], optional = true }
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "multipart"], optional = true }
 futures = { version = "0.3.32", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }

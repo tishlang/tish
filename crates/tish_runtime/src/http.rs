@@ -111,6 +111,57 @@ pub(crate) fn extract_body(options: Option<&Value>) -> Option<String> {
     })
 }
 
+/// A single `multipart/form-data` part extracted from a `fetch` options object's `multipart` array.
+pub(crate) enum MultipartPart {
+    /// A text field: `{ name, value }`.
+    Text { name: String, value: String },
+    /// A file field read from disk (binary-safe): `{ name, path, filename?, contentType? }`.
+    File {
+        name: String,
+        path: String,
+        filename: Option<String>,
+        content_type: Option<String>,
+    },
+}
+
+/// Extract the `multipart` option — an array of part descriptors — from a `fetch` options object.
+/// Each part is `{ name, value }` (text) or `{ name, path, filename?, contentType? }` (file, read as
+/// bytes so binary uploads work). Returns `None` when there is no usable `multipart` array, so callers
+/// fall back to `body`. A part missing `name`, or with neither `path` nor `value`, is skipped.
+pub(crate) fn extract_multipart(options: Option<&Value>) -> Option<Vec<MultipartPart>> {
+    let field = options.and_then(|v| match v {
+        Value::Object(obj) => obj.borrow().strings.get("multipart").cloned(),
+        _ => None,
+    })?;
+    let items = match field {
+        Value::Array(a) => a.borrow().clone(),
+        _ => return None,
+    };
+    let mut parts = Vec::with_capacity(items.len());
+    for item in items {
+        let obj = match &item {
+            Value::Object(o) => o.borrow(),
+            _ => continue,
+        };
+        let name = match obj.strings.get("name") {
+            Some(v) => v.to_display_string(),
+            None => continue,
+        };
+        let filename = obj.strings.get("filename").map(|v| v.to_display_string());
+        let content_type = obj.strings.get("contentType").map(|v| v.to_display_string());
+        if let Some(path) = obj.strings.get("path").map(|v| v.to_display_string()) {
+            parts.push(MultipartPart::File { name, path, filename, content_type });
+        } else if let Some(value) = obj.strings.get("value").map(|v| v.to_display_string()) {
+            parts.push(MultipartPart::Text { name, value });
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
 pub(crate) fn build_error_response(error: &str) -> Value {
     let mut obj: ObjectMap = ObjectMap::with_capacity(2);
     obj.insert(Arc::from("error"), Value::String(error.into()));

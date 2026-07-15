@@ -18,6 +18,19 @@ if (jsonResponse.ok) {
   }
 }
 
+// Multipart form upload (#482): text fields sent as multipart/form-data; httpbin echoes them under `form`.
+let mpResponse = await fetch("https://httpbin.org/post", {
+  method: "POST",
+  multipart: [
+    { name: "field_a", value: "alpha" },
+    { name: "field_b", value: "beta" }
+  ]
+})
+console.log("Multipart status:", mpResponse.status)
+let mpData = await mpResponse.json()
+console.log("Multipart field_a:", mpData.form.field_a)
+console.log("Multipart is form-data:", String(mpData.headers["Content-Type"]).indexOf("multipart/form-data") === 0)
+
 let req1 = { url: "https://httpbin.org/get" }
 let req2 = { url: "https://httpbin.org/status/200" }
 let req3 = { url: "https://httpbin.org/headers" }
