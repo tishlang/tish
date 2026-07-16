@@ -1702,6 +1702,7 @@ impl Codegen {
                     "Server" => Some("Value::native(|args: &[Value]| tish_ws_server_construct(args))"),
                     "wsSend" => Some("Value::native(|args: &[Value]| Value::Bool(tishlang_runtime::ws_send_native(args.first().unwrap_or(&Value::Null), &args.get(1).map(|v| v.to_display_string()).unwrap_or_default())))"),
                     "wsBroadcast" => Some("Value::native(|args: &[Value]| tishlang_runtime::ws_broadcast_native(args))"),
+                    "wsAccept" => Some("Value::native(|args: &[Value]| tishlang_runtime::ws_serve_accept(args))"),
                     _ => None,
                 },
             "tish:tty" if self.has_feature("tty") => match export_name {
@@ -2268,6 +2269,10 @@ impl Codegen {
             self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
             if self.is_async {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
+            } else if self.has_feature("ws") {
+                // ws programs get `Promise.spawn` (send-values OS-thread spawn) even when not async,
+                // so a server can run a background accept/pump loop alongside the blocking `serve()`.
+                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object};\n");
             } else {
                 self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
             }
@@ -2693,7 +2698,7 @@ impl Codegen {
                 "let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));",
             );
             self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
-            if self.is_async {
+            if self.is_async || self.has_feature("ws") {
                 self.writeln("let Promise = tish_promise_object();");
             }
             // `serve` supports two shapes:
