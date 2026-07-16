@@ -1735,7 +1735,7 @@ pub use pty::{pty_kill, pty_pid, pty_read, pty_resize, pty_spawn, pty_write};
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
-    web_socket_server_listen, ws_broadcast_native, ws_send_native,
+    web_socket_server_listen, ws_broadcast_native, ws_send_native, ws_serve_accept,
 };
 
 #[cfg(feature = "http")]

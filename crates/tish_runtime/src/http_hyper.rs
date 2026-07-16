@@ -289,6 +289,9 @@ fn worker_thread(
                     // headers slower than this instead of pinning the worker task.
                     .header_read_timeout(std::time::Duration::from_secs(30))
                     .serve_connection(io, svc)
+                    // Required for `hyper::upgrade::on` to hand off the socket after a 101 — without
+                    // this, a WebSocket upgrade sends the 101 but the upgrade future never resolves.
+                    .with_upgrades()
                     .await
                 {
                     // Chatty connection errors (resets, client timeouts) are
@@ -312,6 +315,13 @@ async fn handle_request(
     let uri_path_str = req.uri().path();
     if let Some(route) = lookup_static_route_pub(uri_path_str) {
         return Ok(static_route_response(route));
+    }
+
+    // WebSocket upgrade: complete the handshake here and hand the socket to `ws.rs` — the VM handler
+    // never sees it. The program picks the connection up via `wsAccept`. (Single-port WS, issue #495.)
+    #[cfg(feature = "ws")]
+    if is_ws_upgrade(&req) {
+        return Ok(handle_ws_upgrade(req));
     }
 
     // Slow path: cross the mpsc to the VM thread.
@@ -453,6 +463,66 @@ fn simple_error_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>>
         .header("server", "Tish")
         .body(Full::new(Bytes::copy_from_slice(msg.as_bytes())))
         .unwrap()
+}
+
+/// A well-formed WebSocket upgrade handshake request (RFC 6455): `Upgrade: websocket`,
+/// `Connection: Upgrade`, and a `Sec-WebSocket-Key`.
+#[cfg(feature = "ws")]
+fn is_ws_upgrade(req: &Request<hyper::body::Incoming>) -> bool {
+    let h = req.headers();
+    let upgrade_ws = h
+        .get(hyper::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    let conn_upgrade = h
+        .get(hyper::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase().split(',').any(|p| p.trim() == "upgrade"))
+        .unwrap_or(false);
+    upgrade_ws && conn_upgrade && h.contains_key(hyper::header::SEC_WEBSOCKET_KEY)
+}
+
+/// Complete a WebSocket handshake on the HTTP port: reply `101` with the derived accept key, then
+/// (after the response flushes) take over the connection, wrap it as a server-role WebSocket, and
+/// register it with `ws.rs` so the program can pick it up via `wsAccept`.
+#[cfg(feature = "ws")]
+fn handle_ws_upgrade(mut req: Request<hyper::body::Incoming>) -> Response<Full<Bytes>> {
+    use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    let accept = match req.headers().get(hyper::header::SEC_WEBSOCKET_KEY) {
+        Some(k) => derive_accept_key(k.as_bytes()),
+        None => return simple_error_response(StatusCode::BAD_REQUEST, "missing Sec-WebSocket-Key"),
+    };
+
+    let on_upgrade = hyper::upgrade::on(&mut req);
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                let io = TokioIo::new(upgraded);
+                let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, None)
+                    .await;
+                let id = crate::ws::register_ws_stream(ws);
+                crate::ws::enqueue_upgraded_conn(id);
+            }
+            Err(e) => {
+                if std::env::var_os("TISH_HTTP_DEBUG").is_some() {
+                    eprintln!("[tish http/hyper] ws upgrade failed: {}", e);
+                }
+            }
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(hyper::header::UPGRADE, "websocket")
+        .header(hyper::header::CONNECTION, "Upgrade")
+        .header(hyper::header::SEC_WEBSOCKET_ACCEPT, accept)
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| {
+            simple_error_response(StatusCode::INTERNAL_SERVER_ERROR, "ws upgrade build failed")
+        })
 }
 
 /// Marker used by external callers (like the bench) to gate the backend

@@ -82,6 +82,83 @@ fn unregister(id: u32) {
     CONNS.lock().unwrap().remove(&id);
 }
 
+/// Bridge an already-handshaked WebSocket stream into the `CONNS` registry — spawning the read and
+/// write pump tasks — and return its connection id. Shared by the `tish:ws` server-accept loop and
+/// the `serve()` HTTP→WS upgrade path (see `http_hyper.rs`). Must be called inside a tokio runtime.
+pub(crate) fn register_ws_stream<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>) -> u32
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (send_tx, mut send_rx) = tokio_mpsc::unbounded_channel::<String>();
+    let (recv_tx, recv_rx) = mpsc::sync_channel::<String>(64);
+    let id = register(send_tx, recv_rx);
+    let recv_tx_task = Arc::new(recv_tx);
+    let (mut write, mut read) = ws_stream.split();
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = read.next().await {
+            if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
+                let _ = recv_tx_task.send(t.to_string());
+            }
+        }
+        unregister(id);
+    });
+    tokio::spawn(async move {
+        while let Some(text) = send_rx.recv().await {
+            let _ = write
+                .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                .await;
+        }
+    });
+    id
+}
+
+lazy_static! {
+    /// Connections upgraded from HTTP by `serve()` (http_hyper), waiting for the program to pick them
+    /// up via `wsAccept`. Per-process: an upgraded socket stays in whatever SO_REUSEPORT worker
+    /// accepted it, so each worker drains its own queue and there's no cross-process routing problem.
+    static ref UPGRADE_QUEUE: (Mutex<std::collections::VecDeque<u32>>, std::sync::Condvar) =
+        (Mutex::new(std::collections::VecDeque::new()), std::sync::Condvar::new());
+}
+
+/// Enqueue a `serve()`-upgraded connection id for `wsAccept` to hand to the program.
+pub(crate) fn enqueue_upgraded_conn(id: u32) {
+    let (m, cv) = &*UPGRADE_QUEUE;
+    if let Ok(mut q) = m.lock() {
+        q.push_back(id);
+    }
+    cv.notify_all();
+}
+
+/// `wsAccept(timeoutMs?)` — return the next connection upgraded on the HTTP server's port (see the
+/// `serve()` HTTP→WS upgrade path) as a normal `tish:ws` connection object, or `Null` if none arrives
+/// within the timeout (default 0 = non-blocking).
+pub fn ws_serve_accept(args: &[Value]) -> Value {
+    let timeout_ms = match args.first() {
+        Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => (*n as u64).min(3_600_000),
+        _ => 0,
+    };
+    let (m, cv) = &*UPGRADE_QUEUE;
+    let mut q = match m.lock() {
+        Ok(q) => q,
+        Err(_) => return Value::Null,
+    };
+    if q.is_empty() && timeout_ms > 0 {
+        let res = cv.wait_timeout_while(
+            q,
+            std::time::Duration::from_millis(timeout_ms),
+            |q| q.is_empty(),
+        );
+        q = match res {
+            Ok((g, _)) => g,
+            Err(e) => e.into_inner().0,
+        };
+    }
+    match q.pop_front() {
+        Some(id) => conn_object(id),
+        None => Value::Null,
+    }
+}
+
 /// Max simultaneous WebSocket connections. Each accepted conn registers in `CONNS` and
 /// spawns tasks + channels, freed only on close — unbounded accepts exhaust tasks/memory.
 /// Override with `TISH_WS_MAX_CONNS`; default 10000.
@@ -399,27 +476,7 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                         continue;
                     }
                 };
-                let (send_tx, mut send_rx) = tokio_mpsc::unbounded_channel::<String>();
-                let (recv_tx, recv_rx) = mpsc::sync_channel::<String>(64);
-                let id = register(send_tx, recv_rx);
-                let recv_tx = Arc::new(recv_tx);
-                let recv_tx_task = Arc::clone(&recv_tx);
-                let (mut write, mut read) = ws_stream.split();
-                tokio::spawn(async move {
-                    while let Some(Ok(msg)) = read.next().await {
-                        if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
-                            let _ = recv_tx_task.send(t.to_string());
-                        }
-                    }
-                    unregister(id);
-                });
-                tokio::spawn(async move {
-                    while let Some(text) = send_rx.recv().await {
-                        let _ = write
-                            .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
-                            .await;
-                    }
-                });
+                let id = register_ws_stream(ws_stream);
                 if conn_tx.send(id).is_err() {
                     break;
                 }
@@ -577,6 +634,22 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    /// The serve() HTTP→WS upgrade queue: `wsAccept` hands out enqueued conns FIFO and returns Null
+    /// when empty. (End-to-end upgrade over a live hyper port is covered by the native smoke test.)
+    #[test]
+    fn upgrade_queue_drains_then_empty() {
+        assert!(matches!(ws_serve_accept(&[Value::Number(0.0)]), Value::Null));
+        enqueue_upgraded_conn(4242);
+        match ws_serve_accept(&[Value::Number(0.0)]) {
+            Value::Object(o) => {
+                let b = o.borrow();
+                assert!(matches!(b.strings.get("_id"), Some(Value::Number(n)) if *n == 4242.0));
+            }
+            other => panic!("expected a conn object, got {:?}", other),
+        }
+        assert!(matches!(ws_serve_accept(&[Value::Number(0.0)]), Value::Null));
+    }
 
     #[test]
     fn ws_echo_roundtrip() {
