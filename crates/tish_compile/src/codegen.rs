@@ -1714,6 +1714,15 @@ impl Codegen {
                     "readLine" => Some("Value::native(|args: &[Value]| tishlang_runtime::tty_read_line(args))"),
                     _ => None,
                 },
+            "tish:pty" if self.has_feature("pty") => match export_name {
+                    "spawn" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_spawn(args))"),
+                    "read" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_read(args))"),
+                    "write" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_write(args))"),
+                    "resize" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_resize(args))"),
+                    "kill" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_kill(args))"),
+                    "pid" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_pid(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -1723,7 +1732,7 @@ impl Codegen {
         if self.features.contains("full") {
             matches!(
                 name,
-                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty"
+                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty"
             )
         } else {
             self.features.contains(name)

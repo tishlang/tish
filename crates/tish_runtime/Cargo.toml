@@ -58,6 +58,9 @@ fs = ["promise", "dep:rand"]
 process = []
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
+# Pseudoterminal hosting (issue #493): spawn a shell/program on a real PTY, read/write/resize/kill —
+# so an interactive terminal emulator on the other end of a socket behaves like a real TTY.
+pty = ["dep:portable-pty", "dep:lazy_static"]
 regex = ["tishlang_core/regex"]
 # WebSocket (JS-like API). Modular: import { WebSocket, Server } from 'tish:ws'.
 # Requires `send-values` because the WS server keeps an `Arc<dyn Fn + Send +
@@ -90,6 +93,8 @@ libc = { version = "0.2", optional = true }
 arc-swap = { version = "1", optional = true }
 # Interactive terminal I/O (feature = tty): cross-platform raw mode, key/resize events, size.
 crossterm = { version = "0.28", optional = true }
+# Pseudoterminal hosting (feature = pty): cross-platform openpty + shell spawn (same crate Dune uses).
+portable-pty = { version = "0.9", optional = true }
 # hyper backend (feature = http-hyper)
 hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }

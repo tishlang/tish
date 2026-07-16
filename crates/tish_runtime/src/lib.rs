@@ -1727,6 +1727,11 @@ pub use tty::{
     tty_enter_alt_screen, tty_is_tty, tty_leave_alt_screen, tty_read, tty_read_line, tty_set_raw_mode, tty_size,
 };
 
+#[cfg(feature = "pty")]
+pub mod pty;
+#[cfg(feature = "pty")]
+pub use pty::{pty_kill, pty_pid, pty_read, pty_resize, pty_spawn, pty_write};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
