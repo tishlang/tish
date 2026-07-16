@@ -1,0 +1,19 @@
+fn handle(root: string, webRoot: string?, token: string?) {
+  let sRoot = root
+  let sWebRoot = webRoot
+  let sToken = token
+  console.log("auth: " + (sToken === null ? "open" : "token required"))
+  serve(8080, fn(req) {
+    if (sToken !== null) {
+      let auth = "x"
+      if (auth !== ("Bearer " + sToken)) {
+        return { status: 401, headers: {}, body: "no" }
+      }
+    }
+    if (sWebRoot !== null) {
+      return { status: 200, headers: {}, body: sWebRoot }
+    }
+    return { status: 200, headers: {}, body: sRoot }
+  })
+}
+handle("/root", null, "secret")

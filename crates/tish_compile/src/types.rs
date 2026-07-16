@@ -453,9 +453,13 @@ impl RustType {
                 )
             }
             RustType::Option(inner) => {
-                let inner_to_value = inner.to_value_expr("v");
+                // Box by REFERENCE so the source Option is NOT moved — it may be a local captured by
+                // an FnMut closure (a `serve()` handler, called per request) or used again after this
+                // conversion. Mirrors the Vec arm's `.iter()` (which likewise avoids moving). `(*v)`
+                // derefs the `&inner` the ref-match binds, so the inner's own clone/copy still applies.
+                let inner_to_value = inner.to_value_expr("(*v)");
                 format!(
-                    "match {} {{ Some(v) => {}, None => Value::Null }}",
+                    "match &({}) {{ Some(v) => {}, None => Value::Null }}",
                     native_expr, inner_to_value
                 )
             }
