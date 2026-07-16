@@ -283,7 +283,7 @@ fn param_infer_program(program: Program) -> Program {
     // numeric" (`return SHARED`) yet the caller passes e.g. `"arg"`, which the f64 coercion would
     // panic on / turn to NaN where JS keeps the value. Skip those fns (they stay fully boxed). Same
     // set `collect_native_fns` uses to refuse the M5 native form.
-    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
+    let nonnumeric = fns_with_unsafe_numeric_arg(&program.statements);
     // Soundness (#477): a fn referenced as a first-class VALUE — passed as a call ARGUMENT
     // (`serve(port, handler)`), assigned, returned, or stored, i.e. any use that is NOT a direct
     // `f(...)` call — escapes into the boxed `Value::Function` path and is later invoked via
@@ -320,6 +320,470 @@ fn escaping_fn_names(statements: &[Statement]) -> HashSet<String> {
         }
     }
     out
+}
+
+/// Shared candidate predicate: would param `pname` (unannotated, default-less) of a fn with `body`
+/// be M4-promoted to `: number` on the basis of its BODY uses (the #172 optimistic per-param
+/// fixpoint)? Used by BOTH pi_stmt (the promotion) and `numeric_candidate_positions` (the call-arg
+/// whitelist) so the two agree on exactly which positions are numeric candidates.
+fn param_is_body_numeric_candidate(body: &Statement, base_nums: &HashSet<String>, pname: &str) -> bool {
+    let mut nums = base_nums.clone();
+    nums.insert(pname.to_string());
+    collect_numeric_locals_fixpoint(body, &mut nums);
+    let copy_descendants: Vec<&String> = nums
+        .iter()
+        .filter(|x| x.as_str() != pname && !base_nums.contains(*x))
+        .collect();
+    nus_stmt(body, pname, &nums)
+        && copy_descendants.iter().all(|x| lns_stmt(body, x.as_str(), &nums))
+}
+
+/// Per fn (top-level and nested), the parameter POSITIONS that are numeric candidates — i.e. the
+/// body would M4-promote them to f64. The call-arg whitelist (#485/#477/#484) checks ONLY these
+/// positions, so array/object params (e.g. native-vec devirt) never disqualify a fn.
+pub(crate) fn numeric_candidate_positions(
+    statements: &[Statement],
+) -> std::collections::HashMap<String, Vec<(usize, String)>> {
+    let mut out = std::collections::HashMap::new();
+    ncp_stmt_list(statements, &mut out);
+    out
+}
+fn ncp_stmt_list(statements: &[Statement], out: &mut std::collections::HashMap<String, Vec<(usize, String)>>) {
+    for s in statements {
+        ncp_stmt(s, out);
+    }
+}
+fn ncp_stmt(s: &Statement, out: &mut std::collections::HashMap<String, Vec<(usize, String)>>) {
+    use Statement::*;
+    match s {
+        FunDecl { name, params, body, .. } => {
+            let mut base_nums = HashSet::new();
+            collect_numeric_locals_fixpoint(body, &mut base_nums);
+            let mut positions: Vec<(usize, String)> = Vec::new();
+            for (i, p) in params.iter().enumerate() {
+                if let FunParam::Simple(tp) = p {
+                    if tp.type_ann.is_none()
+                        && tp.default.is_none()
+                        && param_is_body_numeric_candidate(body, &base_nums, tp.name.as_ref())
+                    {
+                        positions.push((i, tp.name.to_string()));
+                    }
+                }
+            }
+            if !positions.is_empty() {
+                out.insert(name.to_string(), positions);
+            }
+            ncp_stmt(body, out); // nested fns
+        }
+        Block { statements, .. } | Multi { statements, .. } => ncp_stmt_list(statements, out),
+        If { then_branch, else_branch, .. } => {
+            ncp_stmt(then_branch, out);
+            if let Some(e) = else_branch {
+                ncp_stmt(e, out);
+            }
+        }
+        While { body, .. }
+        | DoWhile { body, .. }
+        | For { body, .. }
+        | ForOf { body, .. }
+        | ForIn { body, .. } => ncp_stmt(body, out),
+        Try { body, catch_body, finally_body, .. } => {
+            ncp_stmt(body, out);
+            if let Some(c) = catch_body {
+                ncp_stmt(c, out);
+            }
+            if let Some(f) = finally_body {
+                ncp_stmt(f, out);
+            }
+        }
+        Switch { cases, default_body, .. } => {
+            for (_, b) in cases {
+                ncp_stmt_list(b, out);
+            }
+            if let Some(d) = default_body {
+                ncp_stmt_list(d, out);
+            }
+        }
+        Export { declaration, .. } => {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                ncp_stmt(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---- interprocedural numeric-arg soundness (tishlang/tish#485/#477/#484) ----
+//
+// M4 promotes an unannotated param to native f64 and unboxes it at the (boxed) closure entry, which
+// panics `"expected number"` if a caller ever passes a non-number. Instead of BLACKLISTING the known
+// ways that happens (a non-numeric literal / an escaping fn / an await), compute — soundly, by
+// construction — which parameter POSITIONS provably receive only numbers, then disqualify any fn with
+// a body-numeric CANDIDATE position that is NOT provably numeric. An optimistic fixpoint (assume all
+// positions numeric, then drop any that a call site violates) makes pass-through params transitive:
+// `f(n)` where `n` is a numeric param of the caller stays numeric down the chain, back to a literal.
+
+#[derive(Clone)]
+enum ArgClass {
+    Num,                       // provably a number regardless of context (literal, arithmetic, Math)
+    NotNum,                    // provably NOT reliably a number (string/object/unknown-return call)
+    NeedsNumeric(Vec<String>), // a number iff every listed ident is numeric in the caller's context
+}
+
+struct CallSite {
+    caller: Option<String>, // enclosing fn (None = top level)
+    callee: String,
+    args: Vec<ArgClass>,
+    has_spread: bool,
+}
+
+fn arg_number_producing_call(callee: &Expr) -> bool {
+    match callee {
+        Expr::Ident { name, .. } => name.as_ref() == "Number",
+        Expr::Member { object, prop: tishlang_ast::MemberProp::Name { name: m, .. }, .. } => {
+            matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
+                && matches!(
+                    m.as_ref(),
+                    "sqrt" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "exp" | "trunc"
+                        | "log" | "log2" | "log10" | "round" | "pow" | "min" | "max" | "sign"
+                        | "cbrt" | "atan" | "atan2" | "asin" | "acos" | "hypot" | "random"
+                )
+        }
+        _ => false,
+    }
+}
+
+fn combine_add(l: ArgClass, r: ArgClass) -> ArgClass {
+    match (l, r) {
+        (ArgClass::NotNum, _) | (_, ArgClass::NotNum) => ArgClass::NotNum,
+        (ArgClass::Num, ArgClass::Num) => ArgClass::Num,
+        (ArgClass::Num, x) | (x, ArgClass::Num) => x,
+        (ArgClass::NeedsNumeric(mut a), ArgClass::NeedsNumeric(b)) => {
+            a.extend(b);
+            ArgClass::NeedsNumeric(a)
+        }
+    }
+}
+
+fn classify_arg(e: &Expr) -> ArgClass {
+    use tishlang_ast::BinOp::*;
+    match e {
+        Expr::Literal { value: Literal::Number(_), .. } => ArgClass::Num,
+        Expr::Ident { name, .. } => ArgClass::NeedsNumeric(vec![name.to_string()]),
+        // `-`,`*`,`/`,`%`,`**`, bitwise/shift JS-ToNumber unconditionally → always a number.
+        Expr::Binary {
+            op: Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr,
+            ..
+        } => ArgClass::Num,
+        // `+` is a number only if BOTH sides are (else string concat).
+        Expr::Binary { op: Add, left, right, .. } => {
+            combine_add(classify_arg(left), classify_arg(right))
+        }
+        Expr::Unary {
+            op:
+                tishlang_ast::UnaryOp::Neg
+                | tishlang_ast::UnaryOp::Pos
+                | tishlang_ast::UnaryOp::BitNot,
+            ..
+        } => ArgClass::Num,
+        Expr::Call { callee, .. } | Expr::New { callee, .. } => {
+            if arg_number_producing_call(callee) {
+                ArgClass::Num
+            } else {
+                ArgClass::NotNum
+            }
+        }
+        _ => ArgClass::NotNum,
+    }
+}
+
+fn arg_ok(ac: &ArgClass, ctx: &HashSet<String>) -> bool {
+    match ac {
+        ArgClass::Num => true,
+        ArgClass::NotNum => false,
+        ArgClass::NeedsNumeric(idents) => idents.iter().all(|n| ctx.contains(n)),
+    }
+}
+
+// Collect (param-name-list, numeric-locals) for every fn (top-level and nested).
+fn cfm_stmt(
+    s: &Statement,
+    params: &mut std::collections::HashMap<String, Vec<String>>,
+    locals: &mut std::collections::HashMap<String, HashSet<String>>,
+) {
+    use Statement::*;
+    match s {
+        FunDecl { name, params: ps, body, .. } => {
+            let pnames: Vec<String> = ps
+                .iter()
+                .map(|p| match p {
+                    FunParam::Simple(tp) => tp.name.to_string(),
+                    _ => String::new(),
+                })
+                .collect();
+            params.insert(name.to_string(), pnames);
+            let mut nums = HashSet::new();
+            collect_numeric_locals_fixpoint(body, &mut nums);
+            locals.insert(name.to_string(), nums);
+            cfm_stmt(body, params, locals);
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            for x in statements {
+                cfm_stmt(x, params, locals);
+            }
+        }
+        If { then_branch, else_branch, .. } => {
+            cfm_stmt(then_branch, params, locals);
+            if let Some(e) = else_branch {
+                cfm_stmt(e, params, locals);
+            }
+        }
+        While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. }
+        | ForIn { body, .. } => cfm_stmt(body, params, locals),
+        Try { body, catch_body, finally_body, .. } => {
+            cfm_stmt(body, params, locals);
+            if let Some(c) = catch_body {
+                cfm_stmt(c, params, locals);
+            }
+            if let Some(f) = finally_body {
+                cfm_stmt(f, params, locals);
+            }
+        }
+        Switch { cases, default_body, .. } => {
+            for (_, b) in cases {
+                for x in b {
+                    cfm_stmt(x, params, locals);
+                }
+            }
+            if let Some(d) = default_body {
+                for x in d {
+                    cfm_stmt(x, params, locals);
+                }
+            }
+        }
+        Export { declaration, .. } => {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                cfm_stmt(inner, params, locals);
+            }
+        }
+        _ => {}
+    }
+}
+
+// Record every direct `f(...)` call in `e`, tagged with the enclosing fn; recurse into sub-exprs.
+fn collect_calls_expr(e: &Expr, encl: &Option<String>, out: &mut Vec<CallSite>) {
+    if let Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } = e {
+        if let Expr::Ident { name, .. } = callee.as_ref() {
+            let mut classes = Vec::new();
+            let mut has_spread = false;
+            for a in args {
+                match a {
+                    CallArg::Expr(x) => classes.push(classify_arg(x)),
+                    CallArg::Spread(_) => has_spread = true,
+                }
+            }
+            out.push(CallSite {
+                caller: encl.clone(),
+                callee: name.to_string(),
+                args: classes,
+                has_spread,
+            });
+        }
+    }
+    walk_exprs_expr(e, &mut |sub| {
+        if let Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } = sub {
+            if !std::ptr::eq(sub, e) {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    let mut classes = Vec::new();
+                    let mut has_spread = false;
+                    for a in args {
+                        match a {
+                            CallArg::Expr(x) => classes.push(classify_arg(x)),
+                            CallArg::Spread(_) => has_spread = true,
+                        }
+                    }
+                    out.push(CallSite {
+                        caller: encl.clone(),
+                        callee: name.to_string(),
+                        args: classes,
+                        has_spread,
+                    });
+                }
+            }
+        }
+    });
+}
+
+fn collect_calls_stmt(s: &Statement, encl: &Option<String>, out: &mut Vec<CallSite>) {
+    use Statement::*;
+    match s {
+        FunDecl { name, body, .. } => {
+            let inner = Some(name.to_string());
+            collect_calls_stmt(body, &inner, out);
+        }
+        Block { statements, .. } | Multi { statements, .. } => {
+            for x in statements {
+                collect_calls_stmt(x, encl, out);
+            }
+        }
+        VarDecl { init: Some(e), .. } => collect_calls_expr(e, encl, out),
+        VarDeclDestructure { init, .. } => collect_calls_expr(init, encl, out),
+        ExprStmt { expr, .. } => collect_calls_expr(expr, encl, out),
+        Return { value: Some(e), .. } | Throw { value: e, .. } => collect_calls_expr(e, encl, out),
+        If { cond, then_branch, else_branch, .. } => {
+            collect_calls_expr(cond, encl, out);
+            collect_calls_stmt(then_branch, encl, out);
+            if let Some(e) = else_branch {
+                collect_calls_stmt(e, encl, out);
+            }
+        }
+        While { cond, body, .. } | DoWhile { cond, body, .. } => {
+            collect_calls_expr(cond, encl, out);
+            collect_calls_stmt(body, encl, out);
+        }
+        For { init, cond, update, body, .. } => {
+            if let Some(i) = init {
+                collect_calls_stmt(i, encl, out);
+            }
+            if let Some(c) = cond {
+                collect_calls_expr(c, encl, out);
+            }
+            if let Some(u) = update {
+                collect_calls_expr(u, encl, out);
+            }
+            collect_calls_stmt(body, encl, out);
+        }
+        ForOf { iterable, body, .. } | ForIn { object: iterable, body, .. } => {
+            collect_calls_expr(iterable, encl, out);
+            collect_calls_stmt(body, encl, out);
+        }
+        Switch { expr, cases, default_body, .. } => {
+            collect_calls_expr(expr, encl, out);
+            for (g, b) in cases {
+                if let Some(ge) = g {
+                    collect_calls_expr(ge, encl, out);
+                }
+                for x in b {
+                    collect_calls_stmt(x, encl, out);
+                }
+            }
+            if let Some(d) = default_body {
+                for x in d {
+                    collect_calls_stmt(x, encl, out);
+                }
+            }
+        }
+        Try { body, catch_body, finally_body, .. } => {
+            collect_calls_stmt(body, encl, out);
+            if let Some(c) = catch_body {
+                collect_calls_stmt(c, encl, out);
+            }
+            if let Some(f) = finally_body {
+                collect_calls_stmt(f, encl, out);
+            }
+        }
+        Export { declaration, .. } => {
+            if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                collect_calls_stmt(inner, encl, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SOUND replacement for the "nonnumeric arg" blacklist (tishlang/tish#485/#477/#484): a per-position
+/// interprocedural fixpoint. Returns the set of fns that have a body-numeric CANDIDATE param position
+/// which is NOT provably fed numbers at every call site — those must stay boxed (not `: number`).
+pub(crate) fn fns_with_unsafe_numeric_arg(statements: &[Statement]) -> HashSet<String> {
+    let cand = numeric_candidate_positions(statements);
+    if cand.is_empty() {
+        return HashSet::new();
+    }
+    let mut all_params: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut fn_locals: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    for s in statements {
+        cfm_stmt(s, &mut all_params, &mut fn_locals);
+    }
+    let mut top_nums = HashSet::new();
+    for s in statements {
+        collect_numeric_locals_fixpoint(s, &mut top_nums);
+    }
+    let mut calls = Vec::new();
+    for s in statements {
+        collect_calls_stmt(s, &None, &mut calls);
+    }
+
+    // numeric_pos[f] = positions currently believed to receive only numbers. Start optimistic (all).
+    let mut numeric_pos: std::collections::HashMap<String, HashSet<usize>> = all_params
+        .iter()
+        .map(|(f, ps)| (f.clone(), (0..ps.len()).collect()))
+        .collect();
+
+    loop {
+        let mut changed = false;
+        for cs in &calls {
+            if !numeric_pos.contains_key(&cs.callee) {
+                continue;
+            }
+            // Caller context: its numeric locals + params whose position is still numeric.
+            let ctx: HashSet<String> = match &cs.caller {
+                None => top_nums.clone(),
+                Some(c) => {
+                    let mut ctx = fn_locals.get(c).cloned().unwrap_or_default();
+                    if let (Some(ps), Some(np)) = (all_params.get(c), numeric_pos.get(c)) {
+                        for &pos in np {
+                            if let Some(n) = ps.get(pos) {
+                                ctx.insert(n.clone());
+                            }
+                        }
+                    }
+                    ctx
+                }
+            };
+            let arity = all_params.get(&cs.callee).map(|p| p.len()).unwrap_or(0);
+            let set = numeric_pos.get_mut(&cs.callee).unwrap();
+            if cs.has_spread {
+                if !set.is_empty() {
+                    set.clear();
+                    changed = true;
+                }
+                continue;
+            }
+            for pos in 0..arity {
+                if !set.contains(&pos) {
+                    continue;
+                }
+                let ok = match cs.args.get(pos) {
+                    Some(ac) => arg_ok(ac, &ctx),
+                    None => false, // missing arg → undefined/Null → not a number
+                };
+                if !ok {
+                    set.remove(&pos);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut disq = HashSet::new();
+    for (f, positions) in &cand {
+        match numeric_pos.get(f) {
+            Some(np) => {
+                if positions.iter().any(|(pos, _)| !np.contains(pos)) {
+                    disq.insert(f.clone());
+                }
+            }
+            None => {
+                disq.insert(f.clone());
+            }
+        }
+    }
+    disq
 }
 
 fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>, escaping: &HashSet<String>) -> Statement {
@@ -374,21 +838,9 @@ fn pi_stmt(s: Statement, nonnumeric: &HashSet<String>, escaping: &HashSet<String
                     // Monotone, locals/param-candidate-only.
                     if tp.type_ann.is_none()
                         && tp.default.is_none()
+                        && param_is_body_numeric_candidate(&body, &base_nums, tp.name.as_ref())
                     {
-                        let mut nums = base_nums.clone();
-                        nums.insert(tp.name.to_string());
-                        collect_numeric_locals_fixpoint(&body, &mut nums);
-                        let copy_descendants: Vec<&String> = nums
-                            .iter()
-                            .filter(|x| x.as_str() != tp.name.as_ref() && !base_nums.contains(*x))
-                            .collect();
-                        if nus_stmt(&body, tp.name.as_ref(), &nums)
-                            && copy_descendants
-                                .iter()
-                                .all(|x| lns_stmt(&body, x.as_str(), &nums))
-                        {
-                            tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number"), tishlang_ast::Span::default()));
-                        }
+                        tp.type_ann = Some(TypeAnnotation::Simple(std::sync::Arc::from("number"), tishlang_ast::Span::default()));
                     }
                     FunParam::Simple(tp)
                 }
@@ -484,7 +936,7 @@ fn collect_numeric_locals(s: &Statement, out: &mut HashSet<String>) {
 /// names (a copy of an already-numeric source), so it converges in at most one pass per copy-chain
 /// link; the `out.len()` watermark detects quiescence. Soundness: every added name is a copy of a
 /// value already proven/assumed numeric, the same basis as the literal seeding.
-fn collect_numeric_locals_fixpoint(body: &Statement, out: &mut HashSet<String>) {
+pub(crate) fn collect_numeric_locals_fixpoint(body: &Statement, out: &mut HashSet<String>) {
     loop {
         let before = out.len();
         collect_numeric_locals(body, out);
@@ -3710,7 +4162,7 @@ pub fn analyze_aggregate(program: &Program) -> AggregateAnalysis {
     // params either — `fn makeRecord(id, name){ return {id, name} }` called `makeRecord(1, "Alice")`
     // would otherwise emit a `match … panic!("expected number")` coercion on the String. Same set the
     // M4 `param_infer` path uses (infer.rs:273).
-    let nonnumeric = crate::codegen::Codegen::fns_called_with_nonnumeric_arg(&program.statements);
+    let nonnumeric = fns_with_unsafe_numeric_arg(&program.statements);
     // Soundness (#477): a fn referenced as a first-class VALUE (a `serve` handler / stored callback)
     // is invoked via the boxed `Value::Function` path with arbitrary runtime Values, so — exactly as
     // in `param_infer_program` — its params must NOT get an S-0 `: number` shadow either. Without this

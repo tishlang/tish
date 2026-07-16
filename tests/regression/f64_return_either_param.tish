@@ -1,0 +1,6 @@
+fn strOrNull(v) { if (typeof v === "string" && v !== "") { return v } return null }
+fn firstStr(a, b) { if (a !== null) { return a } return b }
+fn nz(v) { if (typeof v === "string" && v !== "") { return v } return null }
+fn fallback() { return nz("") }
+fn normalize(sv) { return firstStr(strOrNull(sv.webRoot), fallback()) }
+console.log("ok: " + String(normalize({})))
