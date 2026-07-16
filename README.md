@@ -24,7 +24,7 @@ The same source can run on a tree-walking interpreter, a bytecode VM, or compile
 - **Memory-safe implementation** — Rust-hosted runtime and compiler pipeline; no GC in the host language for the toolchain itself.
 - **Secure by default** — I/O and platform APIs (`http`, `fs`, `process`, etc.) are opt-in via features.
 - **No `undefined`** — `null` only where JS would use undefined; strict equality (`===` / `!==`) without loose coercion.
-- **Optional types** — TypeScript-style annotations are parsed for tooling and future checking; see the language reference for status.
+- **Typed tish compiles to native Rust** — TypeScript-style annotations are optional, but on the native backend they (plus inference over untyped code) choose real machine representations: `number` params lower to `f64`, `number[]` to `Vec<f64>`, `type` / `interface` object shapes to actual Rust structs — hot loops the compiler can prove typed run with no boxed values (typing speedups up to ~140× on perf-gauntlet fixtures; anything unproven soundly falls back to the boxed dynamic path). On by default; `TISH_NATIVE_OPT=0` opts out. The interpreter and VM erase types at runtime; gradual type checking is opt-in via `tish build --check warn|error` and runs live in the LSP.
 
 Full specification: [docs/LANGUAGE.md](docs/LANGUAGE.md). Implementation status, gaps, and JS compatibility: [docs/plan-gap-analysis.md](docs/plan-gap-analysis.md).
 
