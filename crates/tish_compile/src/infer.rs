@@ -229,7 +229,7 @@ pub fn infer_expr_type(expr: &Expr, ctx: &InferCtx) -> Option<TypeAnnotation> {
 /// Run inference over a program, returning a modified Program with additional
 /// type annotations filled in on `VarDecl` nodes.
 pub fn infer_program(program: &Program) -> Program {
-    // M4 (opt-in via TISH_PARAM_INFER) runs FIRST: give unannotated params used PURELY
+    // M4 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out) runs FIRST: give unannotated params used PURELY
     // numerically a synthetic `: number`. Doing this *before* local/struct inference is what
     // lets derived numeric locals (`let x0 = (px / w) * 3`) be proven numeric off the now-known
     // param types — otherwise they fall back to boxed `Value` and the whole hot loop boxes with
@@ -245,7 +245,7 @@ pub fn infer_program(program: &Program) -> Program {
     let p = Program {
         statements: infer_statements(&p.statements, &mut ctx),
     };
-    // Automatic struct inference (opt-in via TISH_STRUCT_INFER until proven):
+    // Automatic struct inference (default-on via native_opts_enabled):
     // give unannotated object literals a concrete struct type so the Rust
     // backend emits unboxed structs with direct field access. Conservative —
     // only applies when every use of the binding is a literal-key field read,
@@ -255,17 +255,18 @@ pub fn infer_program(program: &Program) -> Program {
     } else {
         p
     };
-    // S-0..S-C aggregate (interprocedural monomorphic struct) inference — issue #177, opt-in via
-    // TISH_AGGREGATE_INFER, OFF by default. Front-end of the nbody unboxing lever: it
+    // S-0..S-F aggregate (interprocedural monomorphic struct) inference — issue #177, default-on
+    // via native_opts_enabled. Front-end of the nbody unboxing lever: it
     //   S-0: types params used ONLY as object-literal field values (`body(x,…)` → `: number`),
     //   S-A: registers the return-shape struct alias for an all-f64 object-literal-returning fn,
     //   S-B: propagates a call's return type to `let p = body(…)` / `let bs = makeBodies()`,
     //   S-C: types `[ident,…]` array literals from those struct-typed locals.
-    // The full lever also needs S-D (write-permitting param-shape) + S-E/S-F (the typed-fn ABI
-    // tier in codegen) before the annotations can be *consumed* without a boxed-edge miscompile;
-    // until those land this pass only emits the annotations the existing codegen backs SOUNDLY
-    // (the S-0 scalar `: number` params, identical to the M4 mechanism) plus the inert struct
-    // alias decls. See `aggregate_infer_program`.
+    // S-0 scalar params are always stamped. The S-A/S-B/S-C struct/array shapes are stamped only
+    // when the S-D whole-program candidacy predicate holds (`unbox_alias` — monomorphic all-f64
+    // shape, no `===`/escape/reshape), in which case codegen's S-E/S-F typed-fn ABI tier
+    // (`setup_aggregate_fns`) consumes them, de-virtualizing the group into native free fns over
+    // `Vec<TishStruct_alias>`; any unlowerable use disables the whole path (boxed fallback,
+    // byte-identical). See `aggregate_infer_program` / `stamp_aggregate`.
     if crate::native_opts_enabled() {
         aggregate_infer_program(p)
     } else {
@@ -274,7 +275,7 @@ pub fn infer_program(program: &Program) -> Program {
 }
 
 // ---------------------------------------------------------------------------
-// M4: parameter type inference (conservative, sound, opt-in)
+// M4: parameter type inference (conservative, sound, default-on)
 // ---------------------------------------------------------------------------
 
 fn param_infer_program(program: Program) -> Program {
@@ -1469,7 +1470,7 @@ pub(crate) fn pi_mentions(e: &Expr, name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Automatic struct inference (conservative, sound, opt-in)
+// Automatic struct inference (conservative, sound, default-on)
 // ---------------------------------------------------------------------------
 
 /// One emitted `type` decl: alias name plus its field list.
@@ -2319,7 +2320,7 @@ fn inline_single_call_factories(stmts: Vec<Statement>) -> Vec<Statement> {
         // (`return [a, b]`), a call return, or a discarded `f()` is left intact — those are the #177
         // aggregate machinery's territory (nbody's `makeBodies` returns `[sun, jupiter, …]`, and
         // inlining it removes the function the aggregate ABI expects → nbody BUILD-FAIL under
-        // TISH_AGGREGATE_INFER). This keeps the inliner to exactly the Stage A/B bridge target.
+        // the aggregate path). This keeps the inliner to exactly the Stage A/B bridge target.
         let return_ident = match &ret_expr {
             Expr::Ident { name, .. } if leaked.iter().any(|l| l.as_ref() == name.as_ref()) => {
                 name.clone()
@@ -3987,8 +3988,8 @@ fn _uses_arrow_body(_: &ArrowBody) {}
 // S-0..S-C: aggregate (interprocedural monomorphic struct) inference — issue #177
 // ===========================================================================
 //
-// This is the front-end of the nbody-unboxing lever. It runs ONLY under
-// `TISH_AGGREGATE_INFER` (OFF by default). The four sub-passes are pure analysis
+// This is the front-end of the nbody-unboxing lever. It runs by default under
+// `native_opts_enabled()` (`TISH_NATIVE_OPT=0` opts out). The four sub-passes are pure analysis
 // over the (already base/param/struct-inferred) `Program`:
 //
 //   S-0  param-numeric-as-field-value: a param used ONLY as an object-literal
@@ -4004,27 +4005,22 @@ fn _uses_arrow_body(_: &ArrowBody) {}
 //
 // SOUNDNESS / WHAT IS ACTUALLY WRITTEN BACK
 // -----------------------------------------
-// The struct types S-A/S-B/S-C compute cannot yet be *consumed* by codegen
-// without the S-D write-permitting param predicate and the S-E/S-F typed-fn ABI
-// tier (a de-virtualized `fn advance(bodies: &VmRef<Vec<TishStruct_Body>>, …)`).
-// Until those land, writing a `Named`/`Array(Named)` annotation onto a fn param
-// or a call-initialised local would MISCOMPILE: `collect_annotated_types`
-// (codegen.rs) records the param/local as a native struct while the actual
-// binding is still a boxed `Value` (the call returns boxed `Value` — there is no
-// FnSigTable / struct-returning emission), so a `p.x` field read or `bodies[i].vx
-// = …` write would be lowered against a boxed value. The boxed-edge `===`/escape
-// hazards in the design's candidacy predicate are the same class of problem.
-//
-// Therefore `aggregate_infer_program` writes back ONLY the annotations the
-// EXISTING codegen backs soundly:
-//   * S-0's scalar `: number` params (identical to the M4 param-infer mechanism,
-//     already consumed soundly), and
-//   * the inert struct `type` alias decls (unreferenced aliases are dropped by
-//     codegen — they change nothing on their own).
-// The S-A/S-B/S-C struct *shapes* are computed and exposed via
-// `analyze_aggregate` for unit tests and for the future S-D..S-F consumers, but
-// are NOT yet stamped onto params / call-locals. This keeps the ON path free of
-// any checksum divergence while the inference logic is validated independently.
+// Stamping a struct/array annotation is only sound when codegen can back it end
+// to end — a `Named`/`Array(Named)` annotation on a param or call-initialised
+// local whose actual binding stays a boxed `Value` would MISCOMPILE (`p.x` /
+// `bodies[i].vx = …` lowered against a boxed value). So write-back is two-tier:
+//   * S-0's scalar `: number` params are ALWAYS stamped (identical to the M4
+//     param-infer mechanism, already consumed soundly), plus the struct `type`
+//     alias decls (inert on their own — unreferenced aliases are dropped).
+//   * The S-A/S-B/S-C struct/array shapes are stamped ONLY when the S-D
+//     whole-program candidacy predicate holds (`compute_unbox_candidacy` →
+//     `unbox_alias`: one monomorphic all-f64 shape, no `===`/escape/reshape).
+//     Codegen's S-E/S-F typed-fn ABI tier (`setup_aggregate_fns`) then consumes
+//     them, de-virtualizing the factory/array/operator fns into native free fns
+//     over `Vec<TishStruct_alias>` threaded by reference. All-or-nothing with
+//     scratch-buffer rollback: any unlowerable use disables the whole path and
+//     the boxed closures are emitted unchanged (byte-identical fallback).
+// `analyze_aggregate` stays exposed for unit tests over the raw analysis.
 
 /// The result of the aggregate analysis: the registered struct shapes plus, per
 /// function, the inferred return shape and the set of params S-0 typed numeric.
@@ -5003,12 +4999,12 @@ fn infer_aggregate_expr(
     }
 }
 
-/// Aggregate inference writeback. Runs the S-0..S-C analysis, then stamps onto the
-/// program ONLY the annotations the existing codegen backs soundly (see the module
-/// note above): the S-0 numeric `: number` params, plus the inert struct alias
-/// `type` decls. The S-A/S-B/S-C struct shapes are computed and available via
-/// `analyze_aggregate` but are NOT written onto params / call-locals until the
-/// S-D..S-F typed-fn ABI tier exists to consume them without a boxed-edge miscompile.
+/// Aggregate inference writeback (two-tier — see the module note above). Always
+/// stamps the S-0 numeric `: number` params plus the struct alias `type` decls;
+/// when the S-D candidacy predicate holds (`unbox_alias` is `Some`) it ALSO stamps
+/// the S-A/S-B/S-C struct/array shapes (factory returns, group-fn array params,
+/// top-level array locals), which codegen's S-E/S-F typed-fn ABI tier
+/// (`setup_aggregate_fns`) consumes with scratch-buffer rollback.
 fn aggregate_infer_program(program: Program) -> Program {
     let analysis = analyze_aggregate(&program);
 

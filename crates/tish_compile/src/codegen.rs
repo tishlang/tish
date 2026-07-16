@@ -784,7 +784,7 @@ struct AggFnSig {
     ret: AggRet,
 }
 
-/// #178 (behind `TISH_REC_STRUCT`): a recursive struct shape inferred *structurally* (no name
+/// #178 (default-on via `native_opts_enabled`): a recursive struct shape inferred *structurally* (no name
 /// matching) from object literals whose fields are either scalars or recursive self-references.
 /// Drives native lowering of tree/list builders and consumers to `Option<Box<T>>` + native fns —
 /// the real, name-independent binary_trees lowering. See docs/recursive-struct-native.md.
@@ -915,7 +915,7 @@ pub(crate) struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
-    /// #176 (behind `TISH_NATIVE_FN`): top-level `let` bindings lowered to `thread_local Cell<f64>`
+    /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
@@ -940,7 +940,7 @@ pub(crate) struct Codegen {
     /// of `str_char_code_at`'s `chars().nth(i)` = O(i). Maps the source ident → the hoisted `_scN`
     /// `Vec<char>` binding; populated for the loop body's extent only.
     hoisted_string_chars: std::collections::HashMap<String, String>,
-    /// M5 (dark-shipped behind `TISH_NATIVE_FN`): top-level functions eligible for a parallel
+    /// M5 (default-on via `native_opts_enabled`): top-level functions eligible for a parallel
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
@@ -1001,7 +1001,7 @@ pub(crate) struct Codegen {
     /// nested call site these are already `&/&mut Vec<T>` references, so they pass through by reborrow
     /// (`&mut *p`) rather than being address-of'd like a local `Vec` (`&mut local`).
     vec_ref_params: std::collections::HashMap<String, bool>,
-    /// #320 (behind TISH_NATIVE_ARR_PARAM): normal boxed-closure fns that take one or more READ-ONLY
+    /// #320 (default-on via `native_opts_enabled`): normal boxed-closure fns that take one or more READ-ONLY
     /// `number[]` params (e.g. k_nucleotide's `kNucleotide(seq, k)` — indexes `seq` but returns a
     /// boxed Map). Per param: `true` = unbox the boxed arg into an owned native `Vec<f64>` so the
     /// body indexes it natively (`seq[i+j]` → f64), `false` = leave it on its normal path. The fn
@@ -1009,10 +1009,10 @@ pub(crate) struct Codegen {
     /// native. Computed by `Self::native_arr_param_fns`, the SAME pure fn infer reads (agreement
     /// contract — see `infer::native_vec_array_params`), disjoint from `native_vec_fns`.
     native_arr_param_fns: std::collections::HashMap<String, Vec<bool>>,
-    /// #177 S-E/S-F (dark-shipped behind `TISH_AGGREGATE_INFER`): the unboxed struct alias name
+    /// #177 S-E/S-F (default-on via `native_opts_enabled`): the unboxed struct alias name
     /// (e.g. `TishAnon_0`) when the interprocedural aggregate path is active for this program,
     /// else `None`. Set in `emit_program` only after the de-virtualized fns emit successfully.
-    /// #178: inferred recursive-struct lowering plan (behind `TISH_REC_STRUCT`).
+    /// #178: inferred recursive-struct lowering plan (default-on via `native_opts_enabled`).
     rec_struct_plan: Option<RecStructPlan>,
     aggregate_alias: Option<String>,
     /// #177: fn name → its de-virtualized native signature. Calls to these route directly to the
@@ -2331,8 +2331,9 @@ impl Codegen {
             self.writeln("}");
             self.writeln("");
         }
-        // M5 (dark-shipped behind TISH_NATIVE_FN): emit a parallel native `fn f_native` for each
-        // eligible top-level numeric fn at top level; direct calls route to it in emit_typed_expr.
+        // M5 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out): emit a parallel
+        // native `fn f_native` for each eligible top-level numeric fn at top level; direct calls
+        // route to it in emit_typed_expr.
         if crate::native_opts_enabled() {
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
@@ -2378,21 +2379,21 @@ impl Codegen {
                 self.writeln("");
             }
         }
-        // #177 (S-E/S-F, dark-shipped behind TISH_AGGREGATE_INFER): de-virtualize the nbody-shape
+        // #177 (S-E/S-F, default-on via native_opts_enabled): de-virtualize the nbody-shape
         // aggregate fns into native Rust free fns operating on an unboxed `Vec<TishStruct_alias>`
         // threaded by reference. Computed + emitted here (before `run()`); if any fn can't be
         // lowered the whole path is disabled and we fall back to the boxed closures unchanged.
         if crate::native_opts_enabled() {
             self.setup_aggregate_fns(program);
         }
-        // #178 (behind TISH_REC_STRUCT): de-virtualize recursive-struct builders/consumers into
+        // #178 (default-on via native_opts_enabled): de-virtualize recursive-struct builders/consumers into
         // native free fns over `Option<Box<T>>` structs (the real binary_trees fix). Structural,
         // name-independent; emits before `run()` with scratch-buffer rollback so any unsupported
         // construct cleanly disables the path and falls back to the boxed closures unchanged.
         if crate::native_opts_enabled() {
             self.setup_rec_struct_plan(program);
         }
-        // #175 (behind TISH_NATIVE_FN): de-virtualize fns over plain `number[]`/`boolean[]` params
+        // #175 (default-on via native_opts_enabled): de-virtualize fns over plain `number[]`/`boolean[]` params
         // into native free fns threaded by `&/&mut Vec<T>` (spectral_norm / queens). Runs after the
         // aggregate path so it can skip any fn that path already claimed; emits before `run()` with
         // its own scratch-buffer rollback so a failure leaves the boxed closures untouched.
@@ -2403,7 +2404,7 @@ impl Codegen {
             self.inline_fns = Self::collect_inline_fns(program);
             self.setup_native_vec_fns(program);
         }
-        // #320 (behind TISH_NATIVE_ARR_PARAM): normal fns taking read-only `number[]` params get
+        // #320 (default-on via native_opts_enabled): normal fns taking read-only `number[]` params get
         // those params unboxed to native owned `Vec<f64>` (boxed body + boxed return otherwise), so
         // `seq[i+j]` indexes natively. The SAME pure detection infer reads to keep the caller's array
         // `number[]`, so the two never disagree about which args pass as native arrays.
@@ -5843,14 +5844,15 @@ impl Codegen {
                         sibling_escaped, sibling_escaped
                     ));
                 }
-                // Extract just the parameter names (type annotations are parsed but not used in codegen yet)
+                // Extract just the parameter names for capture bookkeeping (typed params get
+                // native shadows below — the M1 block)
                 let current_param_names: Vec<String> = params
                     .iter()
                     .flat_map(|p| p.bound_names())
                     .map(|n| n.to_string())
                     .collect();
                 let formal_span = *span;
-                // M1 (keystone, dark-shipped behind TISH_PARAM_NATIVE): a typed scalar param
+                // M1 (keystone; default-on via native_opts_enabled): a typed scalar param
                 // normally arrives boxed (`args.get(i).cloned()`), which poisons native math in
                 // the body (e.g. `i*N+k` boxes). Bind a *native shadow* — coerce once to f64/
                 // bool/String — so the body lowers it like a native local. Conservative: only
@@ -7261,7 +7263,7 @@ impl Codegen {
                         }
                         "reduce" => {
                             let initial = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            // Fused reduce (TISH_FUSED_HOF): `arr.reduce((acc, x) => acc OP x, init)`
+                            // Fused reduce (default-on via native_opts_enabled): `arr.reduce((acc, x) => acc OP x, init)`
                             // with a plain binop of the two params → a native fold using the SAME
                             // runtime Value op the closure body would, eliminating the per-element
                             // `value_call`. Sound (identical Value semantics, incl. string `+`).
@@ -10264,7 +10266,7 @@ impl Codegen {
             }
         }
 
-        // Native typed-array HOFs (TISH_NATIVE_HOF): `xs.reduce/map/filter/some/every(<arrow>)`
+        // Native typed-array HOFs (default-on via native_opts_enabled): `xs.reduce/map/filter/some/every(<arrow>)`
         // whose native result type matches this binding's target → emit the iterator chain
         // directly, with NO box/unbox round-trip (the per-element `value_call` is gone too).
         if let Expr::Call { callee, args, .. } = expr {
@@ -18698,7 +18700,7 @@ impl Codegen {
     // ====================================================================================
     // #177 (S-E / S-F): interprocedural aggregate (unboxed struct + Vec<Struct>) free fns.
     //
-    // The infer front-end (S-0..S-D, behind TISH_AGGREGATE_INFER) stamps a struct alias and
+    // The infer front-end (S-0..S-D, default-on via native_opts_enabled) stamps a struct alias and
     // `: alias` / `: alias[]` annotations onto the nbody-shape factory/array/operator fns iff a
     // whole-program candidacy predicate holds (monomorphic all-f64 struct, no `===`/escape/
     // reshape, write-permitting field ops). Here we consume that: emit each such fn as a native
@@ -18712,7 +18714,7 @@ impl Codegen {
     // identical to flag-off). So we never half-wire the feature or miscompile.
     // ====================================================================================
 
-    // ── #178: recursive-struct native lowering (behind TISH_REC_STRUCT) ─────────────────────
+    // ── #178: recursive-struct native lowering (default-on via native_opts_enabled) ─────────
     // Infers a recursive struct shape STRUCTURALLY (no identifier matching) from object literals
     // whose fields are scalars or recursive self-references, and emits native builders
     // (`name_rec(..) -> TishStruct_X`) + consumers (`name_rec(&TishStruct_X) -> f64`) over
@@ -21866,7 +21868,7 @@ impl Codegen {
                         }
                     }
                 }
-                // Native typed-array HOFs over a `Vec<f64>` receiver (TISH_NATIVE_HOF):
+                // Native typed-array HOFs over a `Vec<f64>` receiver (default-on via native_opts_enabled):
                 // `xs.reduce/map/filter/some/every(<arrow>)` → a direct Rust iterator chain,
                 // eliminating the per-element `value_call` and all `Value` boxing.
                 if let Some(res) = self.native_vec_hof_for_call(callee, args)? {
@@ -22617,7 +22619,7 @@ impl Codegen {
     }
 
     /// If `callee(args)` is `<Vec<f64>-ident>.reduce/map/filter/some/every(<arrow>)` and the
-    /// `TISH_NATIVE_HOF` flag is set, lower it to a native iterator chain. Shared by
+    /// native opts are enabled (default-on), lower it to a native iterator chain. Shared by
     /// `emit_typed_expr` (native sub-expressions) and `emit_native_expr` (typed `let` RHS), so a
     /// typed-array HOF lowers natively whether its result flows into arithmetic or a binding.
     fn native_vec_hof_for_call(
@@ -22654,7 +22656,7 @@ impl Codegen {
         self.try_native_vec_hof(&recv_code, &inner, recv_name.as_ref(), method.as_ref(), args)
     }
 
-    /// Native typed-array HOFs (`TISH_NATIVE_HOF`): when the receiver is a native `Vec<f64>`
+    /// Native typed-array HOFs (default-on via `native_opts_enabled`): when the receiver is a native `Vec<f64>`
     /// (a typed `number[]`), lower `reduce`/`map`/`filter`/`some`/`every` to a direct Rust
     /// iterator chain — no per-element `value_call`, no `Value` boxing.
     ///
