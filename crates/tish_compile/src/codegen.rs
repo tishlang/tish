@@ -15754,14 +15754,124 @@ impl Codegen {
     pub(crate) fn fns_called_with_nonnumeric_arg(
         statements: &[Statement],
     ) -> std::collections::HashSet<String> {
+        // Fns that may return a non-numeric value; a call to one is itself a non-numeric ARG
+        // (tishlang/tish#485) — it violates the M4 "caller passes a number" assumption.
+        let may = Self::fns_may_return_nonnumeric(statements);
         let mut out = std::collections::HashSet::new();
         for s in statements {
-            Self::scan_stmt_nonnum_calls(s, &mut out);
+            Self::scan_stmt_nonnum_calls(s, &may, &mut out);
         }
         out
     }
 
-    fn arg_is_nonnumeric(e: &Expr) -> bool {
+    /// Fixpoint over fn decls: a fn "may return non-numeric" if some `return` expr is provably
+    /// non-numeric (string/null/bool/object/array/template literal, string-concat) or a call to a
+    /// fn already in the set. Used only to DISQUALIFY numeric param promotion — passing such a
+    /// call's result to an M4-promoted `: number` param would `panic!("expected number")` when it
+    /// yields null/string (tishlang/tish#485). Sound superset (extra members only keep params boxed).
+    fn fns_may_return_nonnumeric(
+        statements: &[Statement],
+    ) -> std::collections::HashSet<String> {
+        let mut fns: Vec<(String, &Statement)> = Vec::new();
+        for s in statements {
+            Self::collect_fn_decls_stmt(s, &mut fns);
+        }
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            let mut changed = false;
+            for (name, body) in &fns {
+                if !set.contains(name) && Self::stmt_returns_nonnumeric(body, &set) {
+                    set.insert(name.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        set
+    }
+
+    fn collect_fn_decls_stmt<'a>(s: &'a Statement, out: &mut Vec<(String, &'a Statement)>) {
+        use Statement::*;
+        match s {
+            FunDecl { name, body, .. } => {
+                out.push((name.to_string(), body.as_ref()));
+                Self::collect_fn_decls_stmt(body, out);
+            }
+            Block { statements, .. } | Multi { statements, .. } => {
+                for x in statements {
+                    Self::collect_fn_decls_stmt(x, out);
+                }
+            }
+            Export { declaration, .. } => {
+                if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    Self::collect_fn_decls_stmt(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True if any `return` in `s` (NOT descending into nested fns) is provably non-numeric.
+    fn stmt_returns_nonnumeric(s: &Statement, set: &std::collections::HashSet<String>) -> bool {
+        use Statement::*;
+        match s {
+            Return { value: Some(v), .. } => Self::return_expr_is_nonnumeric(v, set),
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().any(|x| Self::stmt_returns_nonnumeric(x, set))
+            }
+            If { then_branch, else_branch, .. } => {
+                Self::stmt_returns_nonnumeric(then_branch, set)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| Self::stmt_returns_nonnumeric(e, set))
+            }
+            While { body, .. } | DoWhile { body, .. } | For { body, .. } | ForOf { body, .. } => {
+                Self::stmt_returns_nonnumeric(body, set)
+            }
+            Switch { cases, default_body, .. } => {
+                cases
+                    .iter()
+                    .any(|(_, b)| b.iter().any(|x| Self::stmt_returns_nonnumeric(x, set)))
+                    || default_body
+                        .as_ref()
+                        .is_some_and(|d| d.iter().any(|x| Self::stmt_returns_nonnumeric(x, set)))
+            }
+            Try { body, catch_body, finally_body, .. } => {
+                Self::stmt_returns_nonnumeric(body, set)
+                    || catch_body
+                        .as_ref()
+                        .is_some_and(|c| Self::stmt_returns_nonnumeric(c, set))
+                    || finally_body
+                        .as_ref()
+                        .is_some_and(|f| Self::stmt_returns_nonnumeric(f, set))
+            }
+            _ => false,
+        }
+    }
+
+    fn return_expr_is_nonnumeric(e: &Expr, set: &std::collections::HashSet<String>) -> bool {
+        match e {
+            Expr::Literal {
+                value: Literal::String(_) | Literal::Bool(_) | Literal::Null,
+                ..
+            }
+            | Expr::TemplateLiteral { .. }
+            | Expr::Array { .. }
+            | Expr::Object { .. } => true,
+            Expr::Binary { op: BinOp::Add, left, right, .. } => {
+                Self::return_expr_is_nonnumeric(left, set)
+                    || Self::return_expr_is_nonnumeric(right, set)
+            }
+            Expr::Call { callee, .. } | Expr::New { callee, .. } => {
+                matches!(callee.as_ref(), Expr::Ident { name, .. } if set.contains(name.as_ref()))
+            }
+            _ => false,
+        }
+    }
+
+    fn arg_is_nonnumeric(e: &Expr, may: &std::collections::HashSet<String>) -> bool {
         match e {
             Expr::Literal {
                 value: Literal::String(_) | Literal::Bool(_) | Literal::Null,
@@ -15773,78 +15883,83 @@ impl Codegen {
             // A `+` with a string/template operand is JS string concatenation → a string result
             // (e.g. `"user" + i`). Conservatively treat such a call arg as non-numeric.
             Expr::Binary { op: BinOp::Add, left, right, .. } => {
-                Self::arg_is_nonnumeric(left) || Self::arg_is_nonnumeric(right)
+                Self::arg_is_nonnumeric(left, may) || Self::arg_is_nonnumeric(right, may)
+            }
+            // A call to a fn that MAY return a non-numeric value (tishlang/tish#485): its result
+            // could be null/string, so an enclosing call's param must stay boxed, not `: number`.
+            Expr::Call { callee, .. } | Expr::New { callee, .. } => {
+                matches!(callee.as_ref(), Expr::Ident { name, .. } if may.contains(name.as_ref()))
             }
             _ => false,
         }
     }
 
-    fn scan_stmt_nonnum_calls(s: &Statement, out: &mut std::collections::HashSet<String>) {
+    fn scan_stmt_nonnum_calls(s: &Statement, may: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
         use Statement::*;
         match s {
             Block { statements, .. } | Multi { statements, .. } => {
-                statements.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out))
+                statements.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, may, out))
             }
-            VarDecl { init: Some(i), .. } => Self::scan_expr_nonnum_calls(i, out),
-            VarDeclDestructure { init, .. } => Self::scan_expr_nonnum_calls(init, out),
-            ExprStmt { expr, .. } => Self::scan_expr_nonnum_calls(expr, out),
+            VarDecl { init: Some(i), .. } => Self::scan_expr_nonnum_calls(i, may, out),
+            VarDeclDestructure { init, .. } => Self::scan_expr_nonnum_calls(init, may, out),
+            ExprStmt { expr, .. } => Self::scan_expr_nonnum_calls(expr, may, out),
             If { cond, then_branch, else_branch, .. } => {
-                Self::scan_expr_nonnum_calls(cond, out);
-                Self::scan_stmt_nonnum_calls(then_branch, out);
+                Self::scan_expr_nonnum_calls(cond, may, out);
+                Self::scan_stmt_nonnum_calls(then_branch, may, out);
                 if let Some(eb) = else_branch {
-                    Self::scan_stmt_nonnum_calls(eb, out);
+                    Self::scan_stmt_nonnum_calls(eb, may, out);
                 }
             }
             While { cond, body, .. } | DoWhile { body, cond, .. } => {
-                Self::scan_expr_nonnum_calls(cond, out);
-                Self::scan_stmt_nonnum_calls(body, out);
+                Self::scan_expr_nonnum_calls(cond, may, out);
+                Self::scan_stmt_nonnum_calls(body, may, out);
             }
             For { init, cond, update, body, .. } => {
                 if let Some(i) = init {
-                    Self::scan_stmt_nonnum_calls(i, out);
+                    Self::scan_stmt_nonnum_calls(i, may, out);
                 }
                 if let Some(c) = cond {
-                    Self::scan_expr_nonnum_calls(c, out);
+                    Self::scan_expr_nonnum_calls(c, may, out);
                 }
                 if let Some(u) = update {
-                    Self::scan_expr_nonnum_calls(u, out);
+                    Self::scan_expr_nonnum_calls(u, may, out);
                 }
-                Self::scan_stmt_nonnum_calls(body, out);
+                Self::scan_stmt_nonnum_calls(body, may, out);
             }
             ForOf { iterable, body, .. } => {
-                Self::scan_expr_nonnum_calls(iterable, out);
-                Self::scan_stmt_nonnum_calls(body, out);
+                Self::scan_expr_nonnum_calls(iterable, may, out);
+                Self::scan_stmt_nonnum_calls(body, may, out);
             }
-            Return { value: Some(v), .. } => Self::scan_expr_nonnum_calls(v, out),
-            Throw { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            Return { value: Some(v), .. } => Self::scan_expr_nonnum_calls(v, may, out),
+            Throw { value, .. } => Self::scan_expr_nonnum_calls(value, may, out),
             Switch { expr, cases, default_body, .. } => {
-                Self::scan_expr_nonnum_calls(expr, out);
+                Self::scan_expr_nonnum_calls(expr, may, out);
                 for (g, body) in cases {
                     if let Some(ge) = g {
-                        Self::scan_expr_nonnum_calls(ge, out);
+                        Self::scan_expr_nonnum_calls(ge, may, out);
                     }
-                    body.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                    body.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, may, out));
                 }
                 if let Some(d) = default_body {
-                    d.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, out));
+                    d.iter().for_each(|x| Self::scan_stmt_nonnum_calls(x, may, out));
                 }
             }
             Try { body, catch_body, finally_body, .. } => {
-                Self::scan_stmt_nonnum_calls(body, out);
+                Self::scan_stmt_nonnum_calls(body, may, out);
                 if let Some(c) = catch_body {
-                    Self::scan_stmt_nonnum_calls(c, out);
+                    Self::scan_stmt_nonnum_calls(c, may, out);
                 }
                 if let Some(f) = finally_body {
-                    Self::scan_stmt_nonnum_calls(f, out);
+                    Self::scan_stmt_nonnum_calls(f, may, out);
                 }
             }
-            FunDecl { body, .. } => Self::scan_stmt_nonnum_calls(body, out),
+            FunDecl { body, .. } => Self::scan_stmt_nonnum_calls(body, may, out),
             Export { declaration, .. } => match declaration.as_ref() {
                 tishlang_ast::ExportDeclaration::Named(inner) => {
-                    Self::scan_stmt_nonnum_calls(inner, out)
+                    Self::scan_stmt_nonnum_calls(inner, may, out)
                 }
                 tishlang_ast::ExportDeclaration::Default(ex) => {
-                    Self::scan_expr_nonnum_calls(ex, out)
+                    Self::scan_expr_nonnum_calls(ex, may, out)
                 }
                 tishlang_ast::ExportDeclaration::ReExport { .. } => {}
             },
@@ -15852,61 +15967,61 @@ impl Codegen {
         }
     }
 
-    fn scan_expr_nonnum_calls(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    fn scan_expr_nonnum_calls(e: &Expr, may: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
         match e {
             Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     if args
                         .iter()
-                        .any(|a| matches!(a, CallArg::Expr(ae) if Self::arg_is_nonnumeric(ae)))
+                        .any(|a| matches!(a, CallArg::Expr(ae) if Self::arg_is_nonnumeric(ae, may)))
                     {
                         out.insert(name.to_string());
                     }
                 }
-                Self::scan_expr_nonnum_calls(callee, out);
+                Self::scan_expr_nonnum_calls(callee, may, out);
                 for a in args {
                     if let CallArg::Expr(x) | CallArg::Spread(x) = a {
-                        Self::scan_expr_nonnum_calls(x, out);
+                        Self::scan_expr_nonnum_calls(x, may, out);
                     }
                 }
             }
             Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
-                Self::scan_expr_nonnum_calls(left, out);
-                Self::scan_expr_nonnum_calls(right, out);
+                Self::scan_expr_nonnum_calls(left, may, out);
+                Self::scan_expr_nonnum_calls(right, may, out);
             }
-            Expr::Unary { operand, .. } => Self::scan_expr_nonnum_calls(operand, out),
+            Expr::Unary { operand, .. } => Self::scan_expr_nonnum_calls(operand, may, out),
             Expr::Conditional { cond, then_branch, else_branch, .. } => {
-                Self::scan_expr_nonnum_calls(cond, out);
-                Self::scan_expr_nonnum_calls(then_branch, out);
-                Self::scan_expr_nonnum_calls(else_branch, out);
+                Self::scan_expr_nonnum_calls(cond, may, out);
+                Self::scan_expr_nonnum_calls(then_branch, may, out);
+                Self::scan_expr_nonnum_calls(else_branch, may, out);
             }
             Expr::Index { object, index, .. } => {
-                Self::scan_expr_nonnum_calls(object, out);
-                Self::scan_expr_nonnum_calls(index, out);
+                Self::scan_expr_nonnum_calls(object, may, out);
+                Self::scan_expr_nonnum_calls(index, may, out);
             }
             Expr::IndexAssign { object, index, value, .. } => {
-                Self::scan_expr_nonnum_calls(object, out);
-                Self::scan_expr_nonnum_calls(index, out);
-                Self::scan_expr_nonnum_calls(value, out);
+                Self::scan_expr_nonnum_calls(object, may, out);
+                Self::scan_expr_nonnum_calls(index, may, out);
+                Self::scan_expr_nonnum_calls(value, may, out);
             }
             Expr::Member { object, prop, .. } => {
-                Self::scan_expr_nonnum_calls(object, out);
+                Self::scan_expr_nonnum_calls(object, may, out);
                 if let MemberProp::Expr(pe) = prop {
-                    Self::scan_expr_nonnum_calls(pe, out);
+                    Self::scan_expr_nonnum_calls(pe, may, out);
                 }
             }
             Expr::MemberAssign { object, value, .. } => {
-                Self::scan_expr_nonnum_calls(object, out);
-                Self::scan_expr_nonnum_calls(value, out);
+                Self::scan_expr_nonnum_calls(object, may, out);
+                Self::scan_expr_nonnum_calls(value, may, out);
             }
             Expr::Assign { value, .. }
             | Expr::CompoundAssign { value, .. }
-            | Expr::LogicalAssign { value, .. } => Self::scan_expr_nonnum_calls(value, out),
+            | Expr::LogicalAssign { value, .. } => Self::scan_expr_nonnum_calls(value, may, out),
             Expr::Array { elements, .. } => {
                 for el in elements {
                     match el {
                         ArrayElement::Expr(x) | ArrayElement::Spread(x) => {
-                            Self::scan_expr_nonnum_calls(x, out)
+                            Self::scan_expr_nonnum_calls(x, may, out)
                         }
                     }
                 }
@@ -15915,13 +16030,13 @@ impl Codegen {
                 for pr in props {
                     match pr {
                         ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => {
-                            Self::scan_expr_nonnum_calls(x, out)
+                            Self::scan_expr_nonnum_calls(x, may, out)
                         }
                     }
                 }
             }
             Expr::TemplateLiteral { exprs, .. } => {
-                exprs.iter().for_each(|x| Self::scan_expr_nonnum_calls(x, out))
+                exprs.iter().for_each(|x| Self::scan_expr_nonnum_calls(x, may, out))
             }
             _ => {}
         }
