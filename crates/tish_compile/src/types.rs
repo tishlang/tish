@@ -390,13 +390,18 @@ impl RustType {
                 let field_assigns = fields
                     .iter()
                     .map(|(k, ty)| {
-                        let fetch = format!("tishlang_runtime::get_prop(&_src, {:?})", k.as_ref());
+                        let fetch = format!("tishlang_runtime::get_prop(_src, {:?})", k.as_ref());
                         format!("{}: {}", field_ident(k), ty.from_value_expr(&fetch))
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                // Bind `_src` as a BORROW (not a move) of the source Value: field fetches only need
+                // `&Value` (get_prop borrows), and moving would use-after-move a caller-owned temp —
+                // e.g. an assignment-as-expression `{ let _v = obj; lhs = <coerce _v>; _v }` reuses
+                // `_v` for its value (tishlang/tish#486). `&(expr)` evaluates the source once and
+                // (for a temporary) lifetime-extends it to this block, so it's still single-eval.
                 format!(
-                    "{{ let _src = {}; {} {{ {} }} }}",
+                    "{{ let _src = &({}); {} {{ {} }} }}",
                     value_expr,
                     named_struct_ident(name),
                     field_assigns
