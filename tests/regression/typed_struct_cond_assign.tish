@@ -1,0 +1,8 @@
+interface Repo { url: string, ref: string? }
+fn build(cond: boolean, u: string): Repo? {
+  let repo: Repo? = null
+  if (cond) { repo = { url: u, ref: null } }
+  return repo
+}
+let r = build(true, "x")
+console.log("ok: " + String(r))
