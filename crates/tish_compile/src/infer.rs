@@ -338,9 +338,44 @@ fn param_is_body_numeric_candidate(body: &Statement, base_nums: &HashSet<String>
         && copy_descendants.iter().all(|x| lns_stmt(body, x.as_str(), &nums))
 }
 
-/// Per fn (top-level and nested), the parameter POSITIONS that are numeric candidates — i.e. the
-/// body would M4-promote them to f64. The call-arg whitelist (#485/#477/#484) checks ONLY these
-/// positions, so array/object params (e.g. native-vec devirt) never disqualify a fn.
+/// analyze_aggregate's S-0 numeric-param set for one fn: the optimistic `pus_stmt` fixpoint (a param
+/// used only as an object-field VALUE / numeric operand is numeric). Shared with the call-arg
+/// whitelist so its candidate set covers what S-0 (via `stamp_numeric_params`) actually promotes.
+fn s0_numeric_candidates(params: &[FunParam], body: &Statement) -> HashSet<String> {
+    let mut nums = HashSet::new();
+    collect_numeric_locals_fixpoint(body, &mut nums);
+    let mut numeric_params: HashSet<String> = params
+        .iter()
+        .filter_map(|p| match p {
+            FunParam::Simple(tp) if tp.type_ann.is_none() && tp.default.is_none() => {
+                Some(tp.name.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    loop {
+        let mut local_nums = nums.clone();
+        for n in &numeric_params {
+            local_nums.insert(n.clone());
+        }
+        let drop: Vec<String> = numeric_params
+            .iter()
+            .filter(|n| !pus_stmt(body, n.as_str(), &local_nums))
+            .cloned()
+            .collect();
+        if drop.is_empty() {
+            break;
+        }
+        for n in drop {
+            numeric_params.remove(&n);
+        }
+    }
+    numeric_params
+}
+
+/// Per fn (top-level and nested), the parameter POSITIONS that are numeric candidates — i.e. either
+/// promotion path would M4-promote them to f64. The call-arg whitelist (#485/#477/#484) checks ONLY
+/// these positions, so array/object params (e.g. native-vec devirt) never disqualify a fn.
 pub(crate) fn numeric_candidate_positions(
     statements: &[Statement],
 ) -> std::collections::HashMap<String, Vec<(usize, String)>> {
@@ -359,12 +394,18 @@ fn ncp_stmt(s: &Statement, out: &mut std::collections::HashMap<String, Vec<(usiz
         FunDecl { name, params, body, .. } => {
             let mut base_nums = HashSet::new();
             collect_numeric_locals_fixpoint(body, &mut base_nums);
+            // A position is a candidate if EITHER promotion path would take it: pi_stmt (nus_stmt) OR
+            // analyze_aggregate's S-0 (pus_stmt — which also accepts a param used as an object-field
+            // VALUE, e.g. `{ v: s }`). The whitelist must cover BOTH or a param S-0 promotes but
+            // pi_stmt doesn't (tishlang/tish#484) gets an f64 unbox with no call-arg check.
+            let s0 = s0_numeric_candidates(params, body);
             let mut positions: Vec<(usize, String)> = Vec::new();
             for (i, p) in params.iter().enumerate() {
                 if let FunParam::Simple(tp) = p {
                     if tp.type_ann.is_none()
                         && tp.default.is_none()
-                        && param_is_body_numeric_candidate(body, &base_nums, tp.name.as_ref())
+                        && (param_is_body_numeric_candidate(body, &base_nums, tp.name.as_ref())
+                            || s0.contains(tp.name.as_ref()))
                     {
                         positions.push((i, tp.name.to_string()));
                     }
@@ -706,9 +747,17 @@ pub(crate) fn fns_with_unsafe_numeric_arg(statements: &[Statement]) -> HashSet<S
     for s in statements {
         cfm_stmt(s, &mut all_params, &mut fn_locals);
     }
+    // Top-level numeric locals — run a fixpoint ACROSS statements so a chain propagates
+    // (`let PI = …; let SOLAR_MASS = 4 * PI * PI` ⇒ both numeric, so `body(…, SOLAR_MASS)` is safe).
     let mut top_nums = HashSet::new();
-    for s in statements {
-        collect_numeric_locals_fixpoint(s, &mut top_nums);
+    loop {
+        let before = top_nums.len();
+        for s in statements {
+            collect_numeric_locals_fixpoint(s, &mut top_nums);
+        }
+        if top_nums.len() == before {
+            break;
+        }
     }
     let mut calls = Vec::new();
     for s in statements {
@@ -731,7 +780,10 @@ pub(crate) fn fns_with_unsafe_numeric_arg(statements: &[Statement]) -> HashSet<S
             let ctx: HashSet<String> = match &cs.caller {
                 None => top_nums.clone(),
                 Some(c) => {
-                    let mut ctx = fn_locals.get(c).cloned().unwrap_or_default();
+                    // Top-level numeric globals (`SOLAR_MASS`, `PI`, …) are numeric inside every fn,
+                    // plus this fn's numeric locals + its still-numeric params.
+                    let mut ctx = top_nums.clone();
+                    ctx.extend(fn_locals.get(c).cloned().unwrap_or_default());
                     if let (Some(ps), Some(np)) = (all_params.get(c), numeric_pos.get(c)) {
                         for &pos in np {
                             if let Some(n) = ps.get(pos) {

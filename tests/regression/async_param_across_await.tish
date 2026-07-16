@@ -1,0 +1,7 @@
+fn f(s) {
+  let o = { v: s }
+  await Promise.resolve(1)
+  return JSON.stringify(o)
+}
+let r = await f("hello")
+console.log("R=" + r)
