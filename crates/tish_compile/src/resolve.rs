@@ -59,6 +59,7 @@ const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("process", "tish:process"),
     ("ws", "tish:ws"),
     ("tty", "tish:tty"),
+    ("pty", "tish:pty"),
 ];
 
 /// Normalize built-in spec to canonical form. Handles the Node `node:` prefix
@@ -87,9 +88,10 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
             | "tish:process"
             | "tish:ws"
             | "tish:tty"
+            | "tish:pty"
     ) || matches!(
         spec,
-        "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty"
+        "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty" | "pty"
     )
 }
 

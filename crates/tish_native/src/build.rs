@@ -17,6 +17,7 @@ const RUNTIME_CARGO_FEATURES: &[&str] = &[
     "regex",
     "ws",
     "tty",
+    "pty",
 ];
 
 /// Map CLI/compile features to flags passed to `tishlang_runtime` in the temp crate's Cargo.toml.
