@@ -9521,6 +9521,187 @@ impl Codegen {
         }
     }
 
+    /// Every name BOUND anywhere inside `s` — `let`/`const` (incl. destructuring), fn/arrow
+    /// params, `for…of`/`for…in` loop vars, `catch` params, and nested `FunDecl` names —
+    /// descending into nested arrow and function bodies. Unlike `collect_local_var_names`
+    /// (which skips arrow bodies) or `collect_binding_names` (which skips `let`/`const`),
+    /// this is the complete binder set of the subtree. Used by the arrow emitter's implicit
+    /// env-capture fallback so a NESTED closure's own bindings are never mistaken for capture
+    /// requirements of the closure being emitted (#467: `(a)=>(b)=>(c)=> …` E0425'd because
+    /// the middle arrow tried to capture the innermost arrow's param `c`).
+    fn collect_bound_names_deep(s: &Statement, out: &mut HashSet<String>) {
+        use Statement::*;
+        let ce = Self::collect_bound_names_deep_expr;
+        match s {
+            VarDecl { name, init, .. } => {
+                out.insert(name.to_string());
+                if let Some(i) = init {
+                    ce(i, out);
+                }
+            }
+            VarDeclDestructure { pattern, init, .. } => {
+                Self::collect_destruct_names(pattern, out);
+                ce(init, out);
+            }
+            FunDecl { name, params, body, .. } => {
+                out.insert(name.to_string());
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                Self::collect_bound_names_deep(body, out);
+            }
+            ForOf { name, iterable, body, .. } => {
+                out.insert(name.to_string());
+                ce(iterable, out);
+                Self::collect_bound_names_deep(body, out);
+            }
+            ForIn { name, object, body, .. } => {
+                out.insert(name.to_string());
+                ce(object, out);
+                Self::collect_bound_names_deep(body, out);
+            }
+            Try { body, catch_param, catch_body, finally_body, .. } => {
+                if let Some(cp) = catch_param {
+                    out.insert(cp.to_string());
+                }
+                Self::collect_bound_names_deep(body, out);
+                if let Some(c) = catch_body {
+                    Self::collect_bound_names_deep(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_bound_names_deep(f, out);
+                }
+            }
+            Block { statements, .. } | Multi { statements, .. } => {
+                statements.iter().for_each(|x| Self::collect_bound_names_deep(x, out))
+            }
+            If { cond, then_branch, else_branch, .. } => {
+                ce(cond, out);
+                Self::collect_bound_names_deep(then_branch, out);
+                if let Some(eb) = else_branch {
+                    Self::collect_bound_names_deep(eb, out);
+                }
+            }
+            While { cond, body, .. } | DoWhile { body, cond, .. } => {
+                ce(cond, out);
+                Self::collect_bound_names_deep(body, out);
+            }
+            For { init, cond, update, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_bound_names_deep(i, out);
+                }
+                if let Some(c) = cond {
+                    ce(c, out);
+                }
+                if let Some(u) = update {
+                    ce(u, out);
+                }
+                Self::collect_bound_names_deep(body, out);
+            }
+            ExprStmt { expr, .. } => ce(expr, out),
+            Return { value: Some(v), .. } => ce(v, out),
+            Throw { value, .. } => ce(value, out),
+            Switch { expr, cases, default_body, .. } => {
+                ce(expr, out);
+                for (g, b) in cases {
+                    if let Some(ge) = g {
+                        ce(ge, out);
+                    }
+                    b.iter().for_each(|x| Self::collect_bound_names_deep(x, out));
+                }
+                if let Some(d) = default_body {
+                    d.iter().for_each(|x| Self::collect_bound_names_deep(x, out));
+                }
+            }
+            Export { declaration, .. } => {
+                if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    Self::collect_bound_names_deep(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Expression side of [`Self::collect_bound_names_deep`]: recurse every child; an
+    /// `ArrowFunction` contributes its params and descends into its body.
+    fn collect_bound_names_deep_expr(e: &Expr, out: &mut HashSet<String>) {
+        let ce = Self::collect_bound_names_deep_expr;
+        match e {
+            Expr::ArrowFunction { params, body, .. } => {
+                for p in params {
+                    for n in p.bound_names() {
+                        out.insert(n.to_string());
+                    }
+                }
+                match body {
+                    ArrowBody::Expr(x) => ce(x, out),
+                    ArrowBody::Block(b) => Self::collect_bound_names_deep(b, out),
+                }
+            }
+            Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+                ce(callee, out);
+                for a in args {
+                    if let CallArg::Expr(x) | CallArg::Spread(x) = a {
+                        ce(x, out);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } | Expr::NullishCoalesce { left, right, .. } => {
+                ce(left, out);
+                ce(right, out);
+            }
+            Expr::Unary { operand, .. } => ce(operand, out),
+            Expr::TypeOf { operand, .. } => ce(operand, out),
+            Expr::Delete { target, .. } => ce(target, out),
+            Expr::Await { operand, .. } => ce(operand, out),
+            Expr::Conditional { cond, then_branch, else_branch, .. } => {
+                ce(cond, out);
+                ce(then_branch, out);
+                ce(else_branch, out);
+            }
+            Expr::Index { object, index, .. } => {
+                ce(object, out);
+                ce(index, out);
+            }
+            Expr::IndexAssign { object, index, value, .. } => {
+                ce(object, out);
+                ce(index, out);
+                ce(value, out);
+            }
+            Expr::Member { object, prop, .. } => {
+                ce(object, out);
+                if let MemberProp::Expr(pe) = prop {
+                    ce(pe, out);
+                }
+            }
+            Expr::MemberAssign { object, value, .. } => {
+                ce(object, out);
+                ce(value, out);
+            }
+            Expr::Assign { value, .. }
+            | Expr::CompoundAssign { value, .. }
+            | Expr::LogicalAssign { value, .. } => ce(value, out),
+            Expr::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => ce(x, out),
+                    }
+                }
+            }
+            Expr::Object { props, .. } => {
+                for pr in props {
+                    match pr {
+                        ObjectProp::KeyValue(_, x, _) | ObjectProp::Spread(x) => ce(x, out),
+                    }
+                }
+            }
+            Expr::TemplateLiteral { exprs, .. } => exprs.iter().for_each(|x| ce(x, out)),
+            _ => {}
+        }
+    }
+
     fn collect_destruct_names(pattern: &DestructPattern, names: &mut HashSet<String>) {
         match pattern {
             DestructPattern::Array(elements) => {
@@ -9846,6 +10027,20 @@ impl Codegen {
             .cloned()
             .collect();
         already_captured.extend(BUILTINS.iter().map(|s| s.to_string()));
+        // #467: names bound INSIDE this body's nested closures (their params and locals) show up
+        // in `referenced` — `collect_referenced_idents` has no binder awareness — but they are not
+        // free variables of THIS closure, and capturing them emits a clone of an ident that does
+        // not exist in the enclosing scope (E0425: `(a)=>(b)=>(c)=> …`'s middle arrow tried to
+        // capture the innermost arrow's own param `c`). Subtract the subtree's full binder set.
+        // Corner accepted: a name that is BOTH bound in a nested closure AND genuinely free at
+        // this level via the implicit fallback (an enclosing-closure local, not an outer param/
+        // var) is skipped too — that fails loudly at compile time (E0425), never silently, and
+        // the primary outer_params/outer_vars capture paths are unaffected by this subtraction.
+        let mut nested_bound = HashSet::new();
+        match body {
+            ArrowBody::Expr(e) => Self::collect_bound_names_deep_expr(e, &mut nested_bound),
+            ArrowBody::Block(s) => Self::collect_bound_names_deep(s, &mut nested_bound),
+        }
         let implicit_env_captures: Vec<String> = if self.value_fn_depth > 0 {
             referenced
                 .iter()
@@ -9853,6 +10048,13 @@ impl Codegen {
                     !param_names.contains(name.as_str())
                         && !local_var_names.contains(name.as_str())
                         && !already_captured.contains(name.as_str())
+                        && !nested_bound.contains(name.as_str())
+                        // #467: a native numeric GLOBAL (#176 TLS-lowered, e.g. `G_BASE`) has no
+                        // boxed binding anywhere — the body reads it via the thread-local — so a
+                        // capture emit here references a nonexistent ident (E0425 for any nested
+                        // arrow whose grandparent-scope var was TLS-lowered). Same exclusion the
+                        // FunDecl closure path and this fn's own outer_vars filter already apply.
+                        && !self.native_numeric_globals.contains_key(name.as_str())
                 })
                 .cloned()
                 .collect()

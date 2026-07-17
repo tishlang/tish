@@ -3865,6 +3865,58 @@ console.log("sieve", sieveCount(10000))
 }
 __perf_run_core_parity_mixed_numeric_compare()
 
+fn __perf_run_core_parity_nested_closure_capture() {
+// #467: a closure returning a closure that captures a GRANDPARENT-scope variable must compile
+// and run identically on every backend. Native codegen E0425'd ("cannot find value") when the
+// grandparent var was a #176 TLS-lowered native numeric global: the inner arrow's implicit env
+// capture emitted a clone of a boxed binding that no longer exists (the body reads the
+// thread-local instead). Gated across interp/vm/native + node.
+
+let base = 10
+
+// function-expression returning function-expression (the issue's exact repro)
+let f = function(x) { return function(y) { return base + x + y } }
+console.log(f(1)(2))
+
+// arrow returning arrow
+let g = (x) => (y) => base + x + y
+console.log(g(3)(4))
+
+// three levels deep
+let h = (a) => (b) => (c) => base + a + b + c
+console.log(h(1)(2)(3))
+
+// string grandparent (boxed capture path — regression control)
+let tag = "pre"
+let s = (x) => (y) => tag + x + y
+console.log(s("a")("b"))
+
+// nested named fns
+fn outer(x) {
+  fn inner(y) { return base + x + y }
+  return inner
+}
+console.log(outer(5)(6))
+
+// the inner closure sees a later mutation of the grandparent var (capture by reference)
+let live = 1
+let readLive = () => () => live
+let probe = readLive()
+live = 99
+console.log(probe())
+
+// a let INSIDE a deeper nested arrow must not be mistaken for a capture of the middle arrow
+let deep = (x) => (y) => {
+  let mid = base + x
+  return (z) => {
+    let inner = mid + y
+    return inner + z
+  }
+}
+console.log(deep(1)(2)(3))
+}
+__perf_run_core_parity_nested_closure_capture()
+
 fn __perf_run_core_parity_null_read_catchable() {
 // Reading a property or index of the nullish value throws a CATCHABLE TypeError on every backend +
 // node (interp/vm/cranelift/wasi already threw; native now parks a catchable throw — #425). Only
