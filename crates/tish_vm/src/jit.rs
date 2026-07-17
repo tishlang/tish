@@ -1102,7 +1102,7 @@ fn build_loop_region_body(
     bcx.ins().jump(header_block, &[]);
 
     // Translate the region. Operand stack is empty at every block boundary (statement-level flow).
-    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    let mut stack: Vec<JV> = Vec::new();
     bcx.switch_to_block(header_block);
     let mut cur = header_block;
     let mut terminated = false;
@@ -1143,7 +1143,7 @@ fn build_loop_region_body(
                     Some(v) => *v,
                     None => return false,
                 };
-                stack.push((bcx.use_var(v), false));
+                stack.push(JV::f64(bcx.use_var(v)));
                 ip += 3;
             }
             Opcode::StoreLocal => {
@@ -1151,17 +1151,20 @@ fn build_loop_region_body(
                     Some(s) => s as usize,
                     None => return false,
                 };
-                let (val, is_bool) = match stack.pop() {
+                let jval = match stack.pop() {
                     Some(x) => x,
                     None => return false,
                 };
-                if is_bool {
+                if jval.is_bool() {
                     return false; // no boolean slots (keeps the number/bool distinction clean)
                 }
                 let v = match vars.get(slot) {
                     Some(v) => *v,
                     None => return false,
                 };
+                // Slots are f64 Variables — one materialize at the store boundary (int-typed
+                // slots are #168's follow-up).
+                let val = jv_f64(&mut bcx, jval);
                 bcx.def_var(v, val);
                 ip += 3;
             }
@@ -1223,13 +1226,14 @@ fn build_loop_region_body(
                     Some(o) => o as i16 as isize,
                     None => return false,
                 };
-                let (cond, _) = match stack.pop() {
+                let cond = match stack.pop() {
                     Some(x) => x,
                     None => return false,
                 };
                 if !stack.is_empty() {
                     return false;
                 }
+                let cond = jv_f64(&mut bcx, cond);
                 let falsy = falsy_flag(&mut bcx, cond);
                 let t = ((ip + 3) as isize + off).max(0) as usize;
                 let target = match target_block(t) {
@@ -1254,12 +1258,13 @@ fn build_loop_region_body(
                     Some(m) => m,
                     None => return false,
                 };
-                let (x, _) = match stack.pop() {
+                let x = match stack.pop() {
                     Some(v) => v,
                     None => return false,
                 };
+                let x = jv_f64(&mut bcx, x);
                 let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
-                stack.push((r, false));
+                stack.push(JV::f64(r));
                 ip += 3;
             }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &[], 0) {
@@ -1325,6 +1330,73 @@ fn fcmp_f64(bcx: &mut FunctionBuilder, cc: FloatCC, a: ClifValue, b: ClifValue) 
     let one = bcx.ins().f64const(1.0);
     let zero = bcx.ins().f64const(0.0);
     bcx.ins().select(cond, one, zero)
+}
+
+/// #168 — which Cranelift representation a JIT stack slot currently holds.
+///
+/// `F64`: an f64 number. `Bool`: an f64 constrained to 0.0/1.0 with JS-boolean semantics (the
+/// old `is_bool` flag — comparisons/`!` produce it, `LoadConst Bool` pushes it). `I32`: an i32
+/// holding `ToInt32` bits (signed→f64 on materialize). `U32`: an i32 holding `ToUint32` bits
+/// (UNSIGNED→f64 on materialize — `>>>` results past 2³¹ stay positive numbers).
+///
+/// The integer reprs are the point: a bitwise/shift chain (`h = ((h<<13)|(h>>>19)) >>> 0`) used
+/// to pay `int→f64→int` conversion ROUND-TRIPS between every op, because the stack could only
+/// say "f64 or bool". Now each such op consumes raw int bits via [`jv_i32_bits`] (an identity
+/// for `I32`/`U32`) and pushes an int repr; f64 materialization happens once, at a genuine
+/// boundary (store/return/float-arith/compare/call), via [`jv_f64`]. `ToInt32` and `ToUint32`
+/// share bit patterns, so `I32` vs `U32` only matters at the f64 boundary (signed vs unsigned
+/// convert) — the bits themselves are interchangeable as shift/bitwise inputs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Repr {
+    F64,
+    Bool,
+    I32,
+    U32,
+}
+
+/// A typed JIT stack value: the Cranelift SSA value plus its current [`Repr`].
+#[derive(Clone, Copy)]
+struct JV {
+    v: ClifValue,
+    repr: Repr,
+}
+
+impl JV {
+    fn f64(v: ClifValue) -> Self {
+        Self { v, repr: Repr::F64 }
+    }
+    fn boolean(v: ClifValue) -> Self {
+        Self { v, repr: Repr::Bool }
+    }
+    fn int32(v: ClifValue) -> Self {
+        Self { v, repr: Repr::I32 }
+    }
+    fn uint32(v: ClifValue) -> Self {
+        Self { v, repr: Repr::U32 }
+    }
+    fn is_bool(&self) -> bool {
+        self.repr == Repr::Bool
+    }
+}
+
+/// Materialize a [`JV`] as an f64 — identity for `F64`/`Bool` (a Bool already IS an f64 0/1),
+/// one signed/unsigned convert for the integer reprs.
+fn jv_f64(bcx: &mut FunctionBuilder, jv: JV) -> ClifValue {
+    match jv.repr {
+        Repr::F64 | Repr::Bool => jv.v,
+        Repr::I32 => bcx.ins().fcvt_from_sint(types::F64, jv.v),
+        Repr::U32 => bcx.ins().fcvt_from_uint(types::F64, jv.v),
+    }
+}
+
+/// Raw `ToInt32` bit pattern of a [`JV`] as an i32 — an identity (zero instructions) for
+/// `I32`/`U32` (they share bit patterns), [`js_to_int32`] for the f64 reprs (a Bool's 0.0/1.0
+/// converts to 0/1 exactly).
+fn jv_i32_bits(bcx: &mut FunctionBuilder, jv: JV) -> ClifValue {
+    match jv.repr {
+        Repr::I32 | Repr::U32 => jv.v,
+        Repr::F64 | Repr::Bool => js_to_int32(bcx, jv.v),
+    }
 }
 
 /// f64 → JS `ToInt32` as an `I32` clif value, matching `tishlang_core::to_int32` (so a JIT-compiled
@@ -1800,7 +1872,7 @@ fn emit_simple_op(
     chunk: &Chunk,
     code: &[u8],
     ip: &mut usize,
-    stack: &mut Vec<(ClifValue, bool)>,
+    stack: &mut Vec<JV>,
     params: &[ClifValue],
     arity: usize,
 ) -> SimpleOp {
@@ -1825,7 +1897,7 @@ fn emit_simple_op(
             if slot >= arity {
                 return SimpleOp::Unsupported;
             }
-            stack.push((params[slot], false));
+            stack.push(JV::f64(params[slot]));
         }
         Opcode::LoadConst => {
             let idx = match read_u16(code, ip) {
@@ -1835,11 +1907,11 @@ fn emit_simple_op(
             match chunk.constants.get(idx) {
                 Some(Constant::Number(n)) => {
                     let v = bcx.ins().f64const(*n);
-                    stack.push((v, false));
+                    stack.push(JV::f64(v));
                 }
                 Some(Constant::Bool(b)) => {
                     let v = bcx.ins().f64const(if *b { 1.0 } else { 0.0 });
-                    stack.push((v, true));
+                    stack.push(JV::boolean(v));
                 }
                 _ => return SimpleOp::Unsupported,
             }
@@ -1852,121 +1924,143 @@ fn emit_simple_op(
             if stack.len() < 2 {
                 return SimpleOp::Unsupported;
             }
-            let (r, r_bool) = stack.pop().unwrap();
-            let (l, l_bool) = stack.pop().unwrap();
+            let r = stack.pop().unwrap();
+            let l = stack.pop().unwrap();
             // #187: a bool value (from a bool slot or a `LoadConst Bool`) can't take part in an
             // EQUALITY compare here — the JIT compares the `f64` 0/1 bits, but JS `===`/`!==` (and
             // strict `==`/`!=`) treat `0 === false` as FALSE across types. Bail so the interpreter
             // decides. Relational (`<`/`>`/…) coerces bool→0/1 in both, so those stay JIT'd.
+            // Integer reprs are plain NUMBERS, so they take part in every compare.
             let is_eq = matches!(
                 bop,
                 BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe
             );
-            if is_eq && (l_bool || r_bool) {
+            if is_eq && (l.is_bool() || r.is_bool()) {
                 return SimpleOp::Unsupported;
             }
-            let is_cmp = matches!(
-                bop,
-                BinOp::Eq
-                    | BinOp::Ne
-                    | BinOp::StrictEq
-                    | BinOp::StrictNe
-                    | BinOp::Lt
-                    | BinOp::Le
-                    | BinOp::Gt
-                    | BinOp::Ge
-            );
-            let v = match bop {
-                BinOp::Add => bcx.ins().fadd(l, r),
-                BinOp::Sub => bcx.ins().fsub(l, r),
-                BinOp::Mul => bcx.ins().fmul(l, r),
-                BinOp::Div => bcx.ins().fdiv(l, r),
-                BinOp::Eq | BinOp::StrictEq => fcmp_f64(bcx, FloatCC::Equal, l, r),
-                BinOp::Ne | BinOp::StrictNe => fcmp_f64(bcx, FloatCC::NotEqual, l, r),
-                BinOp::Lt => fcmp_f64(bcx, FloatCC::LessThan, l, r),
-                BinOp::Le => fcmp_f64(bcx, FloatCC::LessThanOrEqual, l, r),
-                BinOp::Gt => fcmp_f64(bcx, FloatCC::GreaterThan, l, r),
-                BinOp::Ge => fcmp_f64(bcx, FloatCC::GreaterThanOrEqual, l, r),
+            // #168: float arithmetic / comparisons materialize both operands as f64 at this
+            // boundary; bitwise/shift ops consume raw int bits (identity for I32/U32 operands)
+            // and PUSH an integer repr — a chained `((h<<13)|(h>>>19))>>>0` stays in i32
+            // registers with zero intermediate converts. `Mul` stays f64 ON PURPOSE: V8 rounds
+            // `h * K` past 2^53 the same way, and the gauntlet checksum pins that agreement.
+            let v: JV = match bop {
+                BinOp::Add => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::f64(bcx.ins().fadd(lf, rf))
+                }
+                BinOp::Sub => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::f64(bcx.ins().fsub(lf, rf))
+                }
+                BinOp::Mul => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::f64(bcx.ins().fmul(lf, rf))
+                }
+                BinOp::Div => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::f64(bcx.ins().fdiv(lf, rf))
+                }
+                BinOp::Eq | BinOp::StrictEq => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::Equal, lf, rf))
+                }
+                BinOp::Ne | BinOp::StrictNe => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::NotEqual, lf, rf))
+                }
+                BinOp::Lt => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::LessThan, lf, rf))
+                }
+                BinOp::Le => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::LessThanOrEqual, lf, rf))
+                }
+                BinOp::Gt => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::GreaterThan, lf, rf))
+                }
+                BinOp::Ge => {
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    JV::boolean(fcmp_f64(bcx, FloatCC::GreaterThanOrEqual, lf, rf))
+                }
                 BinOp::Mod => {
                     // f64 remainder a - trunc(a/b)*b — exactly Rust's `%`, which the
                     // VM's eval_binop uses, so JIT and VM-fallback agree bit-for-bit.
-                    let q = bcx.ins().fdiv(l, r);
+                    let (lf, rf) = (jv_f64(bcx, l), jv_f64(bcx, r));
+                    let q = bcx.ins().fdiv(lf, rf);
                     let t = bcx.ins().trunc(q);
-                    let p = bcx.ins().fmul(t, r);
-                    bcx.ins().fsub(l, p)
+                    let p = bcx.ins().fmul(t, rf);
+                    JV::f64(bcx.ins().fsub(lf, p))
                 }
-                // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — see [`js_to_int32`].
+                // Bitwise AND/OR/XOR via JS ToInt32 (modulo 2³², NaN/±∞ → 0) — [`jv_i32_bits`]
+                // is [`js_to_int32`] for f64 operands and an IDENTITY for int-repr operands.
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                    let li = js_to_int32(bcx, l);
-                    let ri = js_to_int32(bcx, r);
+                    let li = jv_i32_bits(bcx, l);
+                    let ri = jv_i32_bits(bcx, r);
                     let res = match bop {
                         BinOp::BitAnd => bcx.ins().band(li, ri),
                         BinOp::BitOr => bcx.ins().bor(li, ri),
                         BinOp::BitXor => bcx.ins().bxor(li, ri),
                         _ => unreachable!(),
                     };
-                    bcx.ins().fcvt_from_sint(types::F64, res)
+                    JV::int32(res)
                 }
-                // Shifts. JS masks the count to the low 5 bits (`& 31`); the low 5 bits of `ToInt32(r)`
-                // equal `ToUint32(r)`, so `js_to_int32(r)` carries the right amount. We mask explicitly
-                // (`& 31`) so correctness never depends on Cranelift's own amount-masking convention.
-                // `<<`/`>>` are signed-domain (ToInt32 → i32 → signed→f64); `>>>` is logical on the
-                // unsigned bits with an UNSIGNED→f64 convert (result may exceed 2³¹). Bit-for-bit with
-                // vm.rs `eval_binop`: Shl/Shr = `to_int32(l).wrapping_sh*(to_uint32(r))`,
-                // UShr = `to_uint32(l).wrapping_shr(to_uint32(r))`.
+                // Shifts. JS masks the count to the low 5 bits (`& 31`); the low 5 bits of
+                // `ToInt32(r)` equal `ToUint32(r)`, so `jv_i32_bits(r)` carries the right amount.
+                // We mask explicitly (`& 31`) so correctness never depends on Cranelift's own
+                // amount-masking convention. `<<`/`>>` are signed-domain (I32 repr — signed→f64
+                // when materialized); `>>>` is logical on the unsigned bits (U32 repr — an
+                // UNSIGNED→f64 materialize keeps a bit-31 result a positive number, JS `>>>`).
+                // Bit-for-bit with vm.rs `eval_binop`: Shl/Shr = `to_int32(l).wrapping_sh*
+                // (to_uint32(r))`, UShr = `to_uint32(l).wrapping_shr(to_uint32(r))`.
                 BinOp::Shl | BinOp::Shr | BinOp::UShr => {
-                    let li = js_to_int32(bcx, l);
-                    let amt = js_to_int32(bcx, r);
+                    let li = jv_i32_bits(bcx, l);
+                    let amt = jv_i32_bits(bcx, r);
                     let mask = bcx.ins().iconst(types::I32, 31);
                     let amt = bcx.ins().band(amt, mask);
                     match bop {
-                        BinOp::Shl => {
-                            let res = bcx.ins().ishl(li, amt);
-                            bcx.ins().fcvt_from_sint(types::F64, res)
-                        }
-                        BinOp::Shr => {
-                            let res = bcx.ins().sshr(li, amt);
-                            bcx.ins().fcvt_from_sint(types::F64, res)
-                        }
-                        // UShr: logical shift on the same 32-bit value bits as ToUint32(l), then
-                        // unsigned→f64 so a result with bit 31 set stays a positive number (JS `>>>`).
-                        _ => {
-                            let res = bcx.ins().ushr(li, amt);
-                            bcx.ins().fcvt_from_uint(types::F64, res)
-                        }
+                        BinOp::Shl => JV::int32(bcx.ins().ishl(li, amt)),
+                        BinOp::Shr => JV::int32(bcx.ins().sshr(li, amt)),
+                        _ => JV::uint32(bcx.ins().ushr(li, amt)),
                     }
                 }
                 // Pow/In/And/Or: fall back to the VM.
                 _ => return SimpleOp::Unsupported,
             };
-            stack.push((v, is_cmp));
+            stack.push(v);
         }
         Opcode::UnaryOp => {
             let uop = match read_u16(code, ip).map(|r| r as u8).and_then(u8_to_unaryop) {
                 Some(u) => u,
                 None => return SimpleOp::Unsupported,
             };
-            let (o, _) = match stack.pop() {
+            let o = match stack.pop() {
                 Some(x) => x,
                 None => return SimpleOp::Unsupported,
             };
-            let (v, is_bool) = match uop {
-                UnaryOp::Neg => (bcx.ins().fneg(o), false),
-                UnaryOp::Pos => (o, false),
-                UnaryOp::Not => {
-                    let zero = bcx.ins().f64const(0.0);
-                    (fcmp_f64(bcx, FloatCC::Equal, o, zero), true)
+            let v: JV = match uop {
+                UnaryOp::Neg => {
+                    let of = jv_f64(bcx, o);
+                    JV::f64(bcx.ins().fneg(of))
                 }
-                // `~x` = `!ToInt32(x) as f64` — JS ToInt32 (modulo, NaN/±∞ → 0) via [`js_to_int32`],
-                // matching the VM so a JIT-compiled `~` can't diverge on large/non-finite values.
+                UnaryOp::Pos => JV::f64(jv_f64(bcx, o)),
+                UnaryOp::Not => {
+                    let of = jv_f64(bcx, o);
+                    let zero = bcx.ins().f64const(0.0);
+                    JV::boolean(fcmp_f64(bcx, FloatCC::Equal, of, zero))
+                }
+                // `~x` = `!ToInt32(x)` — JS ToInt32 (modulo, NaN/±∞ → 0) via [`jv_i32_bits`]
+                // (identity for an int-repr operand), matching the VM so a JIT-compiled `~`
+                // can't diverge on large/non-finite values. Pushes I32 — a `~` chain stays
+                // in integer registers.
                 UnaryOp::BitNot => {
-                    let oi = js_to_int32(bcx, o);
-                    let res = bcx.ins().bnot(oi);
-                    (bcx.ins().fcvt_from_sint(types::F64, res), false)
+                    let oi = jv_i32_bits(bcx, o);
+                    JV::int32(bcx.ins().bnot(oi))
                 }
                 _ => return SimpleOp::Unsupported,
             };
-            stack.push((v, is_bool));
+            stack.push(v);
         }
         _ => unreachable!("guarded above"),
     }
@@ -2424,7 +2518,7 @@ fn build_body_cfg(
     }
 
     // 3. Translate. The operand stack is empty at every block boundary (statement-level control flow).
-    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    let mut stack: Vec<JV> = Vec::new();
     // #189: JV array handles "in flight" (pushed by `LoadLocal`/`NewArray` of a JV slot, consumed by
     // the very next `GetIndex`/`SetIndex`/`GetMember`), kept off the f64 `stack`; and a pending
     // `arr.push` awaiting its arg + `Call`. Both must be empty at every block boundary.
@@ -2529,19 +2623,24 @@ fn build_body_cfg(
                     let addr = bcx.ins().iadd(aptr, off);
                     if let Some(val) = store_val {
                         bcx.ins().store(MemFlags::new(), val, addr, 0);
-                        stack.push((val, false)); // assignment yields the value (a Pop usually discards it)
+                        stack.push(JV::f64(val)); // assignment yields the value (a Pop usually discards it)
                         ip += 11; // LoadLocal(arr) + idx + val + Dup + SetIndex
                     } else {
                         let val = bcx.ins().load(types::F64, MemFlags::new(), addr, 0);
-                        stack.push((val, false));
+                        stack.push(JV::f64(val));
                         ip += 7; // LoadLocal(arr) + idx + GetIndex
                     }
                     continue;
                 }
                 let v = *vars.get(slot)?;
-                // #187: a bool slot's `f64` 0/1 value carries `is_bool` so downstream equality/return
-                // guards fire; a plain numeric slot pushes `false`.
-                stack.push((bcx.use_var(v), bool_slots.contains(&slot)));
+                // #187: a bool slot's `f64` 0/1 value carries the Bool repr so downstream
+                // equality/return guards fire; a plain numeric slot pushes F64.
+                let lv = bcx.use_var(v);
+                stack.push(if bool_slots.contains(&slot) {
+                    JV::boolean(lv)
+                } else {
+                    JV::f64(lv)
+                });
                 ip += 3;
             }
             Opcode::StoreLocal => {
@@ -2554,14 +2653,17 @@ fn build_body_cfg(
                     ip += 3;
                     continue;
                 }
-                let (val, is_bool) = stack.pop()?;
+                let jval = stack.pop()?;
                 // #187: a boolean value may be stored only into a slot the pre-pass tagged as a bool
                 // slot (represented as `f64` 0/1). Any other bool store → bail (keeps unknown shapes
                 // on the interpreter). A numeric store into a bool-tagged slot is fine — the slot is
-                // still an `f64`; its `LoadLocal`s just carry `is_bool` (conservatively).
-                if is_bool && !bool_slots.contains(&slot) {
+                // still an `f64`; its `LoadLocal`s just carry the Bool repr (conservatively).
+                if jval.is_bool() && !bool_slots.contains(&slot) {
                     return None;
                 }
+                // Slots are f64 Variables — materialize an int repr once, at the store (an
+                // `h = ((h<<13)|(h>>>19))>>>0` chain pays exactly ONE convert here, not per op).
+                let val = jv_f64(&mut bcx, jval);
                 let v = *vars.get(slot)?;
                 bcx.def_var(v, val);
                 ip += 3;
@@ -2580,10 +2682,11 @@ fn build_body_cfg(
             Opcode::Nop | Opcode::EnterBlock | Opcode::ExitBlock | Opcode::LoopVarsEnd => ip += 1,
             Opcode::LoopVarsBegin => ip += 3,
             Opcode::Return => {
-                let (v, is_bool) = stack.pop()?;
-                if is_bool {
+                let ret = stack.pop()?;
+                if ret.is_bool() {
                     return None;
                 }
+                let v = jv_f64(&mut bcx, ret);
                 // #189: free every JV array (return its arena slot to the free list) before leaving
                 // the frame — handle 0 (a slot not yet allocated on this path) is a no-op. This is why
                 // JV arrays must never escape.
@@ -2619,10 +2722,11 @@ fn build_body_cfg(
             }
             Opcode::JumpIfFalse => {
                 let off = peek_u16(code, ip + 1)? as i16 as isize;
-                let (cond, _) = stack.pop()?;
+                let cond = stack.pop()?;
                 if !stack.is_empty() {
                     return None; // non-empty stack ⇒ ternary shape ⇒ leave to build_body / VM
                 }
+                let cond = jv_f64(&mut bcx, cond);
                 let falsy = falsy_flag(&mut bcx, cond);
                 let target = *blocks.get(&(((ip + 3) as isize + off).max(0) as usize))?;
                 let fallthrough = *blocks.get(&(ip + 3))?;
@@ -2651,10 +2755,12 @@ fn build_body_cfg(
                     3, // 2^3 = 8-byte alignment for f64
                 ));
                 let arg_start = stack.len() - num_numeric;
-                for (j, (v, is_bool)) in stack.drain(arg_start..).enumerate() {
-                    if is_bool {
+                let args: Vec<JV> = stack.drain(arg_start..).collect();
+                for (j, jv) in args.into_iter().enumerate() {
+                    if jv.is_bool() {
                         return None; // a bool numeric arg doesn't match the f64 ABI
                     }
+                    let v = jv_f64(&mut bcx, jv);
                     bcx.ins().stack_store(v, slot, (j * 8) as i32);
                 }
                 let num_ptr = bcx.ins().stack_addr(types::I64, slot, 0);
@@ -2667,7 +2773,8 @@ fn build_body_cfg(
                     call_args.push(gp);
                 }
                 let call = bcx.ins().call(sref, &call_args);
-                stack.push((bcx.inst_results(call)[0], false));
+                let res = bcx.inst_results(call)[0];
+                stack.push(JV::f64(res));
                 ip += 3;
             }
             Opcode::SelfCall => {
@@ -2679,12 +2786,13 @@ fn build_body_cfg(
                     return None;
                 }
                 let arg_start = stack.len() - arity;
+                let args: Vec<JV> = stack.drain(arg_start..).collect();
                 let mut call_args = Vec::with_capacity(arity);
-                for (v, is_bool) in stack.drain(arg_start..) {
-                    if is_bool {
+                for jv in args {
+                    if jv.is_bool() {
                         return None; // boolean args don't match the f64 ABI
                     }
-                    call_args.push(v);
+                    call_args.push(jv_f64(&mut bcx, jv));
                 }
                 // #381: thread the RecurGuard pointer through the recursive call so every level
                 // re-checks the stack at its entry. Present iff this function was compiled guarded.
@@ -2693,16 +2801,17 @@ fn build_body_cfg(
                 }
                 let call = bcx.ins().call(sref, &call_args);
                 let result = bcx.inst_results(call)[0];
-                stack.push((result, false));
+                stack.push(JV::f64(result));
                 ip += 3;
             }
             Opcode::MathUnary => {
                 // #186 — `Math.<fn>(x)`: pop the arg, emit native op / host call, push the result.
                 let id = peek_u16(code, ip + 1)?;
                 let mfn = MathUnaryFn::from_u16(id)?;
-                let (x, _) = stack.pop()?;
+                let x = stack.pop()?;
+                let x = jv_f64(&mut bcx, x);
                 let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
-                stack.push((r, false));
+                stack.push(JV::f64(r));
                 ip += 3;
             }
             // #189 — local-array ops, only for JV functions (`jv` = `Some`). Each consumes the array
@@ -2719,25 +2828,29 @@ fn build_body_cfg(
             }
             Opcode::GetIndex if !jv_pending.is_empty() => {
                 let jvc = jv?;
-                let idx = stack.pop()?.0;
+                let idx = stack.pop()?;
+                let idx = jv_f64(&mut bcx, idx);
                 let handle = jv_pending.pop()?;
                 // `idx as usize` (saturating: NaN/neg → 0), matching the VM's index coercion. OOB sets
                 // the per-thread deopt flag inside `tish_jv_get` and returns NaN.
                 let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
                 let call = bcx.ins().call(jvc.get, &[handle, i]);
-                stack.push((bcx.inst_results(call)[0], false));
+                let res = bcx.inst_results(call)[0];
+                stack.push(JV::f64(res));
                 ip += 1;
             }
             Opcode::SetIndex if !jv_pending.is_empty() => {
                 let jvc = jv?;
                 // Stack: [ (array→jv_pending), idx, val, dup_val ]. `Dup` left `dup_val` == `val`.
-                let dup_val = stack.pop()?.0;
-                let _val = stack.pop()?.0;
-                let idx = stack.pop()?.0;
+                let dup_jv = stack.pop()?;
+                let _val = stack.pop()?;
+                let idx = stack.pop()?;
+                let dup_val = jv_f64(&mut bcx, dup_jv);
+                let idx = jv_f64(&mut bcx, idx);
                 let handle = jv_pending.pop()?;
                 let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
                 bcx.ins().call(jvc.set, &[handle, i, dup_val]); // OOB → deopt flag inside tish_jv_set
-                stack.push((dup_val, false)); // assignment yields the value
+                stack.push(JV::f64(dup_val)); // assignment yields the value
                 ip += 1;
             }
             Opcode::GetMember if !jv_pending.is_empty() => {
@@ -2748,7 +2861,8 @@ fn build_body_cfg(
                     "length" => {
                         let call = bcx.ins().call(jvc.len, &[ptr]);
                         let len_i = bcx.inst_results(call)[0];
-                        stack.push((bcx.ins().fcvt_from_uint(types::F64, len_i), false));
+                        let len_f = bcx.ins().fcvt_from_uint(types::F64, len_i);
+                        stack.push(JV::f64(len_f));
                     }
                     "push" => pending_push = Some(ptr),
                     _ => return None, // any other member of a JV array → bail
@@ -2761,12 +2875,14 @@ fn build_body_cfg(
                     return None; // `push` takes exactly one arg in the JV fast path
                 }
                 let ptr = pending_push.take()?;
-                let arg = stack.pop()?.0;
+                let arg = stack.pop()?;
+                let arg = jv_f64(&mut bcx, arg);
                 bcx.ins().call(jvc.push, &[ptr, arg]);
                 // `Array.push` returns the new length.
                 let call = bcx.ins().call(jvc.len, &[ptr]);
                 let len_i = bcx.inst_results(call)[0];
-                stack.push((bcx.ins().fcvt_from_uint(types::F64, len_i), false));
+                let len_f = bcx.ins().fcvt_from_uint(types::F64, len_i);
+                stack.push(JV::f64(len_f));
                 ip += 3;
             }
             // #187: `LoadVar name` where `name` is a resolved directly-callable callee — stage it for the
@@ -2792,15 +2908,17 @@ fn build_body_cfg(
                     return None;
                 }
                 let arg_start = stack.len() - callee_arity as usize;
+                let args: Vec<JV> = stack.drain(arg_start..).collect();
                 let mut call_args = Vec::with_capacity(callee_arity as usize);
-                for (v, is_bool) in stack.drain(arg_start..) {
-                    if is_bool {
+                for jv in args {
+                    if jv.is_bool() {
                         return None; // a bool arg doesn't match the callee's f64 ABI
                     }
-                    call_args.push(v);
+                    call_args.push(jv_f64(&mut bcx, jv));
                 }
                 let call = bcx.ins().call(fref, &call_args);
-                stack.push((bcx.inst_results(call)[0], false));
+                let res = bcx.inst_results(call)[0];
+                stack.push(JV::f64(res));
                 ip += 3;
             }
             // #187: a VOID array-mode function's implicit `return null` (the fall-through of a
@@ -2888,9 +3006,10 @@ fn build_body(
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
 
     let code = &chunk.code;
-    // Each entry is (clif f64 value, is_bool). `is_bool` marks comparison/`!`
-    // results (logical 0.0/1.0) so the final value boxes as Bool, not Number.
-    let mut stack: Vec<(ClifValue, bool)> = Vec::new();
+    // Each entry is a typed [`JV`]. The Bool repr marks comparison/`!` results
+    // (logical 0.0/1.0) so the final value boxes as Bool, not Number; integer
+    // reprs materialize to f64 at the Return / select boundaries below.
+    let mut stack: Vec<JV> = Vec::new();
     let mut ip = 0usize;
     let mut result: Option<bool> = None;
 
@@ -2903,15 +3022,17 @@ fn build_body(
         let op = Opcode::from_u8(code[ip])?;
         match op {
             Opcode::Return => {
-                let (v, is_bool) = stack.pop()?;
+                let jv = stack.pop()?;
+                let v = jv_f64(&mut bcx, jv);
                 bcx.ins().return_(&[v]);
-                result = Some(is_bool); // first Return ends a (sub)path
+                result = Some(jv.is_bool()); // first Return ends a (sub)path
                 break;
             }
             // Ternary `cond ? A : B` → `select`. Both arms must be branch-free numeric
             // sub-sequences, each pushing exactly one value, with matching is_bool.
             Opcode::JumpIfFalse => {
-                let (cond, _) = stack.pop()?;
+                let cond = stack.pop()?;
+                let cond = jv_f64(&mut bcx, cond);
                 let mut p = ip + 1;
                 let off = read_u16(code, &mut p)? as i16 as isize; // p now past the operand
                 let else_target = (p as isize + off).max(0) as usize;
@@ -2938,7 +3059,8 @@ fn build_body(
                 if else_target != jp || stack.len() != base + 1 {
                     return None;
                 }
-                let (then_v, then_b) = stack.pop()?;
+                let then_jv = stack.pop()?;
+                let then_v = jv_f64(&mut bcx, then_jv);
 
                 // ELSE arm: straight-line ops from `jp` up to the merge point.
                 let mut eip = jp;
@@ -2953,15 +3075,20 @@ fn build_body(
                 if eip != merge_target || stack.len() != base + 1 {
                     return None;
                 }
-                let (else_v, else_b) = stack.pop()?;
+                let else_jv = stack.pop()?;
+                let else_v = jv_f64(&mut bcx, else_jv);
                 // One result_bool per function: arms must agree on Bool-vs-Number.
-                if then_b != else_b {
+                if then_jv.is_bool() != else_jv.is_bool() {
                     return None;
                 }
 
                 let falsy = falsy_flag(&mut bcx, cond);
                 let sel = bcx.ins().select(falsy, else_v, then_v);
-                stack.push((sel, then_b));
+                stack.push(if then_jv.is_bool() {
+                    JV::boolean(sel)
+                } else {
+                    JV::f64(sel)
+                });
                 ip = merge_target;
             }
             // #187: a `function name(x) { … }` block body wraps its statements in EnterBlock/ExitBlock
