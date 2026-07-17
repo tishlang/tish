@@ -234,6 +234,15 @@ parity-verbose filter="":
 parity-limit N:
     ./scripts/run_parity_compare.sh --limit {{N}}
 
+# TISH_PACKED_ARRAYS=1 parity sweep (#199) — the gate for flipping packed f64 arrays default-on.
+# Corpus flag-on == flag-off on interp/vm/native, plus tests/perf GAUNTLET checksums vs node.
+#
+#   just packed-parity             # full sweep (builds every fixture natively — slow)
+#   just packed-parity --no-native # interp + vm + perf checksums only (fast)
+
+packed-parity *args:
+    ./scripts/packed_arrays_parity_check.sh {{args}}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
