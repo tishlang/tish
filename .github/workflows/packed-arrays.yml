@@ -8,12 +8,11 @@
 #     divergences may be allowlisted in the script's KNOWN_DIVERGENCES).
 #   * nextest — the tishlang + tishlang_vm unit/integration suites with TISH_PACKED_ARRAYS=1 in
 #     the env, so the packed representation is exercised by the whole test corpus, not only the
-#     builtins/VM unit tests. workflow_dispatch-ONLY until the divergences the first sweep filed
-#     (#502-#508) are fixed: the interp==vm corpus parity test fails on exactly those fixtures
-#     with the flag on (verified 2026-07-17; the vm + builtins UNIT suites pass), and the sweep
-#     job already reports them as KNOWN. Flip this job onto pull_request when the known list in
-#     scripts/packed_arrays_parity_check.sh empties — it then becomes the #199 acceptance gate
-#     "nextest passes with TISH_PACKED_ARRAYS=1".
+#     builtins/VM unit tests. This is the #199 acceptance gate "nextest passes with
+#     TISH_PACKED_ARRAYS=1". It ran workflow_dispatch-ONLY until the divergences the first sweep
+#     filed (#502-#508) were fixed by the sound in-place deopt backing; with the sweep's KNOWN
+#     list now empty (corpus 162/162, perf 30/30 flag-on == flag-off == node) and the full suite
+#     verified green with the flag on (2026-07-17), it now runs on pull_request / push.
 #
 # Path-filtered to the crates that own the packed representation (+ this tooling): the sweep
 # builds every fixture natively, which is too heavy for every PR.
@@ -81,8 +80,8 @@ jobs:
 
   nextest:
     name: Unit/integration suites with TISH_PACKED_ARRAYS=1
-    # See header — manual until #502-#508 are fixed and the sweep's KNOWN list is empty.
-    if: github.event_name == 'workflow_dispatch'
+    # #199 acceptance gate — live on PR/push now that the KNOWN list is empty (#502-#508 fixed by
+    # the sound in-place deopt backing). See header.
     runs-on: blacksmith-4vcpu-ubuntu-2204
     env:
       RUSTC_WRAPPER: sccache

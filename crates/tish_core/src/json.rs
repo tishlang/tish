@@ -1,6 +1,6 @@
 //! JSON parsing and stringification for Tish values.
 
-use crate::{Value, VmRef};
+use crate::{NumArrayBacking, Value, VmRef};
 use std::sync::Arc;
 
 /// Per-`json_parse`-call cache of object-key text → shared `Arc<str>`. A JSON array of records
@@ -178,11 +178,24 @@ fn json_stringify_into_guarded(buf: &mut String, value: &Value, ancestors: &mut 
         Value::NumberArray(arr) => {
             let borrowed = arr.borrow();
             buf.push('[');
-            for (i, n) in borrowed.iter().enumerate() {
-                if i > 0 {
-                    buf.push(',');
+            match &*borrowed {
+                NumArrayBacking::Packed(nums) => {
+                    for (i, n) in nums.iter().enumerate() {
+                        if i > 0 {
+                            buf.push(',');
+                        }
+                        write_json_number(buf, *n);
+                    }
                 }
-                write_json_number(buf, *n);
+                // A deopted numeric array serializes element-by-element like a boxed Array.
+                NumArrayBacking::Boxed(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            buf.push(',');
+                        }
+                        json_stringify_into_guarded(buf, item, ancestors);
+                    }
+                }
             }
             buf.push(']');
         }

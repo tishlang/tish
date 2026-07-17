@@ -18,7 +18,7 @@ pub fn from_vec(v: Vec<Value>) -> Value {
 pub fn snapshot_values(arr: &Value) -> Vec<Value> {
     match arr {
         Value::Array(a) => a.borrow().clone(),
-        Value::NumberArray(a) => a.borrow().iter().map(|&n| Value::Number(n)).collect(),
+        Value::NumberArray(a) => a.borrow().to_values(),
         _ => Vec::new(),
     }
 }
@@ -30,19 +30,24 @@ pub fn snapshot_values(arr: &Value) -> Vec<Value> {
 /// unboxed f64 fast path for it too. The `None` result drives the fused lowering back to its boxed
 /// loop, so any non-numeric element is handled with identical `Value` semantics.
 pub fn as_f64_snapshot(arr: &Value) -> Option<Vec<f64>> {
-    match arr {
-        Value::NumberArray(a) => Some(a.borrow().clone()),
-        Value::Array(a) => {
-            let b = a.borrow();
-            let mut out: Vec<f64> = Vec::with_capacity(b.len());
-            for v in b.iter() {
-                match v {
-                    Value::Number(n) => out.push(*n),
-                    _ => return None,
-                }
+    let extract = |vals: &[Value]| -> Option<Vec<f64>> {
+        let mut out: Vec<f64> = Vec::with_capacity(vals.len());
+        for v in vals {
+            match v {
+                Value::Number(n) => out.push(*n),
+                _ => return None,
             }
-            Some(out)
         }
+        Some(out)
+    };
+    match arr {
+        // Still packed: clone the f64s directly. Deopted: extract from the boxed values (None if
+        // any is non-numeric — the caller then uses the boxed path).
+        Value::NumberArray(a) => match a.borrow().as_packed() {
+            Some(v) => Some(v.clone()),
+            None => extract(a.borrow().as_boxed().map(|v| v.as_slice()).unwrap_or(&[])),
+        },
+        Value::Array(a) => extract(&a.borrow()),
         _ => None,
     }
 }
@@ -81,7 +86,9 @@ fn packed_snapshot<'c>(
     callback: &'c Value,
 ) -> Option<(Vec<f64>, &'c tishlang_core::NativeFn)> {
     match (arr, callback) {
-        (Value::NumberArray(na), Value::Function(cb)) => Some((na.borrow().clone(), cb)),
+        (Value::NumberArray(na), Value::Function(cb)) => {
+            na.borrow().as_packed().map(|v| (v.clone(), cb))
+        }
         _ => None,
     }
 }
@@ -409,9 +416,7 @@ pub fn concat(arr: &Value, args: &[Value]) -> Value {
                 // A packed `NumberArray` arg spreads its numbers, same as a boxed array — under
                 // TISH_PACKED_ARRAYS=1 a numeric literal `[3,4]` is a NumberArray, so
                 // `[1,2].concat([3,4])` must flatten to `[1,2,3,4]`, not push the array whole.
-                Value::NumberArray(other) => {
-                    result.extend(other.borrow().iter().map(|n| Value::Number(*n)))
-                }
+                Value::NumberArray(other) => result.extend(other.borrow().to_values()),
                 _ => result.push(v.clone()),
             }
         }
@@ -435,9 +440,7 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
                     // flattened elements) — `[[1,2],[3,4]].flat()` where the inners packed must not
                     // leave a `NumberArray` sitting as a scalar element.
                     Value::NumberArray(inner) => {
-                        for n in inner.borrow().iter() {
-                            result.push(Value::Number(*n));
-                        }
+                        result.extend(inner.borrow().to_values());
                         continue;
                     }
                     _ => {}
@@ -978,13 +981,15 @@ pub fn sort_numeric_desc(arr: &Value) -> Value {
 fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
     // NumberArray fast path: sort the Vec<f64> directly — no unbox pass, no rebox.
     if let Value::NumberArray(a) = arr {
-        let mut g = a.borrow_mut();
-        if asc {
-            g.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            g.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        // Fast path only while still packed; a deopted numeric array sorts via the boxed path below.
+        if let Some(nums) = a.borrow_mut().as_packed_mut() {
+            if asc {
+                nums.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                nums.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            return Value::NumberArray(a.clone());
         }
-        return Value::NumberArray(a.clone());
     }
     if let Value::Array(a) = arr {
         {
@@ -1142,15 +1147,15 @@ mod packed_hof_tests {
     //! on it. These run with packing semantics directly (the helpers don't read the env flag; a
     //! `NumberArray` value is enough to take the fast path).
     use super::*;
-    use tishlang_core::Value;
+    use tishlang_core::{NumArrayBacking, Value};
 
     fn na(xs: &[f64]) -> Value {
-        Value::NumberArray(VmRef::new(xs.to_vec()))
+        Value::NumberArray(VmRef::new(NumArrayBacking::Packed(xs.to_vec())))
     }
     fn nums(v: &Value) -> Vec<f64> {
         match v {
             Value::Array(a) => a.borrow().iter().map(|e| e.as_number().unwrap_or(f64::NAN)).collect(),
-            Value::NumberArray(a) => a.borrow().clone(),
+            Value::NumberArray(a) => a.borrow().to_values().iter().map(|e| e.as_number().unwrap_or(f64::NAN)).collect(),
             _ => vec![],
         }
     }

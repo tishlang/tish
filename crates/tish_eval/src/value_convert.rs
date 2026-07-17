@@ -260,8 +260,17 @@ pub fn core_to_eval(v: CoreValue) -> Value {
         CoreValue::Promise(_) => Value::Null,
         // NumberArray: materialize to boxed Array for the interpreter (it has no packed path).
         CoreValue::NumberArray(arr) => {
-            let nums = arr.borrow();
-            let out: Vec<Value> = nums.iter().map(|&n| Value::Number(n)).collect();
+            // Materialize to a boxed Array for the interpreter (it has no packed path). `to_values`
+            // handles a packed or a deopted (#199) backing.
+            let out: Vec<Value> = arr
+                .borrow()
+                .to_values()
+                .into_iter()
+                .map(|v| match v {
+                    tishlang_core::Value::Number(n) => Value::Number(n),
+                    _ => core_to_eval(v),
+                })
+                .collect();
             Value::Array(Rc::new(RefCell::new(out)))
         }
         // `CoreNativeFn` is feature-gated (Rc vs Arc), so use Clone::clone

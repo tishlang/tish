@@ -344,6 +344,92 @@ impl TishRegExp {
 /// **Thread safety**: `Value: Send + Sync`. Mutable payloads live inside
 /// [`VmRef`], a `Send + Sync` `Arc<Mutex<T>>` wrapper that preserves the
 /// `RefCell`-style borrow API. Functions are `Arc<dyn Fn + Send + Sync>`.
+/// Backing store for a [`Value::NumberArray`] (#199 packed arrays). Starts `Packed`; a mutation
+/// that would introduce a non-numeric element upgrades it to `Boxed` **in place** via
+/// [`NumArrayBacking::deopt`], so all aliases sharing the `VmRef` observe the change (#506).
+///
+/// Access rules that keep the two arms sound at every call site:
+/// - single-element read → [`get`](Self::get) (O(1), no alloc);
+/// - iterate/snapshot as `Value`s → [`to_values`](Self::to_values) (Packed boxes each f64, same
+///   cost the old `materialize` path paid);
+/// - hot packed-only fast path (sort/fold/`sum`) → [`as_packed`](Self::as_packed) /
+///   [`as_packed_mut`](Self::as_packed_mut), which return `None` after a deopt so the caller falls
+///   back to the boxed path instead of assuming `Vec<f64>`.
+#[derive(Clone, Debug)]
+pub enum NumArrayBacking {
+    Packed(Vec<f64>),
+    Boxed(Vec<Value>),
+}
+
+impl NumArrayBacking {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            NumArrayBacking::Packed(v) => v.len(),
+            NumArrayBacking::Boxed(v) => v.len(),
+        }
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Element `i` as a `Value` (Packed: `Number(n)`, NaN kept as `Number(NaN)` — the hole-as-null
+    /// rule is applied by the specific read sites that want it, preserving current per-site
+    /// behavior). `None` if out of bounds.
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<Value> {
+        match self {
+            NumArrayBacking::Packed(v) => v.get(i).map(|n| Value::Number(*n)),
+            NumArrayBacking::Boxed(v) => v.get(i).cloned(),
+        }
+    }
+    /// Snapshot the whole array as boxed `Value`s (Packed boxes each `f64`).
+    #[inline]
+    pub fn to_values(&self) -> Vec<Value> {
+        match self {
+            NumArrayBacking::Packed(v) => v.iter().map(|n| Value::Number(*n)).collect(),
+            NumArrayBacking::Boxed(v) => v.clone(),
+        }
+    }
+    /// The packed `f64` slice, iff still packed (hot fast paths); `None` once deopted.
+    #[inline]
+    pub fn as_packed(&self) -> Option<&Vec<f64>> {
+        match self {
+            NumArrayBacking::Packed(v) => Some(v),
+            NumArrayBacking::Boxed(_) => None,
+        }
+    }
+    #[inline]
+    pub fn as_packed_mut(&mut self) -> Option<&mut Vec<f64>> {
+        match self {
+            NumArrayBacking::Packed(v) => Some(v),
+            NumArrayBacking::Boxed(_) => None,
+        }
+    }
+    /// The boxed slice, iff already deopted.
+    #[inline]
+    pub fn as_boxed(&self) -> Option<&Vec<Value>> {
+        match self {
+            NumArrayBacking::Boxed(v) => Some(v),
+            NumArrayBacking::Packed(_) => None,
+        }
+    }
+    /// Upgrade to a boxed backing **in place** (idempotent) and return `&mut` to the boxed `Vec`.
+    /// Every alias sharing this cell now sees a boxed array (#506). Packed `f64`s become
+    /// `Number(n)` (NaN preserved), so a read after deopt matches what the packed form returned.
+    #[inline]
+    pub fn deopt(&mut self) -> &mut Vec<Value> {
+        if let NumArrayBacking::Packed(v) = self {
+            let boxed = v.iter().map(|n| Value::Number(*n)).collect();
+            *self = NumArrayBacking::Boxed(boxed);
+        }
+        match self {
+            NumArrayBacking::Boxed(v) => v,
+            NumArrayBacking::Packed(_) => unreachable!("just deopted"),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum Value {
     Number(f64),
@@ -352,12 +438,17 @@ pub enum Value {
     #[default]
     Null,
     Array(VmRef<Vec<Value>>),
-    /// Packed f64 array — `TISH_PACKED_ARRAYS` mode only. All elements are f64; a non-numeric
-    /// push/set/op materializes to `Value::Array` first. Eliminates per-element boxing and
-    /// enables direct `sort_unstable_by` without an unbox pass. Created by all-numeric array
-    /// literals, `new Array(n)` (zero-filled), and from numeric HOF results. Never created
-    /// when `packed_arrays_enabled()` is false — callers check before constructing.
-    NumberArray(VmRef<Vec<f64>>),
+    /// Numeric-origin array — `TISH_PACKED_ARRAYS` mode only. Starts `Packed` (a `Vec<f64>`, no
+    /// per-element boxing; enables direct `sort_unstable_by` and unboxed folds). A mutation that
+    /// introduces a **non-numeric** value ([`NumArrayBacking::deopt`]) upgrades the backing to
+    /// `Boxed` IN PLACE, so every alias sharing this `VmRef` observes the transition (#506) — the
+    /// value stays a `NumberArray` (aliases can't be rewritten to `Array`), but its backing is now
+    /// a `Vec<Value>` and it behaves exactly like a boxed array. So the tag means "numeric-origin,
+    /// possibly deopted"; access goes through the [`NumArrayBacking`] accessors, never a raw
+    /// `Vec<f64>` assumption. Created by all-numeric array literals, `new Array(n)` (zero-filled),
+    /// numeric HOF results, and typed arrays. Never created when `packed_arrays_enabled()` is
+    /// false — callers check before constructing.
+    NumberArray(VmRef<NumArrayBacking>),
     Object(VmRef<ObjectData>),
     /// ECMAScript-style primitive symbol (identity by `Arc`).
     Symbol(Arc<TishSymbol>),
@@ -426,7 +517,7 @@ pub enum ValueRef<'a> {
     Bool(bool),
     Null,
     Array(&'a VmRef<Vec<Value>>),
-    NumberArray(&'a VmRef<Vec<f64>>),
+    NumberArray(&'a VmRef<NumArrayBacking>),
     Object(&'a VmRef<ObjectData>),
     Symbol(&'a Arc<TishSymbol>),
     Function(&'a NativeFn),
@@ -540,7 +631,7 @@ impl Value {
 
     /// Borrow the packed-number-array payload, if this is a `NumberArray`.
     #[inline]
-    pub fn as_number_array(&self) -> Option<&VmRef<Vec<f64>>> {
+    pub fn as_number_array(&self) -> Option<&VmRef<NumArrayBacking>> {
         match self {
             Value::NumberArray(a) => Some(a),
             _ => None,
@@ -1318,8 +1409,12 @@ impl Value {
             Value::NumberArray(arr) => {
                 let inner: Vec<String> = arr
                     .borrow()
+                    .to_values()
                     .iter()
-                    .map(|&n| if n.is_nan() { "null".to_string() } else { Value::Number(n).to_display_string() })
+                    .map(|v| match v {
+                        Value::Number(n) if n.is_nan() => "null".to_string(),
+                        other => other.to_display_string(),
+                    })
                     .collect();
                 format!("[{}]", inner.join(", "))
             }
@@ -1393,8 +1488,9 @@ impl Value {
             }
             Value::NumberArray(arr) => arr
                 .borrow()
+                .to_values()
                 .iter()
-                .map(|n| Value::Number(*n).to_js_string())
+                .map(|v| v.to_js_string())
                 .collect::<Vec<_>>()
                 .join(","),
             Value::Object(_) => "[object Object]".to_string(),
@@ -1520,7 +1616,7 @@ impl Value {
     /// Wrap a `Vec<f64>` as a `Value::NumberArray`. Only call when `packed_arrays_enabled()`.
     #[inline]
     pub fn number_array(items: Vec<f64>) -> Self {
-        Value::NumberArray(VmRef::new(items))
+        Value::NumberArray(VmRef::new(NumArrayBacking::Packed(items)))
     }
 
     /// Materialize a `Value::NumberArray` into a boxed `Value::Array`.
@@ -1529,9 +1625,8 @@ impl Value {
     /// converts once and continues on the generic path. The original `NumberArray` VmRef
     /// is consumed; callers replace the `Value` in whatever container held it.
     #[inline]
-    pub fn materialize_number_array(arr: &VmRef<Vec<f64>>) -> Value {
-        let nums = arr.borrow();
-        Value::Array(VmRef::new(nums.iter().map(|&n| Value::Number(n)).collect()))
+    pub fn materialize_number_array(arr: &VmRef<NumArrayBacking>) -> Value {
+        Value::Array(VmRef::new(arr.borrow().to_values()))
     }
 
     /// If `self` is a `NumberArray`, materialise and return `Value::Array`; otherwise

@@ -93,7 +93,7 @@ fn bytes_per_element(kind: Kind) -> f64 {
 fn elements(value: &Value) -> Vec<Value> {
     match value {
         Value::Array(a) => a.borrow().clone(),
-        Value::NumberArray(a) => a.borrow().iter().map(|n| Value::Number(*n)).collect(),
+        Value::NumberArray(a) => a.borrow().to_values(),
         _ => Vec::new(),
     }
 }
@@ -291,6 +291,7 @@ mod tests {
         match &packed {
             Value::NumberArray(a) => {
                 let v = a.borrow();
+                let v = v.as_packed().expect("packed backing");
                 assert_eq!(v[0], 1.1);
                 assert_eq!(v[1], 2.2);
                 assert!(v[2].is_nan());
