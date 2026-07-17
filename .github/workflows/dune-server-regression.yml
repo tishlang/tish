@@ -1,0 +1,53 @@
+name: dune-server regression
+
+# Native build + end-to-end drive of a distilled dune-server, guarding the tish primitives Dune's
+# headless backend depends on (hyper serve(), HTTP→WS upgrade + wsAccept, tish:pty, fs stat/readDir,
+# process, Promise.spawn). These are largely native-only and unexercised by the rest of the suite.
+# Manifest + driver: regression/dune-server/.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "crates/tish_runtime/**"
+      - "crates/tish_compile/**"
+      - "regression/dune-server/**"
+  push:
+    branches: [main]
+    paths:
+      - "crates/tish_runtime/**"
+      - "crates/tish_compile/**"
+      - "regression/dune-server/**"
+
+permissions:
+  contents: read
+
+jobs:
+  dune-server:
+    name: distilled dune-server vs tish HEAD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: dune-server-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build tish CLI
+        run: cargo build --release --features full
+
+      - name: Run dune-server regression
+        run: bash regression/dune-server/run.sh
