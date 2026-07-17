@@ -1060,7 +1060,8 @@ impl<'a> Parser<'a> {
 
     /// `interface Name { k: T, ... }` — desugared to `type Name = { ... }` so the checker
     /// (structural matching) and codegen (native `TishStruct_*`) treat it exactly like an
-    /// object-type alias. (`extends` is not yet supported.)
+    /// object-type alias. `interface Name extends P1, P2 { ... }` desugars to an intersection
+    /// of the parents with the body (see below), so inherited fields participate too.
     fn parse_interface(&mut self) -> Result<Statement, String> {
         let span_start = self.expect(TokenKind::Interface)?.span.start;
         let name_tok = self.expect(TokenKind::Ident)?;
