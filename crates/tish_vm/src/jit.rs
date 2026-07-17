@@ -194,6 +194,26 @@ pub fn jit_bool_slots_enabled() -> bool {
     })
 }
 
+/// #168 int-typed slots. **Default ON**; `TISH_JIT_INT_SLOTS=0` disables (falls back to f64
+/// slots — the pre-#168 behavior, byte-identical results).
+///
+/// A local whose every store is a bitwise/shift result (or an integral constant) lives in an
+/// `i64` Variable holding the EXACT JS number ([`Repr::I64Num`]), so an integer hash/PRNG
+/// accumulator (`h = ((h << 13) | (h >>> 19)) >>> 0; h = h ^ …`) stays in integer registers
+/// ACROSS statements instead of paying an f64 materialize at every store plus a `ToInt32`
+/// re-derivation at every load. A syntactic pre-pass ([`classify_int_slots`]) tags the slots;
+/// the StoreLocal translator bails compilation on any store the pre-pass mis-tagged (a
+/// non-integer value reaching an int slot), so a wrong tag can never miscompile — it just
+/// runs the VM.
+pub fn jit_int_slots_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_INT_SLOTS")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 /// The self-recursion stack guard (#381). **Default ON**; `TISH_JIT_RECUR_GUARD=0` disables it.
 ///
 /// A JIT'd self-recursive numeric function recurses on the native stack (SelfCall lowers to a native
@@ -1352,6 +1372,13 @@ enum Repr {
     Bool,
     I32,
     U32,
+    /// #168 int-typed slots: an i64 holding an EXACT integral JS number in [-2^31, 2^32).
+    /// Signedness is encoded in the value itself (an I32 store sign-extends, a U32 store
+    /// zero-extends, an integral constant loads exactly), so a slot whose stores mix `^`
+    /// (ToInt32 domain) and `>>> 0` (ToUint32 domain) needs no dynamic tag: materializing
+    /// is one exact `fcvt_from_sint`, and re-entering the 32-bit domain is one `ireduce`
+    /// (ToInt32 of an integral value in this range IS its low 32 bits).
+    I64Num,
 }
 
 /// A typed JIT stack value: the Cranelift SSA value plus its current [`Repr`].
@@ -1386,6 +1413,8 @@ fn jv_f64(bcx: &mut FunctionBuilder, jv: JV) -> ClifValue {
         Repr::F64 | Repr::Bool => jv.v,
         Repr::I32 => bcx.ins().fcvt_from_sint(types::F64, jv.v),
         Repr::U32 => bcx.ins().fcvt_from_uint(types::F64, jv.v),
+        // Exact by construction: an I64Num is integral and |v| < 2^32 << 2^53.
+        Repr::I64Num => bcx.ins().fcvt_from_sint(types::F64, jv.v),
     }
 }
 
@@ -1396,6 +1425,14 @@ fn jv_i32_bits(bcx: &mut FunctionBuilder, jv: JV) -> ClifValue {
     match jv.repr {
         Repr::I32 | Repr::U32 => jv.v,
         Repr::F64 | Repr::Bool => js_to_int32(bcx, jv.v),
+        // ToInt32 of an exact integral in [-2^31, 2^32) is its low 32 bits.
+        Repr::I64Num => bcx.ins().ireduce(types::I32, jv.v),
+    }
+}
+
+impl JV {
+    fn i64num(v: ClifValue) -> Self {
+        Self { v, repr: Repr::I64Num }
     }
 }
 
@@ -2217,6 +2254,82 @@ fn classify_bool_slots(chunk: &Chunk) -> std::collections::HashSet<usize> {
     set
 }
 
+/// #168: slots eligible for i64 int-typed storage ([`Repr::I64Num`]): every `StoreLocal` to the
+/// slot is IMMEDIATELY preceded (linearly — statement boundaries have empty stacks, and the
+/// ternary shape bails out of `build_body_cfg`, so the linear predecessor IS the value producer;
+/// same assumption [`classify_bool_slots`] rests on) by an op that pushes integer bits — a
+/// bitwise/shift `BinOp`, a `~` `UnaryOp`, or a `LoadConst` of an integral Number in
+/// [-2^31, 2^32) (excluding `-0`, whose sign an integer store would erase). Param slots are
+/// excluded (they arrive as arbitrary f64s through the ABI). Like `classify_bool_slots` this is
+/// an OPTIMISTIC tag: a merge point could make the linear predecessor differ from the dynamic
+/// one, so the StoreLocal translator re-checks the actual stored repr and BAILS compilation on
+/// any non-integer store to a tagged slot — misclassification runs the VM, never miscompiles.
+fn classify_int_slots(chunk: &Chunk, arity: usize) -> std::collections::HashSet<usize> {
+    if !jit_int_slots_enabled() {
+        return std::collections::HashSet::new();
+    }
+    let code = &chunk.code;
+    let mut int_stores: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut other_stores: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut ip = 0usize;
+    let mut prev_pushes_int = false;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let size = match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+        if op == Opcode::StoreLocal {
+            if let Some(s) = peek_u16(code, ip + 1) {
+                let slot = s as usize;
+                if prev_pushes_int && slot >= arity {
+                    int_stores.insert(slot);
+                } else {
+                    other_stores.insert(slot);
+                }
+            }
+        }
+        prev_pushes_int = match op {
+            Opcode::BinOp => matches!(
+                peek_u16(code, ip + 1)
+                    .map(|r| r as u8)
+                    .and_then(u8_to_binop),
+                Some(
+                    BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                        | BinOp::UShr
+                )
+            ),
+            Opcode::UnaryOp => matches!(
+                peek_u16(code, ip + 1)
+                    .map(|r| r as u8)
+                    .and_then(u8_to_unaryop),
+                Some(UnaryOp::BitNot)
+            ),
+            Opcode::LoadConst => matches!(
+                peek_u16(code, ip + 1).and_then(|i| chunk.constants.get(i as usize)),
+                Some(Constant::Number(n))
+                    if n.fract() == 0.0
+                        && *n >= -(2f64.powi(31))
+                        && *n < 2f64.powi(32)
+                        && n.to_bits() != (-0f64).to_bits()
+            ),
+            _ => false,
+        };
+        ip += size;
+    }
+    int_stores
+        .difference(&other_stores)
+        .copied()
+        .collect()
+}
+
 /// on any misuse of a JV ref (it reaching a numeric op, a return, a call arg, a block boundary, …),
 /// so a mis-shaped use never miscompiles — it just falls back to the interpreter.
 fn classify_jv_slots(chunk: &Chunk) -> Option<std::collections::HashSet<usize>> {
@@ -2275,17 +2388,53 @@ fn peek_u16(code: &[u8], off: usize) -> Option<u16> {
 /// `LoadConst(Number)` (→ an f64 const) — for the array read/write peepholes. `None` for any other
 /// opcode / a non-numeric const, which makes the caller bail. #187
 #[cfg(not(target_arch = "wasm32"))]
+/// #168: the exact i64 for a `StoreLocal` into an int slot whose value arrived as a plain F64
+/// push — the classifier-approved case is a linearly-preceding `LoadConst` of an integral
+/// Number in [-2^31, 2^32) (excluding `-0`). `store_ip` points AT the StoreLocal opcode; the
+/// cfg builder's empty-stack-at-block-boundary discipline guarantees the linear predecessor is
+/// the dynamic value producer. Any other shape → `None` → the caller bails the whole compile.
+fn int_const_i64(
+    bcx: &mut FunctionBuilder,
+    chunk: &Chunk,
+    code: &[u8],
+    store_ip: usize,
+) -> Option<ClifValue> {
+    let lc = store_ip.checked_sub(3)?;
+    if Opcode::from_u8(*code.get(lc)?)? != Opcode::LoadConst {
+        return None;
+    }
+    match chunk.constants.get(peek_u16(code, lc + 1)? as usize)? {
+        Constant::Number(n)
+            if n.fract() == 0.0
+                && *n >= -(2f64.powi(31))
+                && *n < 2f64.powi(32)
+                && n.to_bits() != (-0f64).to_bits() =>
+        {
+            Some(bcx.ins().iconst(types::I64, *n as i64))
+        }
+        _ => None,
+    }
+}
+
 fn read_simple_operand(
     bcx: &mut FunctionBuilder,
     code: &[u8],
     at: usize,
     chunk: &Chunk,
     vars: &[Variable],
+    int_slots: &std::collections::HashSet<usize>,
 ) -> Option<ClifValue> {
     match Opcode::from_u8(*code.get(at)?)? {
         Opcode::LoadLocal => {
             let s = peek_u16(code, at + 1)? as usize;
-            Some(bcx.use_var(*vars.get(s)?))
+            let v = bcx.use_var(*vars.get(s)?);
+            // #168: an int slot's Variable is i64 (exact number) — materialize to the f64 this
+            // fast path assumes. Without this, the i64 value would flow into f64 instructions
+            // and trip the cranelift verifier (a crash, not a bail).
+            if int_slots.contains(&s) {
+                return Some(bcx.ins().fcvt_from_sint(types::F64, v));
+            }
+            Some(v)
         }
         Opcode::LoadConst => {
             let ci = peek_u16(code, at + 1)? as usize;
@@ -2342,6 +2491,7 @@ fn build_body_cfg(
     }
     // #187: slots that hold a boolean (represented as `f64` 0/1). A `LoadLocal` of one carries
     // `is_bool` so a diverging `bool === number` compare or a `return bool` bails to the interpreter.
+    let int_slots = classify_int_slots(chunk, arity);
     let bool_slots = if jit_bool_slots_enabled() {
         classify_bool_slots(chunk)
     } else {
@@ -2452,11 +2602,12 @@ fn build_body_cfg(
     };
     let body_start = *blocks.get(&0)?; // `entry` normally; `body_block` when guarded
 
-    // 2. A Variable per slot, all defined at entry so every path defines them. A JV slot (#189) holds
-    //    an arena HANDLE (a `u64`, 0 = null) so its Variable is `i64`, not `f64`.
+    // 2. A Variable per slot, all defined at entry so every path defines them. A JV slot (#189)
+    //    holds an arena HANDLE (a `u64`, 0 = null) so its Variable is `i64`, not `f64`; an int
+    //    slot (#168) holds an exact integral JS number as `i64` ([`Repr::I64Num`]).
     let vars: Vec<Variable> = (0..num_slots)
         .map(|i| {
-            let ty = if jv.is_some_and(|j| j.slots.contains(&i)) {
+            let ty = if jv.is_some_and(|j| j.slots.contains(&i)) || int_slots.contains(&i) {
                 types::I64
             } else {
                 types::F64
@@ -2492,6 +2643,8 @@ fn build_body_cfg(
                     .load(types::F64, MemFlags::new(), numeric_ptr, numeric_i * 8);
                 numeric_i += 1;
                 v
+            } else if int_slots.contains(&slot) {
+                bcx.ins().iconst(types::I64, 0)
             } else {
                 bcx.ins().f64const(0.0)
             };
@@ -2509,6 +2662,8 @@ fn build_body_cfg(
             } else {
                 let init = if i < arity {
                     params[i]
+                } else if int_slots.contains(&i) {
+                    bcx.ins().iconst(types::I64, 0)
                 } else {
                     bcx.ins().f64const(0.0)
                 };
@@ -2603,13 +2758,16 @@ fn build_body_cfg(
                         ip += 3;
                         continue;
                     }
-                    let idx_f64 = read_simple_operand(&mut bcx, code, ip + 3, chunk, &vars)?;
+                    let idx_f64 =
+                        read_simple_operand(&mut bcx, code, ip + 3, chunk, &vars, &int_slots)?;
                     // i = idx as usize (saturating: NaN→0, neg→0 — matches the VM's `n as usize`).
                     let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx_f64);
                     // Read `val` (write only) BEFORE the bounds-check split so its LoadLocal reads the
                     // slot's current SSA value in `cur`, not the fresh `cont` block.
                     let store_val = if is_write {
-                        Some(read_simple_operand(&mut bcx, code, ip + 6, chunk, &vars)?)
+                        Some(read_simple_operand(
+                            &mut bcx, code, ip + 6, chunk, &vars, &int_slots,
+                        )?)
                     } else {
                         None
                     };
@@ -2634,10 +2792,14 @@ fn build_body_cfg(
                 }
                 let v = *vars.get(slot)?;
                 // #187: a bool slot's `f64` 0/1 value carries the Bool repr so downstream
-                // equality/return guards fire; a plain numeric slot pushes F64.
+                // equality/return guards fire; an int slot (#168) pushes its exact-i64 repr
+                // (identity into further int ops, one exact convert at an f64 boundary); a
+                // plain numeric slot pushes F64.
                 let lv = bcx.use_var(v);
                 stack.push(if bool_slots.contains(&slot) {
                     JV::boolean(lv)
+                } else if int_slots.contains(&slot) {
+                    JV::i64num(lv)
                 } else {
                     JV::f64(lv)
                 });
@@ -2661,10 +2823,35 @@ fn build_body_cfg(
                 if jval.is_bool() && !bool_slots.contains(&slot) {
                     return None;
                 }
+                let v = *vars.get(slot)?;
+                if int_slots.contains(&slot) {
+                    // #168: an int slot stores the EXACT number as i64 — sign-extend ToInt32
+                    // results, zero-extend ToUint32 results, integral constants load exactly.
+                    // Anything else reaching here means the optimistic pre-pass mis-tagged the
+                    // slot (e.g. a merge point whose linear predecessor differed) → bail the
+                    // whole compile; the VM keeps semantics.
+                    let iv = match jval.repr {
+                        Repr::I32 => bcx.ins().sextend(types::I64, jval.v),
+                        Repr::U32 => bcx.ins().uextend(types::I64, jval.v),
+                        Repr::I64Num => jval.v,
+                        Repr::F64 => {
+                            // The classifier only tags int-op/const-preceded stores, but a
+                            // constant reaches here as an F64 push — re-derive its exact i64
+                            // when it is one of the classifier-approved integral constants.
+                            match int_const_i64(&mut bcx, chunk, code, ip) {
+                                Some(iv) => iv,
+                                None => return None,
+                            }
+                        }
+                        Repr::Bool => return None,
+                    };
+                    bcx.def_var(v, iv);
+                    ip += 3;
+                    continue;
+                }
                 // Slots are f64 Variables — materialize an int repr once, at the store (an
                 // `h = ((h<<13)|(h>>>19))>>>0` chain pays exactly ONE convert here, not per op).
                 let val = jv_f64(&mut bcx, jval);
-                let v = *vars.get(slot)?;
                 bcx.def_var(v, val);
                 ip += 3;
             }
