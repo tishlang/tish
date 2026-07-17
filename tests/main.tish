@@ -3746,6 +3746,32 @@ console.log("method-call", o.greet())
 }
 __perf_run_core_parity_call_non_function_catchable()
 
+fn __perf_run_core_parity_closure_builtin_capture() {
+// #513: a nested value-closure that captures a LOCAL and also references a clone-hoisted
+// BUILTIN must compile natively. The arrow emitter's implicit-capture skip-list (BUILTINS)
+// contained names its clone-hoist list lacked (`Boolean`, `serve`) — those were referenced raw
+// inside the `move` closure, MOVING them out of the enclosing `Fn` closure (E0507) whenever a
+// captured local forced real capture context. Boolean is the default-features member of that
+// set, so this fixture locks the class corpus-wide; the `serve` shape is covered by the serve
+// smoke suite. Identical output across interp/vm/native + node.
+
+fn main() {
+  let x = 1
+  let flag = fn() { return Boolean(x) }
+  console.log(flag())
+
+  // two levels + both a local and a builtin at each level
+  let outer = fn() {
+    let y = 0
+    let inner = fn() { return Boolean(y) }
+    return Boolean(x) && !inner()
+  }
+  console.log(outer())
+}
+main()
+}
+__perf_run_core_parity_closure_builtin_capture()
+
 fn __perf_run_core_parity_coercion() {
 // Cross-backend parity probe for the classic divergence sources between compilation targets:
 // typeof, value-to-string coercion, nullish/absent reads, numeric formatting, and equality edges.

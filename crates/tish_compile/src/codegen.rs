@@ -9960,7 +9960,14 @@ impl Codegen {
             }
         }
         // Only clone builtins that are actually referenced (clone so outer scope can still use, e.g. process for PORT)
+        // #513: every name on the BUILTINS skip-list below MUST also be clone-hoisted here (or
+        // lower as a constant, like Infinity/NaN). A name skipped by the implicit env-capture
+        // fallback but NOT hoisted is referenced raw inside the `move` closure — which MOVES it
+        // out of the enclosing `Fn` closure's capture (E0507: `serve`/`Boolean` in any nested
+        // value-closure that also captures a local, e.g. a `Promise.spawn(fn() { serve(port, …) })`).
         for builtin in &[
+            "Boolean",
+            "serve",
             "console",
             "Math",
             "JSON",
