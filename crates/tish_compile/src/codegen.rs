@@ -5897,7 +5897,9 @@ impl Codegen {
                                 // `arr[oob]`→NaN) is unreachable for sound inputs but never panics.
                                 self.writeln(&format!(
                                     "let mut {}: Vec<f64> = match args.get({}) {{ \
-                                       Some(Value::NumberArray(a)) => a.borrow().to_values().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
+                                       Some(Value::NumberArray(a)) => match &*a.borrow() {{ \
+                                           tishlang_runtime::NumArrayBacking::Packed(p) => p.clone(), \
+                                           tishlang_runtime::NumArrayBacking::Boxed(b) => b.iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect() }}, \
                                        Some(Value::Array(arr)) => arr.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
                                        _ => Vec::new() }};",
                                     Self::escape_ident(tp.name.as_ref()),

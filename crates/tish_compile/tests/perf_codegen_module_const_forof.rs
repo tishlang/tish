@@ -33,7 +33,9 @@ fn template_literals_hoisted_nums_compiles() {
     let (rust, _, _, _) = compile_project_full(&path, path.parent(), &[], true).unwrap();
     assert!(rust.contains("const G_NUMS:"));
     assert!(
-        rust.contains("array_join(&Value::NumberArray(VmRef::new(G_NUMS"),
+        rust.contains(
+            "array_join(&Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed(G_NUMS"
+        ),
         "nums.join should box hoisted G_NUMS, not reference missing local nums"
     );
     assert!(!rust.contains("&nums,"));

@@ -134,8 +134,8 @@ fn readonly_arr_param_unboxed_to_native_vec() {
     // NumberArray clones its backing; a boxed Array is mapped element-wise).
     assert!(
         rust.contains("let mut seq: Vec<f64> = match args.get(")
-            && rust.contains("Some(Value::NumberArray(a)) => a.borrow().clone()"),
-        "read-only number[] param should be unboxed to a native Vec<f64>"
+            && rust.contains("NumArrayBacking::Packed(p) => p.clone()"),
+        "read-only number[] param should be unboxed to a native Vec<f64> (packed backing cloned directly)"
     );
     // And the hot inner loop indexes it natively (f64 mul + native vec read), no boxed get_index.
     assert!(
