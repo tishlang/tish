@@ -1,0 +1,62 @@
+// Native smoke — the HTTP→WS upgrade (issue #495/#496) + tish:ws wsAccept, on the SAME port serve()
+// binds. Dune's remote terminal (/pty) and change-push (/watch) both ride this exact path. Self-contained:
+// a serve() + wsAccept echo pump run on Promise.spawn threads (as dune-server does), while the main
+// thread connects as a WebSocket client, sends a frame, and asserts the echo.
+//
+// Build: TISH_HTTP_BACKEND=hyper tish build --target native --feature http,http-hyper,ws ...
+// Run   with TISH_HTTP_BACKEND=hyper. Expected stdout: "ws: ok"
+
+import { WebSocket, wsAccept } from "tish:ws"
+
+// serve() is called from a NAMED fn (not directly inside the Promise.spawn closure): calling a captured
+// builtin inside a spawn closure that also captures a local trips a native codegen move error (E0507) —
+// tracked upstream as tishlang/tish#513. dune-server dodges it the same way (Promise.spawn calls
+// servePtyPump, never a builtin directly).
+fn runServer(port) {
+  serve(port, fn(req) {
+    return { status: 404, headers: { "Content-Type": "text/plain" }, body: "not found" }
+  })
+}
+
+fn wsEchoPump() {
+  let conns = []
+  while (true) {
+    let ws = wsAccept(20)
+    if (ws !== null) { conns.push(ws) }
+    let i = 0
+    while (i < conns.length) {
+      let c = conns[i]
+      let ev = c.receiveTimeout(0)
+      while (ev !== null) {
+        c.send(ev.data) // echo it straight back
+        ev = c.receiveTimeout(0)
+      }
+      i = i + 1
+    }
+  }
+}
+
+fn main() {
+  let port = 8790
+  // serve() blocks forever → its own thread; it auto-completes the WS handshake and queues the socket
+  // to wsAccept (drained by the echo pump on a second thread). Exactly the dune-server shape.
+  Promise.spawn(fn() { runServer(port) })
+  Promise.spawn(fn() { wsEchoPump() })
+
+  // Retry the connect until the server has bound (WebSocket() returns null on connection-refused).
+  let client = null
+  let tries = 0
+  while (client === null && tries < 400) {
+    client = WebSocket("ws://127.0.0.1:" + String(port) + "/pty")
+    tries = tries + 1
+  }
+  if (client === null) {
+    console.log("ws: FAIL connect")
+    return
+  }
+  client.send("PINGPONG")
+  let reply = client.receiveTimeout(3000) // bounded so a lost echo can't hang CI
+  console.log(reply !== null && reply.data === "PINGPONG" ? "ws: ok" : "ws: FAIL echo")
+}
+
+main()

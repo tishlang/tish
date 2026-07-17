@@ -1,0 +1,30 @@
+// Native smoke — tish:fs stat + readDir + isDir. Dune's workspace-change signature walks the tree
+// with exactly these. Proves the native-compiled path: create a dir with two known-size files, list
+// it, stat each, and report count + total size (deterministic → asserted by the smoke harness).
+//
+// SMOKE_DIR must point at a FRESH empty dir (the harness makes + cleans it).
+// Build: tish build --target native --feature fs,process ... ; expected stdout: "stat: count=2 size=15 isdir=true"
+
+// stat/statSync are NOT auto-injected globals (unlike readFile/writeFile/isDir/readDir/mkdir) — import it.
+import { stat } from "tish:fs"
+
+fn main() {
+  let dir = process.env.SMOKE_DIR
+  if (typeof dir !== "string" || dir === "") { dir = "target/native_smoke_stat" }
+  mkdir(dir)
+  writeFile(dir + "/a.txt", "hello")        // 5 bytes
+  writeFile(dir + "/bb.txt", "worldworld")  // 10 bytes
+  let names = readDir(dir)
+  if (!Array.isArray(names)) { console.log("stat: FAIL readDir"); return }
+  names.sort()
+  let sizeSum = 0
+  let i = 0
+  while (i < names.length) {
+    let s = stat(dir + "/" + names[i])
+    if (s !== null && typeof s.size === "number") { sizeSum = sizeSum + s.size }
+    i = i + 1
+  }
+  console.log("stat: count=" + String(names.length) + " size=" + String(sizeSum) + " isdir=" + String(isDir(dir)))
+}
+
+main()

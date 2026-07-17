@@ -47,5 +47,13 @@ flags, starts it, waits for the port, then runs the driver. CI: `.github/workflo
 
 `server.tish` mirrors `apps/dune-server` in dune-ide (`serveWorkspace.tish` + `servePtyWs.tish`). If
 Dune's server changes which primitives it leans on, update `server.tish` here to match — this test is
-only as good as its fidelity to the real thing. The real dune-server itself can be built against tish
-HEAD on a dev machine via the `local:` entry in `regression/downstream/repos.tsv`.
+only as good as its fidelity to the real thing.
+
+## Related: isolated per-primitive smoke tests
+
+This end-to-end suite is complemented by **isolated** native tests for the individual primitives, wired
+into `scripts/test_native_smoke.sh` (CI: `native-smoke.yml`) so each has its own standing guard:
+`tests/native_smoke/pty_app.tish` (`tish:pty`), `ws_app.tish` (HTTP→WS upgrade + `wsAccept`), and
+`stat_app.tish` (`tish:fs` `stat`/`readDir`). The real dune-server can also be built against tish HEAD
+on a dev machine by adding a `local:` entry to `regression/downstream/repos.tsv` (a direct `tish build`
+cmd, so the runner skips the monorepo npm install).

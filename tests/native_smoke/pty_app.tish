@@ -1,0 +1,34 @@
+// Native smoke — tish:pty (issue #493/#494). Dune's remote terminal rides this. Proves the
+// native-compiled path (codegen exports + runtime) works end to end: spawn a shell in a real
+// pseudoterminal, drive a command through it, and read the command's OUTPUT back.
+//
+// The marker is split with '' so the shell CONCATENATES it to PTYMARK_OK in the OUTPUT, while the
+// cooked-mode ECHO of the typed line keeps the quotes (PTY''MARK_OK) — so finding "PTYMARK_OK"
+// proves the shell EXECUTED, not merely echoed input.
+//
+// Build: tish build --target native --feature pty ... ; expected stdout: "pty: ok"
+
+import { spawn as ptySpawn, read as ptyRead, write as ptyWrite, kill as ptyKill } from "tish:pty"
+
+fn main() {
+  let id = ptySpawn({ program: null, cwd: ".", cols: 80, rows: 24 })
+  if (id === null || id === 0) {
+    console.log("pty: FAIL spawn")
+    return
+  }
+  ptyWrite(id, "printf 'PTY''MARK_OK\\n'\n")
+  let buf = ""
+  let i = 0
+  let seen = false
+  while (i < 400 && !seen) {
+    let out = ptyRead(id, 25) // up to 25ms per poll
+    if (out === null) { break } // process exited
+    if (out !== "") { buf = buf + out }
+    if (buf.indexOf("PTYMARK_OK") >= 0) { seen = true }
+    i = i + 1
+  }
+  ptyKill(id)
+  console.log(seen ? "pty: ok" : "pty: FAIL")
+}
+
+main()

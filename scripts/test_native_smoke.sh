@@ -64,7 +64,41 @@ fs-join: alpha-beta-gamma" \
 --feature fs --feature process
 rm -f "$FSTMP"
 
-# 3. HTTP serve — both backends (delegates to the serve smoke).
+# 3. pty app — tish:pty (Dune's remote terminal). Spawn a shell, run a command, read its OUTPUT back.
+build_run "pty" "tests/native_smoke/pty_app.tish" "" \
+"pty: ok" \
+--feature pty
+
+# 4. fs stat/readDir app — the workspace-change signature walk. Deterministic count + total size.
+STATDIR="target/native_smoke_stat_$$"
+rm -rf "$STATDIR"
+build_run "stat" "tests/native_smoke/stat_app.tish" "SMOKE_DIR=$STATDIR" \
+"stat: count=2 size=15 isdir=true" \
+--feature fs --feature process
+rm -rf "$STATDIR"
+
+# 5. HTTP→WS upgrade + wsAccept (issue #495/#496) — the transport Dune's /pty + /watch ride. Built with
+# the hyper backend; a serve()+wsAccept echo run on Promise.spawn threads while the main thread connects
+# as a WS client and asserts the echo. Its own inline check: the server logs a startup line, so this is a
+# CONTAINS check ("ws: ok" present, "ws: FAIL" absent), and TISH_HTTP_PREFORK=0 keeps it single-process so
+# the in-process client isn't forked.
+echo "──────── ws-upgrade (tests/native_smoke/ws_app.tish) ────────"
+WSBIN="target/native_smoke_ws"
+if ! TISH_HTTP_BACKEND=hyper "$TISH" build tests/native_smoke/ws_app.tish -o "$WSBIN" \
+      --target native --native-backend rust --feature http --feature http-hyper --feature ws \
+      >"$WSBIN.build.log" 2>&1; then
+  echo "  ✗ BUILD FAILED"; tail -30 "$WSBIN.build.log"; FAIL=1
+else
+  WSOUT=$(TISH_HTTP_BACKEND=hyper TISH_HTTP_PREFORK=0 "$WSBIN" 2>/dev/null)
+  if echo "$WSOUT" | grep -q "ws: ok" && ! echo "$WSOUT" | grep -q "ws: FAIL"; then
+    echo "  ✓ ws upgrade round-trip (client → serve upgrade → wsAccept echo → client)"
+  else
+    echo "  ✗ ws upgrade FAILED"; echo "$WSOUT"; FAIL=1
+  fi
+fi
+rm -f "$WSBIN" "$WSBIN.build.log"
+
+# 6. HTTP serve — both backends (delegates to the serve smoke).
 echo "──────── http serve (both backends) ────────"
 if TISH="$TISH" bash scripts/test_serve_smoke.sh; then
   echo "  ✓ serve smoke passed"
@@ -74,7 +108,7 @@ fi
 
 echo "════════════════════════════════"
 if [[ "$FAIL" == 0 ]]; then
-  echo "ALL NATIVE SMOKE TESTS PASSED (cli + fs + http×2)"
+  echo "ALL NATIVE SMOKE TESTS PASSED (cli + fs + pty + stat + ws + http×2)"
 else
   echo "NATIVE SMOKE FAILURES — see above"
 fi
