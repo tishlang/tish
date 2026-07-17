@@ -12,3 +12,4 @@ exclude_paths:
   - '**/*.spec.js'          # *.spec.js
   - '**/*.spec.ts'          # *.spec.ts
   - '**/*.tish.expected'    # expected-output fixtures
+  - 'regression/**'         # regression harnesses/drivers (examples, downstream, dune-server) — CI tooling, not shipped code
