@@ -319,6 +319,16 @@ pub fn object_keys(args: &[Value]) -> Value {
                 .collect();
             Value::Array(VmRef::new(keys))
         }
+        // A packed `NumberArray` has the same own enumerable keys (its index strings) — without
+        // this, `for (k in arr)` (lowered to `for-of Object.keys`) enumerated NOTHING under
+        // TISH_PACKED_ARRAYS=1. Mirrors the Array arm.
+        Some(Value::NumberArray(arr)) => {
+            let len = arr.borrow().len();
+            let keys: Vec<Value> = (0..len)
+                .map(|i| Value::String(tishlang_core::ArcStr::from(i.to_string().as_str())))
+                .collect();
+            Value::Array(VmRef::new(keys))
+        }
         _ => Value::Array(VmRef::new(Vec::new())),
     }
 }
