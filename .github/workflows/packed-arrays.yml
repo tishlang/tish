@@ -26,6 +26,8 @@ on:
       - "crates/tish_core/**"
       - "crates/tish_vm/**"
       - "crates/tish_builtins/**"
+      # #508 lived in codegen's fused-HOF emission — native codegen is in the flag's blast radius.
+      - "crates/tish_compile/**"
       - "scripts/packed_arrays_parity_check.sh"
       - ".github/workflows/packed-arrays.yml"
   pull_request:
@@ -33,6 +35,8 @@ on:
       - "crates/tish_core/**"
       - "crates/tish_vm/**"
       - "crates/tish_builtins/**"
+      # #508 lived in codegen's fused-HOF emission — native codegen is in the flag's blast radius.
+      - "crates/tish_compile/**"
       - "scripts/packed_arrays_parity_check.sh"
       - ".github/workflows/packed-arrays.yml"
   workflow_dispatch:

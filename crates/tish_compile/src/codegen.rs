@@ -22293,16 +22293,25 @@ impl Codegen {
             None
         };
         if let Some(nat_op) = nat_op {
+            // #508: a packed `Value::NumberArray` receiver (e.g. `new Float64Array([…])` under
+            // TISH_PACKED_ARRAYS=1) must fold too — the old `if let Value::Array … else init`
+            // silently returned the INIT for it. Its elements are raw f64 by construction, so the
+            // packed arm is the pure-f64 fold with zero boxing; a non-Number init falls back to
+            // the boxed fold over `Value::Number` elements (identical semantics).
             return Ok(Some(format!(
                 "{{ let _init0 = {init}; let _arr = ({obj}).clone(); \
-                 if let Value::Array(ref _a) = _arr {{ let _b = _a.borrow(); \
+                 match _arr {{ Value::Array(ref _a) => {{ let _b = _a.borrow(); \
                  let mut _accn: f64 = 0.0; let mut _ok = false; \
                  if let Value::Number(_i0) = &_init0 {{ _accn = *_i0; _ok = true; }} \
                  if _ok {{ for _el in _b.iter() {{ \
                  if let Value::Number(_n) = _el {{ _accn {nat_op} *_n; }} else {{ _ok = false; break; }} }} }} \
                  if _ok {{ Value::Number(_accn) }} \
                  else {{ let mut _acc = _init0; for _el in _b.iter() {{ let _x = _el.clone(); _acc = {body}; }} _acc }} \
-                 }} else {{ _init0 }} }}",
+                 }}, Value::NumberArray(ref _a) => {{ let _b = _a.borrow(); \
+                 if let Value::Number(_i0) = &_init0 {{ let mut _accn: f64 = *_i0; \
+                 for _n in _b.iter() {{ _accn {nat_op} *_n; }} Value::Number(_accn) }} \
+                 else {{ let mut _acc = _init0; for _n in _b.iter() {{ let _x = Value::Number(*_n); _acc = {body}; }} _acc }} \
+                 }}, _ => _init0 }} }}",
                 init = initial,
                 obj = obj_expr,
                 nat_op = nat_op,
@@ -22310,10 +22319,13 @@ impl Codegen {
             )));
         }
 
+        // #508: same NumberArray arm for the general (non-arithmetic-op) fold.
         Ok(Some(format!(
             "{{ let mut _acc = {init}; let _arr = ({obj}).clone(); \
-             if let Value::Array(ref _a) = _arr {{ for _el in _a.borrow().iter() {{ \
-             let _x = _el.clone(); _acc = {body}; }} }} _acc }}",
+             match _arr {{ Value::Array(ref _a) => {{ for _el in _a.borrow().iter() {{ \
+             let _x = _el.clone(); _acc = {body}; }} }} \
+             Value::NumberArray(ref _a) => {{ for _n in _a.borrow().iter() {{ \
+             let _x = Value::Number(*_n); _acc = {body}; }} }} _ => {{}} }} _acc }}",
             init = initial,
             obj = obj_expr,
             body = body_code
