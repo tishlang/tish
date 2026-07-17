@@ -54,12 +54,15 @@ object_stress objects_perf string_methods_perf recursion_stress jit_probe jit_re
 
 # Fixtures with a KNOWN, FILED flag-on divergence (format: "name:#issue"). A known fixture is
 # reported and counted separately, not failed — but the default flip stays blocked until this
-# list is empty (see #199). Filed 2026-07-17 by the first full sweep:
-#   #502 fill no-op · #503 for..in empty · #504 delete leaves value · #505 unshift corruption
-#   #506 splice removed-values wrong · #507 flat misses packed inners
-#   (#508 native F64A.reduce — FIXED: fused-reduce NumberArray arm)
-KNOWN_DIVERGENCES="array_fill:#502 parity_builtins:#503 delete_operator:#504 \
-array_methods:#505 array_sort_splice:#506 higher_order_methods:#507"
+# list is empty (see #199). The first full sweep (2026-07-17) filed 7; six were clean builtins /
+# VM gaps and are fixed (#502 fill, #503 for..in/Object.keys, #504 delete, #505 concat, #507 flat
+# — #517/#518; #508 native fused-reduce — #516). The one that remains is the packed-array
+# REPRESENTATION boundary, not a method bug:
+#   #506 — splice() with non-numeric inserts (`arr.splice(1,3,"a","b")`) must make the array
+#          heterogeneous, but a NumberArray (VmRef<Vec<f64>>) can't hold strings and no method can
+#          rebind its receiver's slot to a boxed Array. Blocks the default flip until a
+#          receiver-deopt protocol lands or the semantics are decided.
+KNOWN_DIVERGENCES="array_sort_splice:#506"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

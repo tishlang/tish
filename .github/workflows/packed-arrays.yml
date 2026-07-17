@@ -8,12 +8,13 @@
 #     divergences may be allowlisted in the script's KNOWN_DIVERGENCES).
 #   * nextest — the tishlang + tishlang_vm unit/integration suites with TISH_PACKED_ARRAYS=1 in
 #     the env, so the packed representation is exercised by the whole test corpus, not only the
-#     builtins/VM unit tests. workflow_dispatch-ONLY until the divergences the first sweep filed
-#     (#502-#508) are fixed: the interp==vm corpus parity test fails on exactly those fixtures
-#     with the flag on (verified 2026-07-17; the vm + builtins UNIT suites pass), and the sweep
-#     job already reports them as KNOWN. Flip this job onto pull_request when the known list in
-#     scripts/packed_arrays_parity_check.sh empties — it then becomes the #199 acceptance gate
-#     "nextest passes with TISH_PACKED_ARRAYS=1".
+#     builtins/VM unit tests. workflow_dispatch-ONLY: six of the first sweep's seven divergences
+#     are fixed (#502/#503/#504/#505/#507 via #517/#518, #508 via #516), but the interp==vm corpus
+#     parity test still fails on the ONE remaining KNOWN — #506, splice() with non-numeric inserts,
+#     which is the packed-array REPRESENTATION boundary (a NumberArray can't go heterogeneous
+#     without a receiver-deopt protocol), not a fixable method bug. Flip this job onto pull_request
+#     when the KNOWN list in scripts/packed_arrays_parity_check.sh empties (i.e. #506 is resolved) —
+#     it then becomes the #199 acceptance gate "nextest passes with TISH_PACKED_ARRAYS=1".
 #
 # Path-filtered to the crates that own the packed representation (+ this tooling): the sweep
 # builds every fixture natively, which is too heavy for every PR.
