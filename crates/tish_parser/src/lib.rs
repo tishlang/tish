@@ -101,6 +101,34 @@ mod tests {
         assert!(parse("let x = async 5").is_err());
     }
 
+    /// #428 (function-expression half): `async function (…) {…}` / named `async function f(…) {…}`
+    /// in expression position parse as async ArrowFunctions — anonymous, named, object-property,
+    /// and IIFE-operand forms. Non-async function expressions keep `async_: false` (#464).
+    #[test]
+    fn async_function_expressions_parse() {
+        use tishlang_ast::Expr;
+        let fn_expr_async = |src: &str| -> bool {
+            let p = parse(src).expect("parse");
+            let Some(Statement::VarDecl { init: Some(e), .. }) = p.statements.first() else {
+                panic!("expected `let x = <fn expr>`");
+            };
+            match e {
+                Expr::ArrowFunction { async_, .. } => *async_,
+                other => panic!("expected ArrowFunction, got {other:?}"),
+            }
+        };
+        assert!(fn_expr_async("let f = async function() { return 1 }"), "anonymous");
+        assert!(fn_expr_async("let f = async function named(n) { return n }"), "named");
+        assert!(!fn_expr_async("let f = function() { return 1 }"), "plain fn expr is not async");
+        // Object-property and IIFE-operand positions.
+        assert!(parse("let o = { m: async function() { return 1 } }").is_ok());
+        assert!(parse("let p = (async function() { return 1 })()").is_ok());
+        assert!(parse("let q = (async () => { return 1 })()").is_ok());
+        // `async fn => …` stays a single-param arrow with param `fn` (#55 ident-compat) —
+        // the function-expression branch requires `(` or an identifier after `function`.
+        assert!(parse("let r = async fn => fn").is_ok());
+    }
+
     #[test]
     fn test_async_fn_parse() {
         let program = parse("async fn foo() { }").expect("parse async fn");
