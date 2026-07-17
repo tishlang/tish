@@ -54,5 +54,10 @@ tish-playground	git:https://github.com/spacedevin/tish-playground.git@main	.	tis
 # resolve to the workspace lattish.
 tish-midi	git:https://github.com/spacedevin/deckard.git@main	.	tish	rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_m.js >/tmp/_m.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_m.err; rc=1; }; done < <(find src -name "*.tish" -not -path "*/node_modules/*"); exit $rc	pass
 tish-tailwind	local:~/Projects/tish-audio/tish-tailwind	.	tish	bash -c 'f=$(find . -name "*.tish" -not -path "*/node_modules/*" | head -1); [ -z "$f" ] || tish build --target js "$f" -o /tmp/_tw.js'	pass
+# The REAL dune-server (dune-ide headless backend) built NATIVELY against tish HEAD with its exact
+# feature set — a build-regression guard for the actual server. cmd is a direct `tish build` (NOT npm),
+# so the runner skips the heavy monorepo npm install. Private repo → local-only (skipped in CI). The
+# always-on CI guard for the SAME primitives is the self-contained regression/dune-server suite.
+dune-server	local:~/Projects/dune/dune-ide	.	tish	TISH_HTTP_BACKEND=hyper tish build --target native --feature http,http-hyper,fs,process,ws,pty -o /tmp/_dune_server apps/dune-server/dune-server.tish	pass
 spider3-tish	git:https://github.com/schlopai/spider-gwen-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/dist/*"); exit $rc'	pass
 spacekinematics	git:https://github.com/spacedevin/solar-system-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/sgp4-wasm/*"); exit $rc'	pass

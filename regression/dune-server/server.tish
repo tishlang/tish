@@ -1,0 +1,169 @@
+// regression/dune-server — a DISTILLED dune-server that exercises the tish primitives Dune's headless
+// backend (apps/dune-server in the dune-ide repo) depends on, so a tish release can't silently break the
+// mission-critical surface. Self-contained: NO imports from dune-ide, so it always builds+runs in CI.
+//
+// Mission-critical surface mirrored here (each maps to a real dune-server dependency):
+//   • tish:http serve() on the HYPER backend (TISH_HTTP_BACKEND=hyper)  — single-port HTTP RPC (/rpc)
+//   • HTTP→WS upgrade on that SAME port + tish:ws wsAccept               — /pty and /watch ride it
+//   • tish:pty spawn/read/write/kill                                    — the interactive terminal
+//   • tish:fs stat + readDir (+ isDir global)                           — the workspace-change signature
+//   • process.execFileCapture                                          — git
+//   • Promise.spawn                                                    — the WS pump beside serve()
+//
+// Build EXACTLY as dune-server does:
+//   TISH_HTTP_BACKEND=hyper tish build --target native \
+//     --feature http,http-hyper,fs,process,ws,pty -o dune-server-parity server.tish
+//   ./dune-server-parity --workspace <dir> --port <port>
+//
+// The driver (drive.mjs) asserts: HTTP /health + /rpc ping + workspace_signature + git_head, a /pty WS
+// that spawns a shell and echoes a command, and a /watch WS that pushes a changed signature on a file
+// edit. See run.sh + README.md.
+
+import { stat } from "tish:fs"
+import { wsAccept } from "tish:ws"
+import { spawn as ptySpawn, read as ptyRead, write as ptyWrite, kill as ptyKill } from "tish:pty"
+
+fn argValue(flag: string): string? {
+  let a = process.argv
+  let i = 0
+  while (i < a.length) {
+    if (a[i] === flag && i + 1 < a.length) { return a[i + 1] }
+    i = i + 1
+  }
+  return null
+}
+
+// Manual base-10 parse (avoid leaning on parseInt/Number availability in the native target).
+fn toInt(s: string): number {
+  let n = 0
+  let i = 0
+  while (i < s.length) {
+    let c = s[i]
+    if (c >= "0" && c <= "9") { n = n * 10 + (c.charCodeAt(0) - 48) }
+    i = i + 1
+  }
+  return n
+}
+
+// The workspace-change fingerprint dune-server pushes: file count + summed mtime(sec) + summed size over
+// the tree (heavy dirs skipped). mtime floored to SECONDS so stat's fractional mtimeMs can't jitter it.
+fn walkSig(dir: string, st: any): any {
+  let names = readDir(dir)
+  if (!Array.isArray(names)) { return st }
+  let i = 0
+  while (i < names.length) {
+    let name = names[i]
+    i = i + 1
+    if (name === ".git" || name === "node_modules" || name === "target") { continue }
+    let full = dir + "/" + name
+    if (isDir(full)) {
+      st = walkSig(full, st)
+    } else {
+      let s = stat(full)
+      if (s !== null && typeof s.mtimeMs === "number" && typeof s.size === "number") {
+        st.count = st.count + 1
+        st.mtimeSum = st.mtimeSum + Math.floor(s.mtimeMs / 1000)
+        st.sizeSum = st.sizeSum + s.size
+      }
+    }
+  }
+  return st
+}
+
+fn workspaceSignature(root: string): string {
+  let st = walkSig(root, { count: 0, mtimeSum: 0, sizeSum: 0 })
+  return String(st.count) + ":" + String(st.mtimeSum) + ":" + String(st.sizeSum)
+}
+
+fn rpcDispatch(root: string, method: string): any {
+  if (method === "ping") { return { ok: true, result: "pong" } }
+  if (method === "workspace_signature") { return { ok: true, result: workspaceSignature(root) } }
+  if (method === "git_head") {
+    let r = process.execFileCapture("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"])
+    return { ok: true, result: { code: r.code, stdout: r.stdout } }
+  }
+  return { ok: false, error: "unknown method: " + method }
+}
+
+// One WS pump for BOTH endpoints — wsAccept doesn't carry the path, so dispatch by the FIRST client
+// frame: {t:"start"} = a PTY terminal, {t:"watch"} = a change-push subscription (exactly like dune-server).
+fn handleWsMsg(c, data, root) {
+  let msg = JSON.parse(data)
+  let t = msg.t
+  if (t === "start") {
+    c.mode = "pty"
+    c.id = ptySpawn({ program: null, cwd: root, cols: 80, rows: 24 })
+    return "ok"
+  }
+  if (t === "watch") {
+    c.mode = "watch"
+    c.lastSig = workspaceSignature(root)
+    c.tick = 0
+    c.ws.send(JSON.stringify({ sig: c.lastSig }))
+    return "ok"
+  }
+  if (c.mode === "pty" && c.id !== 0 && t === "in") {
+    ptyWrite(c.id, msg.d)
+  }
+  return "ok"
+}
+
+fn wsPump(root) {
+  let conns = []
+  while (true) {
+    let ws = wsAccept(8)
+    if (ws !== null) { conns.push({ ws: ws, id: 0, mode: null, lastSig: "", tick: 0 }) }
+    let alive = []
+    let i = 0
+    while (i < conns.length) {
+      let c = conns[i]
+      let dead = false
+      let ev = c.ws.receiveTimeout(0)
+      while (ev !== null && dead === false) {
+        handleWsMsg(c, ev.data, root)
+        ev = c.ws.receiveTimeout(0)
+      }
+      if (c.mode === "pty" && c.id !== 0) {
+        let out = ptyRead(c.id, 0)
+        if (out === null) { c.ws.close(); dead = true }
+        else if (out !== "") { if (c.ws.send(out) === false) { dead = true } }
+      }
+      if (c.mode === "watch") {
+        c.tick = c.tick + 1
+        if (c.tick >= 60) {
+          c.tick = 0
+          let sig = workspaceSignature(root)
+          if (sig !== c.lastSig) {
+            c.lastSig = sig
+            if (c.ws.send(JSON.stringify({ sig: sig })) === false) { dead = true }
+          }
+        }
+      }
+      if (dead === true) { if (c.id !== 0) { ptyKill(c.id) } } else { alive.push(c) }
+      i = i + 1
+    }
+    conns = alive
+  }
+}
+
+fn main() {
+  let root = argValue("--workspace")
+  if (root === null) { root = "." }
+  let portStr = argValue("--port")
+  let port = portStr === null ? 8799 : toInt(portStr)
+  console.log("dune-server-parity: http+ws on port " + String(port) + " workspace=" + root)
+  // The WS pump runs on its own OS thread beside the blocking serve() loop (like dune-server).
+  Promise.spawn(fn() { wsPump(root) })
+  serve(port, fn(req) {
+    if (req.path === "/health") {
+      return { status: 200, headers: { "Content-Type": "application/json" }, body: "{\"ok\":true}" }
+    }
+    if (req.path === "/rpc" && req.method === "POST") {
+      let msg = JSON.parse(req.body)
+      return { status: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify(rpcDispatch(root, msg.method)) }
+    }
+    return { status: 404, headers: { "Content-Type": "text/plain" }, body: "not found" }
+  })
+}
+
+main()
