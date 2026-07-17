@@ -3830,6 +3830,60 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                     }
                     Value::Number(arr.len() as f64)
                 }),
+                // #502: `fill` mutates IN PLACE, but the packed block routed it through the
+                // materialize-to-boxed fallback below — which fills a THROWAWAY copy, so the
+                // original array was untouched (a silent no-op). A numeric fill value writes
+                // straight into the Vec<f64>; a non-numeric value can't live in a packed array
+                // (the documented rep limit, #199) so it deopts: materialize, fill the boxed copy,
+                // and write the numeric elements back (non-numeric slots become NaN holes — the
+                // same lossy edge splice/set-index already have on packed).
+                "fill" => {
+                    let a2 = a_clone.clone();
+                    make_native_fn(move |args: &[Value]| {
+                        let len = a2.borrow().len() as i64;
+                        let norm = |v: Option<&Value>, dflt: i64| -> i64 {
+                            match v {
+                                Some(Value::Number(n)) => {
+                                    let i = *n as i64;
+                                    if i < 0 { (len + i).max(0) } else { i.min(len) }
+                                }
+                                _ => dflt,
+                            }
+                        };
+                        let start = norm(args.get(1), 0);
+                        let end = norm(args.get(2), len);
+                        match args.first() {
+                            Some(Value::Number(fv)) => {
+                                let mut arr = a2.borrow_mut();
+                                let mut i = start;
+                                while i < end && (i as usize) < arr.len() {
+                                    arr[i as usize] = *fv;
+                                    i += 1;
+                                }
+                            }
+                            _ => {
+                                // Deopt: fill the boxed copy (correct), write numerics back.
+                                let boxed = Value::materialize_number_array(&a2);
+                                let v = args.first().cloned().unwrap_or(Value::Null);
+                                let sv = args.get(1).cloned().unwrap_or(Value::Null);
+                                let ev = args.get(2).cloned().unwrap_or(Value::Null);
+                                arr_builtins::fill(&boxed, &v, &sv, &ev);
+                                if let Value::Array(bx) = &boxed {
+                                    let mut arr = a2.borrow_mut();
+                                    *arr = bx
+                                        .borrow()
+                                        .iter()
+                                        .map(|e| match e {
+                                            Value::Number(n) => *n,
+                                            _ => f64::NAN,
+                                        })
+                                        .collect();
+                                }
+                            }
+                        }
+                        Value::NumberArray(a2.clone())
+                    })
+                }
                 "reverse" => make_native_fn(move |_: &[Value]| {
                     a_clone.borrow_mut().reverse();
                     Value::NumberArray(a_clone.clone())
@@ -4657,6 +4711,21 @@ fn delete_index(obj: &Value, key: &Value) {
                     let mut arr = a.borrow_mut();
                     if i < arr.len() {
                         arr[i] = Value::Null;
+                    }
+                }
+            }
+        }
+        // #504: `delete arr[i]` on a packed array — the Vec<f64> can't hold Null, but NaN is the
+        // rep's own hole marker (GetIndex reads a NaN element back as Null, matching a boxed hole),
+        // so a delete writes NaN. Length is unchanged, exactly like the boxed arm's `= Null`.
+        Value::NumberArray(a) => {
+            if let Value::Number(n) = key {
+                let n = *n;
+                if n >= 0.0 && n.fract() == 0.0 {
+                    let i = n as usize;
+                    let mut arr = a.borrow_mut();
+                    if i < arr.len() {
+                        arr[i] = f64::NAN;
                     }
                 }
             }
