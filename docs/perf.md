@@ -288,6 +288,10 @@ handled via NaN-as-hole marker. Suite 17/0 at flag=0 (byte-identical to interp).
     semantic loss is expected and documented — mixed-type splice requires scope-binding update to
     fully deopt, which `&Value` can't do without architectural changes).
 
+    ⤷ SUPERSEDED by PHASE 2c / #520 (2026-07-17): the "architectural change" is now done — the
+      backing is an in-place-upgradable enum, so non-numeric mutation deopts soundly and this edge
+      case (and the whole class) is gone. See docs/packed-arrays.md.
+
 FINDING — does NOT move array_stress (32ms → 32ms with flag=1). Root cause:
   - array_stress builds arrays via `push()` into empty `[]` literals
   - Empty `[]` stays regular Array (can't infer numeric from zero elements)

@@ -39,10 +39,15 @@ native extensions. They are compile-time breaks (the compiler will flag them).
    - **Migration:** matching — `s.as_str()` (bare `s.as_ref()` is now ambiguous: `ArcStr` impls both
      `AsRef<str>` and `AsRef<[u8]>`); constructing — `Value::String(x.into())` from `&str`/`String`.
 
-3. **New `Value` variant: `NumberArray(VmRef<Vec<f64>>)`** (packed f64 arrays).
+3. **New `Value` variant: `NumberArray(VmRef<NumArrayBacking>)`** (packed f64 arrays). As of #520 the
+   backing is an enum `NumArrayBacking { Packed(Vec<f64>), Boxed(Vec<Value>) }` (was a bare
+   `VmRef<Vec<f64>>`) so a non-numeric store can upgrade it in place; see docs/packed-arrays.md.
    - Any **exhaustive** `match value { … }` over `Value` in downstream code now fails to compile and
      must add an arm (or `_`). The variant *exists* in every build; it is only *constructed* under
      `TISH_PACKED_ARRAYS=1` (off by default), so a missing arm is a compile break, not a runtime one.
+   - Readers that pattern-matched `NumberArray(v)` as `VmRef<Vec<f64>>` must go through the enum
+     (`.borrow().to_values()` / `as_packed()` / `get(i)`); `NumArrayBacking` is re-exported from
+     `tishlang_runtime` for generated native code.
 
 4. **Object storage: `PropMap` is now an `IndexMap`-backed `pub struct`** (was a `pub type PropMap =
    AHashMap<Arc<str>, Value>` alias). `ObjectData` construction helpers changed. Embedders building
