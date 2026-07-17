@@ -404,10 +404,15 @@ pub fn concat(arr: &Value, args: &[Value]) -> Value {
     if let Value::Array(arr) = arr {
         let mut result = arr.borrow().clone();
         for v in args {
-            if let Value::Array(other) = v {
-                result.extend(other.borrow().iter().cloned());
-            } else {
-                result.push(v.clone());
+            match v {
+                Value::Array(other) => result.extend(other.borrow().iter().cloned()),
+                // A packed `NumberArray` arg spreads its numbers, same as a boxed array — under
+                // TISH_PACKED_ARRAYS=1 a numeric literal `[3,4]` is a NumberArray, so
+                // `[1,2].concat([3,4])` must flatten to `[1,2,3,4]`, not push the array whole.
+                Value::NumberArray(other) => {
+                    result.extend(other.borrow().iter().map(|n| Value::Number(*n)))
+                }
+                _ => result.push(v.clone()),
             }
         }
         Value::Array(VmRef::new(result))
@@ -421,9 +426,21 @@ pub fn flat(arr: &Value, depth: &Value) -> Value {
     fn flatten(arr: &[Value], depth: i32, result: &mut Vec<Value>) {
         for v in arr {
             if depth > 0 {
-                if let Value::Array(inner) = v {
-                    flatten(&inner.borrow(), depth - 1, result);
-                    continue;
+                match v {
+                    Value::Array(inner) => {
+                        flatten(&inner.borrow(), depth - 1, result);
+                        continue;
+                    }
+                    // A packed `NumberArray` inner flattens like a boxed array (its numbers are the
+                    // flattened elements) — `[[1,2],[3,4]].flat()` where the inners packed must not
+                    // leave a `NumberArray` sitting as a scalar element.
+                    Value::NumberArray(inner) => {
+                        for n in inner.borrow().iter() {
+                            result.push(Value::Number(*n));
+                        }
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             result.push(v.clone());
@@ -1531,6 +1548,44 @@ mod reentrancy_tests_382 {
                 assert_eq!(got, vec![10.0, 20.0, 30.0], "ascending sort completes, no element lost");
             }
             _ => panic!("sort should return an array"),
+        }
+    }
+
+    fn nums(v: &Value) -> Vec<f64> {
+        match v {
+            Value::Array(a) => a.borrow().iter().filter_map(|e| e.as_number()).collect(),
+            _ => panic!("expected boxed array result"),
+        }
+    }
+
+    /// #505: a packed `NumberArray` concat ARG must spread its numbers, not push the array whole.
+    #[test]
+    fn concat_spreads_packed_number_array_arg() {
+        let recv = Value::Array(VmRef::new(vec![Value::Number(1.0), Value::Number(2.0)]));
+        let packed = Value::number_array(vec![3.0, 4.0]);
+        let out = concat(&recv, &[packed]);
+        assert_eq!(nums(&out), vec![1.0, 2.0, 3.0, 4.0]);
+        // Mixed with a boxed array + a scalar, order preserved.
+        let boxed = Value::Array(VmRef::new(vec![Value::Number(5.0)]));
+        let out2 = concat(&recv, &[boxed, Value::Number(9.0)]);
+        assert_eq!(nums(&out2), vec![1.0, 2.0, 5.0, 9.0]);
+    }
+
+    /// #507: a packed `NumberArray` INNER element must flatten like a boxed array.
+    #[test]
+    fn flat_flattens_packed_number_array_inner() {
+        let outer = Value::Array(VmRef::new(vec![
+            Value::number_array(vec![1.0, 2.0]),
+            Value::Number(3.0),
+            Value::Array(VmRef::new(vec![Value::Number(4.0)])),
+        ]));
+        let out = flat(&outer, &Value::Number(1.0));
+        assert_eq!(nums(&out), vec![1.0, 2.0, 3.0, 4.0]);
+        // depth 0 keeps the packed inner as-is (not flattened) — matches boxed-array behavior.
+        let out0 = flat(&outer, &Value::Number(0.0));
+        match out0 {
+            Value::Array(a) => assert_eq!(a.borrow().len(), 3, "depth 0 flattens nothing"),
+            _ => panic!("expected array"),
         }
     }
 }
