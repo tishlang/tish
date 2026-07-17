@@ -197,6 +197,11 @@ impl<'a> Parser<'a> {
         self.peek().map(|t| t.kind)
     }
 
+    /// Kind of the token `n` positions past the current one (`peek_ahead_kind(0)` == `peek_kind`).
+    fn peek_ahead_kind(&self, n: usize) -> Option<TokenKind> {
+        self.tokens.get(self.pos + n).map(|t| t.kind)
+    }
+
     fn advance(&mut self) -> Option<&Token> {
         let t = self.tokens.get(self.pos);
         if t.is_some() {
@@ -2465,9 +2470,11 @@ impl<'a> Parser<'a> {
                 value: Literal::Null,
                 span,
             }),
-            // `async` in expression position (#428): an async arrow — `async () => …` or
-            // `async x => …`. The body runs in async context (`await` allowed). Async function
-            // expressions / method shorthand need function-expression support, which tish lacks.
+            // `async` in expression position (#428): an async arrow — `async () => …` /
+            // `async x => …` — or an async function EXPRESSION — `async function (…) {…}` /
+            // named `async function f(…) {…}` (desugars to an async ArrowFunction exactly like
+            // the non-async `function` expression form, #464). The body runs in async context
+            // (`await` allowed).
             TokenKind::Async => {
                 if matches!(self.peek_kind(), Some(TokenKind::LParen)) {
                     self.advance(); // consume `(`
@@ -2475,6 +2482,19 @@ impl<'a> Parser<'a> {
                         return Ok(arrow);
                     }
                     return Err("Expected an arrow function after `async (`".to_string());
+                }
+                // `async function (…) {…}` / `async function f(…) {…}`: `function` (`Fn`)
+                // followed by `(` or an identifier is a function expression, mirroring the
+                // non-async arm below. Checked BEFORE the single-param-arrow branch, which
+                // would otherwise consume `function` as a parameter name and demand `=>`.
+                if matches!(self.peek_kind(), Some(TokenKind::Fn))
+                    && matches!(
+                        self.peek_ahead_kind(1),
+                        Some(TokenKind::LParen | TokenKind::Ident)
+                    )
+                {
+                    self.advance(); // consume `function`
+                    return self.parse_function_expr_tail(&span, true);
                 }
                 if matches!(
                     self.peek_kind(),
