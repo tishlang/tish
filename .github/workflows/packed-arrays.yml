@@ -1,0 +1,115 @@
+# TISH_PACKED_ARRAYS=1 parity gate (#199) — the precondition for ever flipping packed f64
+# arrays default-on. Two jobs:
+#
+#   * sweep — scripts/packed_arrays_parity_check.sh: every tests/core fixture runs flag-off and
+#     flag-on across interp/vm/native (flag is runtime-read via OnceLock, so one native build per
+#     fixture, run twice), plus tests/perf GAUNTLET checksums flag-on == flag-off == node on the
+#     VM. Any NEW divergence fails the job (file it as a bug and link it in #199; only filed
+#     divergences may be allowlisted in the script's KNOWN_DIVERGENCES).
+#   * nextest — the tishlang + tishlang_vm unit/integration suites with TISH_PACKED_ARRAYS=1 in
+#     the env, so the packed representation is exercised by the whole test corpus, not only the
+#     builtins/VM unit tests. workflow_dispatch-ONLY until the divergences the first sweep filed
+#     (#502-#508) are fixed: the interp==vm corpus parity test fails on exactly those fixtures
+#     with the flag on (verified 2026-07-17; the vm + builtins UNIT suites pass), and the sweep
+#     job already reports them as KNOWN. Flip this job onto pull_request when the known list in
+#     scripts/packed_arrays_parity_check.sh empties — it then becomes the #199 acceptance gate
+#     "nextest passes with TISH_PACKED_ARRAYS=1".
+#
+# Path-filtered to the crates that own the packed representation (+ this tooling): the sweep
+# builds every fixture natively, which is too heavy for every PR.
+name: Packed arrays
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tish_core/**"
+      - "crates/tish_vm/**"
+      - "crates/tish_builtins/**"
+      - "scripts/packed_arrays_parity_check.sh"
+      - ".github/workflows/packed-arrays.yml"
+  pull_request:
+    paths:
+      - "crates/tish_core/**"
+      - "crates/tish_vm/**"
+      - "crates/tish_builtins/**"
+      - "scripts/packed_arrays_parity_check.sh"
+      - ".github/workflows/packed-arrays.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: packed-arrays-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    name: Packed-arrays parity sweep
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Fleet-safe target-cpu (#223): avoids the SIGILL the default `native` causes on the
+      # virtualized fleet.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build tish (release)
+        run: cargo build --release -p tishlang --bin tish
+
+      - name: Packed-arrays parity sweep (corpus + perf checksums)
+        run: scripts/packed_arrays_parity_check.sh
+
+  nextest:
+    name: Unit/integration suites with TISH_PACKED_ARRAYS=1
+    # See header — manual until #502-#508 are fixed and the sweep's KNOWN list is empty.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+      TISH_PACKED_ARRAYS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install nextest
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: nextest
+
+      - name: Build tish (debug — integration tests run target/debug/tish)
+        run: cargo build -p tishlang --bin tish
+
+      - name: nextest with TISH_PACKED_ARRAYS=1
+        run: cargo nextest run -p tishlang -p tishlang_vm --features full
