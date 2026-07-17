@@ -79,7 +79,7 @@ pub fn array_from(args: &[Value]) -> Value {
     let source = args.first().cloned().unwrap_or(Value::Null);
     let items: Vec<Value> = match &source {
         Value::Array(a) => a.borrow().clone(),
-        Value::NumberArray(a) => a.borrow().iter().map(|n| Value::Number(*n)).collect(),
+        Value::NumberArray(a) => a.borrow().to_values(),
         // `drain_iterator` covers String (chars), Set/Map, and any iterator object.
         other => {
             if let Some(d) = tishlang_core::drain_iterator(other) {

@@ -58,8 +58,7 @@ object_stress objects_perf string_methods_perf recursion_stress jit_probe jit_re
 #   #502 fill no-op · #503 for..in empty · #504 delete leaves value · #505 unshift corruption
 #   #506 splice removed-values wrong · #507 flat misses packed inners
 #   (#508 native F64A.reduce — FIXED: fused-reduce NumberArray arm)
-KNOWN_DIVERGENCES="array_fill:#502 parity_builtins:#503 delete_operator:#504 \
-array_methods:#505 array_sort_splice:#506 higher_order_methods:#507"
+KNOWN_DIVERGENCES=""
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

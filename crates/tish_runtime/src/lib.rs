@@ -16,6 +16,7 @@ pub use tishlang_core::ObjectMap;
 // pass) instead of materializing an intermediate `AHashMap` and rebuilding from it.
 pub use tishlang_core::{ObjectData, PropMap};
 pub use tishlang_core::Value;
+pub use tishlang_core::NumArrayBacking;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).
 /// Wraps `tishlang_core::value_call` with a pending-throw suppression check (#381): while a thrown
@@ -79,7 +80,7 @@ pub fn normalize_for_of(v: Value) -> Value {
     // single-variant `if let Value::Array` in the spread / for-of codegen binds — otherwise it spreads
     // to zero elements.
     if let Value::NumberArray(arr) = &v {
-        let items: Vec<Value> = arr.borrow().iter().map(|n| Value::Number(*n)).collect();
+        let items: Vec<Value> = arr.borrow().to_values();
         return Value::Array(VmRef::new(items));
     }
     match tishlang_core::drain_iterator(&v) {
@@ -1389,7 +1390,10 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             if key == "length" {
                 Value::Number(arr.borrow().len() as f64)
             } else if let Ok(idx) = key.parse::<usize>() {
-                arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
+                arr.borrow().get(idx).map(|v| match v {
+                    Value::Number(n) if n.is_nan() => Value::Null,
+                    other => other,
+                }).unwrap_or(Value::Null)
             } else {
                 Value::Null
             }
@@ -1487,7 +1491,10 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
                 },
                 _ => return Value::Null,
             };
-            arr.borrow().get(idx).copied().map(Value::Number).unwrap_or(Value::Null)
+            arr.borrow().get(idx).map(|v| match v {
+                Value::Number(n) if n.is_nan() => Value::Null,
+                other => other,
+            }).unwrap_or(Value::Null)
         }
         // `str[i]` returns the character at index `i` (issue #17) — matches the VM /
         // interpreter; out-of-bounds / negative / non-integer indices yield null.
@@ -1613,11 +1620,23 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
                 },
                 _ => panic!("Array index must be number"),
             };
-            let mut arr_mut = arr.borrow_mut();
-            while arr_mut.len() <= index {
-                arr_mut.push(0.0);
+            let mut b = arr.borrow_mut();
+            match (b.as_packed_mut(), val.as_number()) {
+                (Some(nums), Some(n)) => {
+                    while nums.len() <= index {
+                        nums.push(f64::NAN);
+                    }
+                    nums[index] = n;
+                }
+                // Non-numeric (or already deopted): upgrade in place, store the real Value.
+                _ => {
+                    let boxed = b.deopt();
+                    while boxed.len() <= index {
+                        boxed.push(Value::Null);
+                    }
+                    boxed[index] = val.clone();
+                }
             }
-            arr_mut[index] = val.as_number().unwrap_or(f64::NAN);
             val
         }
         Value::Object(_) => {

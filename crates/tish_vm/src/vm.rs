@@ -1382,7 +1382,14 @@ mod hof_fusion {
     #[inline]
     fn numeric_snapshot(arr: &Value) -> Option<Vec<f64>> {
         match arr {
-            Value::NumberArray(a) => Some(a.borrow().clone()),
+            Value::NumberArray(a) => match a.borrow().as_packed() {
+                Some(v) => Some(v.clone()),
+                None => a
+                    .borrow()
+                    .as_boxed()
+                    .map(|vs| vs.iter().map(|v| v.as_number()).collect::<Option<Vec<f64>>>())
+                    .unwrap_or(None),
+            },
             Value::Array(a) => {
                 let b = a.borrow();
                 let mut out = Vec::with_capacity(b.len());
@@ -3316,12 +3323,13 @@ impl Vm {
                         .unwrap_or(Value::Null);
                     let result = match &arr {
                         Value::NumberArray(a) => {
-                            // All-numeric fast path: operate on raw f64, no boxing/unboxing.
-                            let arr_borrow = a.borrow();
-                            let mapped: Vec<Value> = arr_borrow
-                                .iter()
-                                .map(|&n| {
-                                    let elem = Value::Number(n);
+                            // Fast path over the numeric-origin array (packed or deopted): map each
+                            // element through the const binop.
+                            let mapped: Vec<Value> = a
+                                .borrow()
+                                .to_values()
+                                .into_iter()
+                                .map(|elem| {
                                     let (l, r) = if param_left {
                                         (elem, const_val.clone())
                                     } else {
@@ -3388,21 +3396,31 @@ impl Vm {
                         .unwrap_or(Value::Null);
                     let result = match &arr {
                         Value::NumberArray(a) => {
-                            let arr_borrow = a.borrow();
-                            let filtered: Vec<f64> = arr_borrow
-                                .iter()
-                                .filter(|&&n| {
-                                    let elem = Value::Number(n);
+                            // Numeric-origin filter (packed or deopted): keep elements whose const
+                            // binop is truthy, preserving each element's actual Value.
+                            let kept: Vec<Value> = a
+                                .borrow()
+                                .to_values()
+                                .into_iter()
+                                .filter(|elem| {
                                     let (l, r) = if param_left {
-                                        (elem, const_val.clone())
+                                        (elem.clone(), const_val.clone())
                                     } else {
-                                        (const_val.clone(), elem)
+                                        (const_val.clone(), elem.clone())
                                     };
                                     eval_binop(binop, &l, &r).unwrap_or(Value::Null).is_truthy()
                                 })
-                                .copied()
                                 .collect();
-                            Value::number_array(filtered)
+                            // Stay packed when every kept element is a plain number.
+                            if let Some(nums) = kept
+                                .iter()
+                                .map(|v| v.as_number())
+                                .collect::<Option<Vec<f64>>>()
+                            {
+                                Value::number_array(nums)
+                            } else {
+                                Value::Array(VmRef::new(kept))
+                            }
                         }
                         Value::Array(a) => {
                             let arr_borrow = a.borrow();
@@ -3769,11 +3787,7 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             let key_s = key.as_ref();
             // Numeric index fast path.
             if let Ok(idx) = key_s.parse::<usize>() {
-                return Ok(a
-                    .borrow()
-                    .get(idx)
-                    .map(|&n| Value::Number(n))
-                    .unwrap_or(Value::Null));
+                return Ok(a.borrow().get(idx).unwrap_or(Value::Null));
             }
             if key_s == "length" {
                 return Ok(Value::Number(a.borrow().len() as f64));
@@ -3782,53 +3796,56 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
             let a_clone = a.clone();
             let method: ArrayMethodFn = match key_s {
                 "push" => make_native_fn(move |args: &[Value]| {
-                    let mut arr = a_clone.borrow_mut();
+                    let mut b = a_clone.borrow_mut();
                     for v in args {
-                        match v {
-                            Value::Number(n) => arr.push(*n),
-                            _ => {
-                                arr.push(f64::NAN); // hole-marker for non-numeric
-                            }
+                        match (b.as_packed_mut(), v) {
+                            (Some(nums), Value::Number(n)) => nums.push(*n),
+                            // First non-numeric (or already deopted) → upgrade in place, push Value.
+                            _ => b.deopt().push(v.clone()),
                         }
                     }
-                    Value::Number(arr.len() as f64)
+                    Value::Number(b.len() as f64)
                 }),
                 "pop" => make_native_fn(move |_: &[Value]| {
-                    a_clone
-                        .borrow_mut()
-                        .pop()
-                        .map(|n| {
-                            if n.is_nan() {
-                                Value::Null
-                            } else {
-                                Value::Number(n)
-                            }
-                        })
-                        .unwrap_or(Value::Null)
+                    let mut b = a_clone.borrow_mut();
+                    match b.as_packed_mut() {
+                        Some(nums) => nums
+                            .pop()
+                            .map(|n| if n.is_nan() { Value::Null } else { Value::Number(n) })
+                            .unwrap_or(Value::Null),
+                        None => b.deopt().pop().unwrap_or(Value::Null),
+                    }
                 }),
                 "shift" => make_native_fn(move |_: &[Value]| {
-                    let mut arr = a_clone.borrow_mut();
-                    if arr.is_empty() {
-                        Value::Null
-                    } else {
-                        let n = arr.remove(0);
-                        if n.is_nan() {
-                            Value::Null
-                        } else {
-                            Value::Number(n)
+                    let mut b = a_clone.borrow_mut();
+                    if b.is_empty() {
+                        return Value::Null;
+                    }
+                    match b.as_packed_mut() {
+                        Some(nums) => {
+                            let n = nums.remove(0);
+                            if n.is_nan() { Value::Null } else { Value::Number(n) }
                         }
+                        None => b.deopt().remove(0),
                     }
                 }),
                 "unshift" => make_native_fn(move |args: &[Value]| {
-                    let mut arr = a_clone.borrow_mut();
-                    for (i, v) in args.iter().enumerate() {
-                        let n = match v {
-                            Value::Number(n) => *n,
-                            _ => f64::NAN,
-                        };
-                        arr.insert(i, n);
+                    let mut b = a_clone.borrow_mut();
+                    let all_num = args.iter().all(|v| matches!(v, Value::Number(_)));
+                    if all_num && b.as_packed().is_some() {
+                        let nums = b.as_packed_mut().unwrap();
+                        for (i, v) in args.iter().enumerate() {
+                            if let Value::Number(n) = v {
+                                nums.insert(i, *n);
+                            }
+                        }
+                    } else {
+                        let boxed = b.deopt();
+                        for (i, v) in args.iter().enumerate() {
+                            boxed.insert(i, v.clone());
+                        }
                     }
-                    Value::Number(arr.len() as f64)
+                    Value::Number(b.len() as f64)
                 }),
                 // #502: `fill` mutates IN PLACE, but the packed block routed it through the
                 // materialize-to-boxed fallback below — which fills a THROWAWAY copy, so the
@@ -3852,119 +3869,104 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         };
                         let start = norm(args.get(1), 0);
                         let end = norm(args.get(2), len);
-                        match args.first() {
-                            Some(Value::Number(fv)) => {
-                                let mut arr = a2.borrow_mut();
+                        let fill_v = args.first().cloned().unwrap_or(Value::Null);
+                        let mut b = a2.borrow_mut();
+                        match (b.as_packed_mut(), &fill_v) {
+                            // Numeric fill stays packed — write straight into the Vec<f64>.
+                            (Some(nums), Value::Number(fv)) => {
                                 let mut i = start;
-                                while i < end && (i as usize) < arr.len() {
-                                    arr[i as usize] = *fv;
+                                while i < end && (i as usize) < nums.len() {
+                                    nums[i as usize] = *fv;
                                     i += 1;
                                 }
                             }
+                            // Non-numeric fill (or already deopted): upgrade in place and fill the
+                            // boxed Vec with the actual Value — no NaN-hole loss (#199 sound).
                             _ => {
-                                // Deopt: fill the boxed copy (correct), write numerics back.
-                                let boxed = Value::materialize_number_array(&a2);
-                                let v = args.first().cloned().unwrap_or(Value::Null);
-                                let sv = args.get(1).cloned().unwrap_or(Value::Null);
-                                let ev = args.get(2).cloned().unwrap_or(Value::Null);
-                                arr_builtins::fill(&boxed, &v, &sv, &ev);
-                                if let Value::Array(bx) = &boxed {
-                                    let mut arr = a2.borrow_mut();
-                                    *arr = bx
-                                        .borrow()
-                                        .iter()
-                                        .map(|e| match e {
-                                            Value::Number(n) => *n,
-                                            _ => f64::NAN,
-                                        })
-                                        .collect();
+                                let boxed = b.deopt();
+                                let mut i = start;
+                                while i < end && (i as usize) < boxed.len() {
+                                    boxed[i as usize] = fill_v.clone();
+                                    i += 1;
                                 }
                             }
                         }
+                        drop(b);
                         Value::NumberArray(a2.clone())
                     })
                 }
                 "reverse" => make_native_fn(move |_: &[Value]| {
-                    a_clone.borrow_mut().reverse();
+                    let mut b = a_clone.borrow_mut();
+                    match b.as_packed_mut() {
+                        Some(nums) => nums.reverse(),
+                        None => b.deopt().reverse(),
+                    }
+                    drop(b);
                     Value::NumberArray(a_clone.clone())
                 }),
                 "splice" => {
                     let a2 = a_clone.clone();
                     make_native_fn(move |args: &[Value]| {
-                        // Check if there are non-numeric items to insert (args[2..]).
-                        let has_non_numeric = args
-                            .get(2..)
-                            .unwrap_or(&[])
-                            .iter()
-                            .any(|v| !matches!(v, Value::Number(_)));
-                        if has_non_numeric {
-                            // Deopt: materialise, splice on the boxed array, then write numeric
-                            // elements back to the original Vec<f64>. This preserves the VmRef
-                            // identity for subsequent accesses. The array may have non-numeric
-                            // elements after this splice — they become NaN holes in the VmRef.
-                            let boxed = Value::materialize_number_array(&a2);
-                            let result = arr_builtins::splice(
-                                &boxed,
-                                args.first().unwrap_or(&Value::Null),
-                                args.get(1),
-                                args.get(2..).unwrap_or(&[]),
-                            );
-                            // Sync the modified boxed Vec back into the original VmRef.
-                            if let Value::Array(boxed_vmref) = &boxed {
-                                let mut packed = a2.borrow_mut();
-                                *packed = boxed_vmref
-                                    .borrow()
-                                    .iter()
-                                    .map(|v| match v {
-                                        Value::Number(n) => *n,
-                                        _ => f64::NAN,
-                                    })
-                                    .collect();
+                        let inserts = args.get(2..).unwrap_or(&[]);
+                        let all_num = inserts.iter().all(|v| matches!(v, Value::Number(_)));
+                        let mut b = a2.borrow_mut();
+                        let len = b.len() as i64;
+                        let start = match args.first() {
+                            Some(Value::Number(n)) => {
+                                let sn = *n as i64;
+                                if sn < 0 { (len + sn).max(0) as usize } else { (sn as usize).min(b.len()) }
                             }
-                            result
-                        } else {
-                            let mut arr = a2.borrow_mut();
-                            let len = arr.len() as i64;
-                            let start = match args.first() {
-                                Some(Value::Number(n)) => {
-                                    let s = *n as i64;
-                                    if s < 0 {
-                                        (len + s).max(0) as usize
-                                    } else {
-                                        (s as usize).min(arr.len())
-                                    }
-                                }
-                                _ => 0,
-                            };
-                            let del = match args.get(1) {
-                                Some(Value::Number(n)) => (*n as i64).max(0) as usize,
-                                _ => arr.len().saturating_sub(start),
-                            };
-                            let del = del.min(arr.len().saturating_sub(start));
-                            let new_nums: Vec<f64> = args
-                                .get(2..)
-                                .unwrap_or(&[])
+                            _ => 0,
+                        };
+                        let del = match args.get(1) {
+                            Some(Value::Number(n)) => (*n as i64).max(0) as usize,
+                            _ => b.len().saturating_sub(start),
+                        };
+                        let del = del.min(b.len().saturating_sub(start));
+                        if all_num && b.as_packed().is_some() {
+                            // Stay packed: splice the Vec<f64>, return the removed f64s.
+                            let nums = b.as_packed_mut().unwrap();
+                            let new_nums: Vec<f64> = inserts
                                 .iter()
-                                .map(|v| match v {
-                                    Value::Number(n) => *n,
-                                    _ => f64::NAN,
-                                })
+                                .map(|v| if let Value::Number(n) = v { *n } else { f64::NAN })
                                 .collect();
-                            let removed: Vec<f64> =
-                                arr.splice(start..start + del, new_nums).collect();
+                            let removed: Vec<f64> = nums.splice(start..start + del, new_nums).collect();
                             Value::number_array(removed)
+                        } else {
+                            // #506: non-numeric inserts (or already deopted) — upgrade in place and
+                            // splice the boxed Vec. The array genuinely holds the inserted values and
+                            // the removed elements are correct (no NaN loss).
+                            let boxed = b.deopt();
+                            let removed: Vec<Value> =
+                                boxed.splice(start..start + del, inserts.iter().cloned()).collect();
+                            Value::Array(VmRef::new(removed))
                         }
                     })
                 }
                 "sort" => make_native_fn(move |args: &[Value]| {
-                    let arr_val = Value::NumberArray(a_clone.clone());
                     let cmp = args.first();
                     if let Some(Value::Function(_)) = cmp {
                         // Comparator sort: materialise first (comparator may return non-numeric).
                         let boxed = Value::materialize_number_array(&a_clone);
                         arr_builtins::sort_with_comparator(&boxed, cmp.unwrap())
                     } else {
-                        arr_builtins::sort_numeric_asc(&arr_val)
+                        // JS default `sort()` is LEXICOGRAPHIC — String(element), NOT numeric — so
+                        // `[10, 9, 100].sort()` is `[10, 100, 9]`. The boxed path already does this
+                        // (arr_builtins::sort_default); match it on the packed vec by comparing each
+                        // number's display string. (Pre-existing packed bug: it sorted numerically.)
+                        let mut b = a_clone.borrow_mut();
+                        match b.as_packed_mut() {
+                            Some(nums) => nums.sort_by(|x, y| {
+                                Value::Number(*x)
+                                    .to_display_string()
+                                    .cmp(&Value::Number(*y).to_display_string())
+                            }),
+                            None => b.deopt().sort_by(|x, y| {
+                                x.to_display_string().cmp(&y.to_display_string())
+                            }),
+                        }
+                        drop(b);
+                        Value::NumberArray(a_clone.clone())
                     }
                 }),
                 _ => {
@@ -4585,7 +4587,11 @@ fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
             if key.as_ref() == "length" {
                 let new_len = array_length_arg(&val)?;
                 // NaN is the packed-array hole marker (read back as Null), matching get_index.
-                a.borrow_mut().resize(new_len, f64::NAN);
+                let mut b = a.borrow_mut();
+                match b.as_packed_mut() {
+                    Some(nums) => nums.resize(new_len, f64::NAN),
+                    None => b.deopt().resize(new_len, Value::Null),
+                }
                 return Ok(());
             }
             Err(format!("Cannot set property of {}", obj.type_name()))
@@ -4620,12 +4626,9 @@ fn get_index(obj: &Value, idx: &Value) -> Result<Value, String> {
             // NaN is used as the hole marker (sparse-array positions); reads return Null.
             Ok(a.borrow()
                 .get(i)
-                .map(|&n| {
-                    if n.is_nan() {
-                        Value::Null
-                    } else {
-                        Value::Number(n)
-                    }
+                .map(|v| match v {
+                    Value::Number(n) if n.is_nan() => Value::Null,
+                    other => other,
                 })
                 .unwrap_or(Value::Null))
         }
@@ -4723,9 +4726,11 @@ fn delete_index(obj: &Value, key: &Value) {
                 let n = *n;
                 if n >= 0.0 && n.fract() == 0.0 {
                     let i = n as usize;
-                    let mut arr = a.borrow_mut();
-                    if i < arr.len() {
-                        arr[i] = f64::NAN;
+                    let mut b = a.borrow_mut();
+                    if i < b.len() {
+                        // Deopt so the hole is a real Null (matches the boxed arm exactly, and keeps
+                        // a genuinely-stored NaN element distinct from a deleted slot).
+                        b.deopt()[i] = Value::Null;
                     }
                 }
             }
@@ -4757,27 +4762,23 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
             // a sentinel error — the caller (SetIndex opcode) does NOT handle deopt.
             // Instead we only do in-bounds-or-next-element numeric assignments here;
             // anything that creates holes (i > len) or sets a non-number is unsupported.
-            match val {
-                Value::Number(n) => {
-                    let mut arr = a.borrow_mut();
-                    // Extend with NaN "holes" if needed (NaN = sparse hole; read back as Null).
-                    while arr.len() <= i {
-                        arr.push(f64::NAN);
+            let mut b = a.borrow_mut();
+            match (b.as_packed_mut(), &val) {
+                // Numeric assignment stays packed — NaN-extend to a sparse hole if past the end.
+                (Some(nums), Value::Number(n)) => {
+                    while nums.len() <= i {
+                        nums.push(f64::NAN);
                     }
-                    arr[i] = n;
+                    nums[i] = *n;
                 }
-                // Non-numeric set: the Vec<f64> can't represent this type. Extend with NaN holes
-                // up to the index, then leave the slot as NaN (the value is lost). This is a
-                // known limitation of NumberArray; the uncommon mixed-type path should not produce
-                // a NumberArray in the first place. The caller will see the correct index reads for
-                // numeric elements and Null for the NaN holes.
+                // Non-numeric (or already deopted): upgrade in place and store the real Value —
+                // the array genuinely becomes heterogeneous, no data loss (#199 sound).
                 _ => {
-                    let mut arr = a.borrow_mut();
-                    while arr.len() <= i {
-                        arr.push(f64::NAN);
+                    let boxed = b.deopt();
+                    while boxed.len() <= i {
+                        boxed.push(Value::Null);
                     }
-                    // arr[i] is already NaN (hole); we can't store the non-numeric value — acceptable
-                    // for the experimental TISH_PACKED_ARRAYS path.
+                    boxed[i] = val;
                 }
             }
             Ok(())

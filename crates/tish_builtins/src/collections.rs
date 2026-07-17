@@ -226,7 +226,7 @@ fn same_value_zero(a: &Value, b: &Value) -> bool {
 fn iter_elements(v: &Value) -> Vec<Value> {
     match v {
         Value::Array(a) => a.borrow().iter().cloned().collect(),
-        Value::NumberArray(a) => a.borrow().iter().map(|n| Value::Number(*n)).collect(),
+        Value::NumberArray(a) => a.borrow().to_values(),
         _ => Vec::new(),
     }
 }

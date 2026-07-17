@@ -742,7 +742,9 @@ pub fn compile_with_native_modules_emit(
     g.has_native_ui_host = native_modules.iter().any(|m| {
         m.package_name == "tish-macos"
             || m.package_name == "tish-ios"
+            || m.crate_name == "tish_macos"
             || m.crate_name == "tishlang_macos"
+            || m.crate_name == "tish_ios"
             || m.crate_name == "tishlang_ios"
     });
     g.emit_program(&program)?;
@@ -5058,10 +5060,10 @@ impl Codegen {
                     // re-boxing each element to `Value::Number` for the loop body.
                     self.writeln("Value::NumberArray(ref _arr) => {");
                     self.indent += 1;
-                    self.writeln("for _v in _arr.borrow().iter() {");
+                    self.writeln("for _v in _arr.borrow().to_values() {");
                     self.indent += 1;
                     self.writeln(&format!(
-                        "let {} = Value::Number(*_v);",
+                        "let {} = _v;",
                         Self::escape_ident(name.as_ref())
                     ));
                     self.emit_statement(body)?;
@@ -5895,7 +5897,7 @@ impl Codegen {
                                 // `arr[oob]`→NaN) is unreachable for sound inputs but never panics.
                                 self.writeln(&format!(
                                     "let mut {}: Vec<f64> = match args.get({}) {{ \
-                                       Some(Value::NumberArray(a)) => a.borrow().clone(), \
+                                       Some(Value::NumberArray(a)) => a.borrow().to_values().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
                                        Some(Value::Array(arr)) => arr.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
                                        _ => Vec::new() }};",
                                     Self::escape_ident(tp.name.as_ref()),
@@ -15064,7 +15066,7 @@ impl Codegen {
 
     fn module_const_f64_array_as_value(static_name: &str) -> String {
         format!(
-            "Value::NumberArray(VmRef::new({}.iter().copied().collect::<Vec<f64>>()))",
+            "Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed({}.iter().copied().collect::<Vec<f64>>())))",
             static_name
         )
     }
@@ -22307,10 +22309,10 @@ impl Codegen {
                  if let Value::Number(_n) = _el {{ _accn {nat_op} *_n; }} else {{ _ok = false; break; }} }} }} \
                  if _ok {{ Value::Number(_accn) }} \
                  else {{ let mut _acc = _init0; for _el in _b.iter() {{ let _x = _el.clone(); _acc = {body}; }} _acc }} \
-                 }}, Value::NumberArray(ref _a) => {{ let _b = _a.borrow(); \
-                 if let Value::Number(_i0) = &_init0 {{ let mut _accn: f64 = *_i0; \
-                 for _n in _b.iter() {{ _accn {nat_op} *_n; }} Value::Number(_accn) }} \
-                 else {{ let mut _acc = _init0; for _n in _b.iter() {{ let _x = Value::Number(*_n); _acc = {body}; }} _acc }} \
+                 }}, Value::NumberArray(ref _a) => {{ let _vals = _a.borrow().to_values(); \
+                 if let (true, Value::Number(_i0)) = (_a.borrow().as_packed().is_some(), &_init0) {{ let mut _accn: f64 = *_i0; \
+                 for _v in &_vals {{ if let Value::Number(_n) = _v {{ _accn {nat_op} *_n; }} }} Value::Number(_accn) }} \
+                 else {{ let mut _acc = _init0; for _x in _vals {{ _acc = {body}; }} _acc }} \
                  }}, _ => _init0 }} }}",
                 init = initial,
                 obj = obj_expr,
@@ -22324,8 +22326,8 @@ impl Codegen {
             "{{ let mut _acc = {init}; let _arr = ({obj}).clone(); \
              match _arr {{ Value::Array(ref _a) => {{ for _el in _a.borrow().iter() {{ \
              let _x = _el.clone(); _acc = {body}; }} }} \
-             Value::NumberArray(ref _a) => {{ for _n in _a.borrow().iter() {{ \
-             let _x = Value::Number(*_n); _acc = {body}; }} }} _ => {{}} }} _acc }}",
+             Value::NumberArray(ref _a) => {{ for _x in _a.borrow().to_values() {{ \
+             _acc = {body}; }} }} _ => {{}} }} _acc }}",
             init = initial,
             obj = obj_expr,
             body = body_code
@@ -22818,7 +22820,7 @@ impl Codegen {
                     "let mut __out: Vec<f64> = Vec::new(); \
                      for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
                      let {p}: f64 = __f; __out.push({term}); }} \
-                     Value::NumberArray(VmRef::new(__out))",
+                     Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed(__out)))",
                     inner = inner, p = pesc, term = term
                 )
             }
@@ -22830,7 +22832,7 @@ impl Codegen {
                     "let mut __out: Vec<f64> = Vec::new(); \
                      for &__f0 in __na.iter() {{ let mut __f = __f0; {inner} \
                      let {p}: f64 = __f; if {pred} {{ __out.push({p}); }} }} \
-                     Value::NumberArray(VmRef::new(__out))",
+                     Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed(__out)))",
                     inner = inner, p = pesc, pred = pred
                 )
             }
