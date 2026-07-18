@@ -1,0 +1,12 @@
+// #437: calling a non-function / missing method throws a catchable TypeError on every backend
+// (interp == vm == native), and a program observing it sees the same shape as node. The exact
+// message wording is tish's own ("Call of non-function: <type>"); node uses the source expression,
+// so this asserts the node-safe invariants: name === "TypeError" and the message mentions "function".
+let missing_method = "none"
+let non_fn = "none"
+let o = {}
+try { o.missing() } catch (e) { missing_method = e.name + "/" + e.message.includes("function") }
+let n = 5
+try { n() } catch (e) { non_fn = e.name + "/" + e.message.includes("function") }
+console.log(missing_method)
+console.log(non_fn)

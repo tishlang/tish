@@ -1175,15 +1175,15 @@ pub fn value_call(callee: &Value, args: &[Value]) -> Value {
                 return value_call(&inner, args);
             }
             crate::set_pending_throw(crate::not_a_function_error(format!(
-                "{} is not a function",
-                callee.to_display_string()
+                "Call of non-function: {}",
+                callee.type_name()
             )));
             Value::Null
         }
         _ => {
             crate::set_pending_throw(crate::not_a_function_error(format!(
-                "{} is not a function",
-                callee.to_display_string()
+                "Call of non-function: {}",
+                callee.type_name()
             )));
             Value::Null
         }
