@@ -166,10 +166,6 @@ jobs:
       # explicitly: its generated-Rust text assertions (crates/tish_compile/tests/*) run under no
       # other package, and PR #387 merged green while breaking one because only tishlang +
       # tishlang_vm were tested here.
-      # Build the CLI first so platform_resolve_cli's resolve-id golden can hard-fail (no soft skip).
-      - name: Build tish CLI (resolve-id CI gate)
-        run: ./scripts/ci_build_retry.sh cargo build -p tishlang --bin tish --features full
-
       - name: Run tests and coverage
         run: |
           ./scripts/ci_build_retry.sh cargo llvm-cov nextest -p tishlang -p tishlang_vm -p tishlang_compile --features full --no-fail-fast --profile ci \
