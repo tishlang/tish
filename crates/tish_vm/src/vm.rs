@@ -1678,19 +1678,27 @@ impl tishlang_core::Callable for VmClosure {
             native_modules: self.native_modules.clone(),
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let result = {
-            stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
-                vm.run_chunk(self.chunk.as_ref(), &self.chunk.nested, args, false)
-                    .unwrap_or(Value::Null)
-            })
-        };
+        let run = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+            vm.run_chunk(self.chunk.as_ref(), &self.chunk.nested, args, false)
+        });
         #[cfg(target_arch = "wasm32")]
-        let result = {
-            vm.run_chunk(&self.chunk, &self.chunk.nested, args, false)
-                .unwrap_or(Value::Null)
-        };
+        let run = vm.run_chunk(&self.chunk, &self.chunk.nested, args, false);
         tishlang_core::dec_call_depth();
-        result
+        match run {
+            Ok(v) => v,
+            // A catchable throw is already parked in the pending slot; the caller's
+            // take_pending_throw() surfaces it, so just yield Null here (issue #60).
+            Err(ref e) if e == PENDING_THROW_SENTINEL || tishlang_core::has_pending_throw() => {
+                Value::Null
+            }
+            // A plain runtime error inside the body (Undefined variable, type error, bad index,
+            // call-of-non-function, …) must NOT vanish to null — park it as a catchable error so the
+            // caller propagates it, matching the interpreter and top-level VM.
+            Err(e) => {
+                set_pending_throw(construct_builtin::error_object("Error", &e));
+                Value::Null
+            }
+        }
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -4904,6 +4912,64 @@ mod recursion_limit_tests_381 {
         assert!(
             surfaced,
             "uncaught JIT deep recursion must surface as a RangeError, not abort"
+        );
+    }
+}
+
+#[cfg(test)]
+mod undeclared_var_in_fn_tests {
+    use tishlang_core::Value;
+
+    fn run_src(src: &str) -> Result<Value, String> {
+        let program = tishlang_parser::parse(src).expect("parse");
+        let chunk = tishlang_bytecode::compile(&program).expect("compile");
+        super::run(&chunk)
+    }
+
+    // A free/undeclared identifier read INSIDE a called function must surface as an error, not be
+    // swallowed to null (regression: closure calls used to `run_chunk(..).unwrap_or(Value::Null)`,
+    // so any error in a callee body vanished — the VM returned null where the interpreter throws).
+    #[test]
+    fn undeclared_read_in_fn_errors_not_null() {
+        let out = run_src("fn f() { return zzznotdeclared }\nf()");
+        assert!(
+            out.is_err(),
+            "undeclared read in a function body must error, got: {out:?}"
+        );
+        assert!(
+            out.as_ref().unwrap_err().contains("zzznotdeclared"),
+            "error must name the missing variable: {out:?}"
+        );
+    }
+
+    // `undefined` is just a specific undeclared identifier — same rejection, since tish has no
+    // `undefined` value.
+    #[test]
+    fn undefined_ident_in_fn_errors_not_null() {
+        let out = run_src("fn f() { return undefined }\nf()");
+        assert!(
+            out.is_err() && out.as_ref().unwrap_err().contains("undefined"),
+            "free `undefined` in a function body must error: {out:?}"
+        );
+    }
+
+    // The propagated error is catchable, matching the interpreter.
+    // The propagated error is catchable, matching the interpreter (issue #437 bucket-A).
+    #[test]
+    fn undeclared_read_in_fn_is_catchable() {
+        // If the callee error weren't catchable it would propagate as an Err from run_src; a caught
+        // throw lets the program complete normally (Ok). An uncaught baseline (below) confirms the
+        // try/catch is what recovers it, not that the error silently vanished.
+        let caught = run_src(
+            "fn f() { return zzz }\n\
+             try { f() } catch (e) { }\n\
+             1",
+        );
+        assert!(caught.is_ok(), "callee error must be catchable: {caught:?}");
+        let uncaught = run_src("fn f() { return zzz }\nf()");
+        assert!(
+            uncaught.is_err(),
+            "without a catch the same error must propagate, not vanish: {uncaught:?}"
         );
     }
 }
