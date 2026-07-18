@@ -451,19 +451,29 @@ fn module_source(can: &Path, u: &Url, open_docs: &HashMap<Url, String>) -> Optio
     }
 }
 
-fn resolve_relative_tish(
-    from_dir: &Path,
-    from_s: &str,
-    imported: &str,
-    open_docs: &HashMap<Url, String>,
-) -> Option<Location> {
+fn resolve_relative_module_path(from_dir: &Path, from_s: &str) -> Option<std::path::PathBuf> {
+    let _ = tishlang_compile::apply_resolve_env(None, None);
+    let ctx = tishlang_compile::resolve_context();
+    if let Some(p) = tishlang_compile::resolve_with_platform(from_s, from_dir, ctx) {
+        return Some(p);
+    }
+    // Fallback: legacy exact `.tish` join (no cascade).
     let target = from_dir.join(from_s.trim_start_matches("./"));
     let target = if target.extension().is_none() {
         target.with_extension("tish")
     } else {
         target
     };
-    let can = target.canonicalize().ok()?;
+    target.canonicalize().ok()
+}
+
+fn resolve_relative_tish(
+    from_dir: &Path,
+    from_s: &str,
+    imported: &str,
+    open_docs: &HashMap<Url, String>,
+) -> Option<Location> {
+    let can = resolve_relative_module_path(from_dir, from_s)?;
     let u = Url::from_file_path(&can).ok()?;
     let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;
@@ -476,13 +486,7 @@ fn resolve_relative_tish_default(
     from_s: &str,
     open_docs: &HashMap<Url, String>,
 ) -> Option<Location> {
-    let target = from_dir.join(from_s.trim_start_matches("./"));
-    let target = if target.extension().is_none() {
-        target.with_extension("tish")
-    } else {
-        target
-    };
-    let can = target.canonicalize().ok()?;
+    let can = resolve_relative_module_path(from_dir, from_s)?;
     let u = Url::from_file_path(&can).ok()?;
     let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;

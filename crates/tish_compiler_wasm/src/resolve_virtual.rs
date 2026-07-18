@@ -76,7 +76,8 @@ fn parent_dir(path: &str) -> &str {
     }
 }
 
-/// Resolve import spec to a key for the files map. Tries .tish extension if missing.
+/// Resolve import spec to a key for the files map.
+/// Uses the same platform/surface cascade as `tish resolve-id` / disk resolve (`TISH_PLATFORM` / `TISH_SURFACE`).
 fn resolve_import_to_key(
     spec: &str,
     from_dir: &str,
@@ -86,14 +87,29 @@ fn resolve_import_to_key(
     if files.contains_key(&normalized) {
         return Ok(normalized);
     }
-    if !normalized.ends_with(".tish") && !normalized.contains('.') {
-        let with_ext = format!("{}.tish", normalized);
-        if files.contains_key(&with_ext) {
-            return Ok(with_ext);
+
+    let stem = if normalized.ends_with(".tish") {
+        &normalized[..normalized.len() - 5]
+    } else if !normalized.contains('.') {
+        normalized.as_str()
+    } else {
+        return Err(format!(
+            "Cannot resolve import '{}' from {}: file not in virtual file map",
+            spec, from_dir
+        ));
+    };
+
+    // Match CLI: honor env when set (playground can set TISH_PLATFORM / TISH_SURFACE).
+    let _ = tishlang_compile::apply_resolve_env(None, None);
+    let ctx = tishlang_compile::resolve_context();
+    for key in tishlang_compile::platform_virtual_keys(stem, ctx) {
+        if files.contains_key(&key) {
+            return Ok(key);
         }
     }
+
     Err(format!(
-        "Cannot resolve import '{}' from {}: file not in virtual file map",
+        "Cannot resolve import '{}' from {}: file not in virtual file map (platform cascade)",
         spec, from_dir
     ))
 }
