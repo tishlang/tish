@@ -29,3 +29,5 @@ walkdir = "2"
 # implements `Service` against (0.4), or the trait bound on `.call()` won't be satisfied. `util`
 # brings in `ServiceExt::ready`.
 tower = { version = "0.4", features = ["util"] }
+# Temp dirs for the platform-cascade import-resolution test.
+tempfile = "3"

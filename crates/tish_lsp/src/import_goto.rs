@@ -451,19 +451,29 @@ fn module_source(can: &Path, u: &Url, open_docs: &HashMap<Url, String>) -> Optio
     }
 }
 
-fn resolve_relative_tish(
-    from_dir: &Path,
-    from_s: &str,
-    imported: &str,
-    open_docs: &HashMap<Url, String>,
-) -> Option<Location> {
+fn resolve_relative_module_path(from_dir: &Path, from_s: &str) -> Option<std::path::PathBuf> {
+    let _ = tishlang_compile::apply_resolve_env(None, None);
+    let ctx = tishlang_compile::resolve_context();
+    if let Some(p) = tishlang_compile::resolve_with_platform(from_s, from_dir, ctx) {
+        return Some(p);
+    }
+    // Fallback: legacy exact `.tish` join (no cascade).
     let target = from_dir.join(from_s.trim_start_matches("./"));
     let target = if target.extension().is_none() {
         target.with_extension("tish")
     } else {
         target
     };
-    let can = target.canonicalize().ok()?;
+    target.canonicalize().ok()
+}
+
+fn resolve_relative_tish(
+    from_dir: &Path,
+    from_s: &str,
+    imported: &str,
+    open_docs: &HashMap<Url, String>,
+) -> Option<Location> {
+    let can = resolve_relative_module_path(from_dir, from_s)?;
     let u = Url::from_file_path(&can).ok()?;
     let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;
@@ -476,13 +486,7 @@ fn resolve_relative_tish_default(
     from_s: &str,
     open_docs: &HashMap<Url, String>,
 ) -> Option<Location> {
-    let target = from_dir.join(from_s.trim_start_matches("./"));
-    let target = if target.extension().is_none() {
-        target.with_extension("tish")
-    } else {
-        target
-    };
-    let can = target.canonicalize().ok()?;
+    let can = resolve_relative_module_path(from_dir, from_s)?;
     let u = Url::from_file_path(&can).ok()?;
     let src = module_source(&can, &u, open_docs)?;
     let prog = tishlang_parser::parse(&src).ok()?;
@@ -627,5 +631,28 @@ mod receiver_member_tests {
     fn pragma_key_named_import() {
         let k = super::pragma_key_for_native_member(Some("window"), &[Arc::from("innerHeight")]);
         assert_eq!(k.as_deref(), Some("window.innerHeight"));
+    }
+
+    // Goto-def resolves relative imports through the platform/surface cascade (same rules as
+    // `tish resolve-id` / disk resolve), falling back to the bare `.tish` when no context is set.
+    #[test]
+    fn resolve_relative_module_path_honors_platform_cascade() {
+        use tishlang_compile::{set_resolve_context, Platform, ResolveContext, Surface};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Button.tish"), "export fn Button() {}").unwrap();
+        std::fs::write(root.join("Button.macos.tish"), "export fn Button() {}").unwrap();
+
+        set_resolve_context(ResolveContext {
+            platform: Platform::Macos,
+            surface: Surface::Native,
+        });
+        let hit = super::resolve_relative_module_path(root, "./Button").expect("macos resolve");
+        assert!(hit.ends_with("Button.macos.tish"));
+
+        // No platform context → legacy bare `.tish`.
+        set_resolve_context(ResolveContext::default());
+        let base = super::resolve_relative_module_path(root, "./Button").expect("base resolve");
+        assert!(base.ends_with("Button.tish"));
     }
 }

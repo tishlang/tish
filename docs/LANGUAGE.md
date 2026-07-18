@@ -200,8 +200,9 @@ Relative imports such as `import { Button } from "./Button"` resolve to the firs
 
 | Token | Meaning |
 |-------|---------|
-| `ios` / `macos` / `windows` / `linux` | OS-native |
+| `ios` / `android` / `macos` / `windows` / `linux` | OS-native |
 | `desktop` | Family: macos \| windows \| linux |
+| `mobile` | Family: ios \| android |
 | `native` | Any native surface (not web / not webview) |
 | `webview` | DOM UI inside a shell webview (broker bridge) |
 | `web` | Pure browser (no native / Tauri) |
@@ -211,7 +212,11 @@ Examples for `./Button`:
 
 - `--platform macos --surface native` → `Button.macos.tish` → `Button.desktop.tish` → `Button.native.tish` → `Button.tish`
 - `--platform macos --surface webview` → `Button.webview.tish` → `Button.web.tish` → `Button.desktop.tish` → `Button.tish`
+- `--platform ios --surface native` → `Button.ios.tish` → `Button.mobile.tish` → `Button.native.tish` → `Button.tish`
+- `--platform android --surface native` → `Button.android.tish` → `Button.mobile.tish` → `Button.native.tish` → `Button.tish`
 - `--platform web` or `--surface web` → `Button.web.tish` → `Button.tish`
+
+Cross-platform component/library status: [tish-desktop docs/PARITY.md](../../tish-desktop/docs/PARITY.md).
 
 Vite apps should pass `platform` / `surface` into `@tishlang/vite-plugin-tish` (or set the env vars) so `resolveId` calls `tish resolve-id` with the same cascade.
 

@@ -46,9 +46,9 @@ pub use codegen::{
     compile_with_project_root,
 };
 pub use platform_resolve::{
-    apply_resolve_env, parse_platform, parse_surface, platform_suffixes, resolve_context,
-    resolve_id_public, resolve_with_platform, set_resolve_context, Platform, ResolveContext,
-    Surface,
+    apply_resolve_env, parse_platform, parse_surface, platform_suffixes, platform_virtual_keys,
+    resolve_context, resolve_id_public, resolve_with_platform, set_resolve_context, Platform,
+    ResolveContext, Surface,
 };
 pub use resolve::{
     cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, ensure_tish_canvas_module,

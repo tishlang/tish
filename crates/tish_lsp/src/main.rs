@@ -344,6 +344,8 @@ impl LanguageServer for Backend {
         }
 
         let mut src_root: Option<PathBuf> = None;
+        let mut init_platform: Option<String> = None;
+        let mut init_surface: Option<String> = None;
         if let Some(opts) = &params.initialization_options {
             if let Some(s) = opts
                 .get("tishlangSourceRoot")
@@ -354,7 +356,23 @@ impl LanguageServer for Backend {
                     src_root = Some(PathBuf::from(s));
                 }
             }
+            // Platform file cascade for imports (same as `tish resolve-id` / Vite).
+            // settings.json: "tish.platform" / "tish.surface", or env TISH_PLATFORM / TISH_SURFACE.
+            if let Some(p) = opts.get("platform").and_then(|v| v.as_str()) {
+                init_platform = Some(p.to_string());
+            } else if let Some(p) = opts.get("tishPlatform").and_then(|v| v.as_str()) {
+                init_platform = Some(p.to_string());
+            }
+            if let Some(s) = opts.get("surface").and_then(|v| v.as_str()) {
+                init_surface = Some(s.to_string());
+            } else if let Some(s) = opts.get("tishSurface").and_then(|v| v.as_str()) {
+                init_surface = Some(s.to_string());
+            }
         }
+        let _ = tishlang_compile::apply_resolve_env(
+            init_platform.as_deref(),
+            init_surface.as_deref(),
+        );
         if src_root.is_none() {
             if let Ok(s) = std::env::var("TISHLANG_SOURCE_ROOT") {
                 let t = s.trim();

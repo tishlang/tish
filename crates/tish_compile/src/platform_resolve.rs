@@ -12,6 +12,7 @@ pub enum Platform {
     Unknown,
     Macos,
     Ios,
+    Android,
     Windows,
     Linux,
     Web,
@@ -49,6 +50,7 @@ pub fn parse_platform(s: &str) -> Option<Platform> {
     match s.trim().to_ascii_lowercase().as_str() {
         "macos" | "darwin" | "osx" => Some(Platform::Macos),
         "ios" => Some(Platform::Ios),
+        "android" => Some(Platform::Android),
         "windows" | "win32" | "win" => Some(Platform::Windows),
         "linux" => Some(Platform::Linux),
         "web" => Some(Platform::Web),
@@ -104,7 +106,10 @@ pub fn platform_suffixes(ctx: ResolveContext) -> Vec<&'static str> {
             out.extend(["macos", "desktop", "native"]);
         }
         (Platform::Ios, Surface::Native) | (Platform::Ios, Surface::Unknown) => {
-            out.extend(["ios", "native"]);
+            out.extend(["ios", "mobile", "native"]);
+        }
+        (Platform::Android, Surface::Native) | (Platform::Android, Surface::Unknown) => {
+            out.extend(["android", "mobile", "native"]);
         }
         (Platform::Windows, Surface::Native) | (Platform::Windows, Surface::Unknown) => {
             out.extend(["windows", "desktop", "native"]);
@@ -118,12 +123,37 @@ pub fn platform_suffixes(ctx: ResolveContext) -> Vec<&'static str> {
         | (Platform::Unknown, Surface::Webview) => {
             out.extend(["webview", "web", "desktop"]);
         }
-        (Platform::Ios, Surface::Webview) => {
-            out.extend(["webview", "web"]);
+        (Platform::Ios, Surface::Webview) | (Platform::Android, Surface::Webview) => {
+            out.extend(["webview", "web", "mobile"]);
         }
         _ => {}
     }
     out
+}
+
+/// After normalizing a virtual path to a stem (no `.tish`), list cascade keys to probe.
+/// `normalized_stem` is e.g. `app/Button` (no extension).
+pub fn platform_virtual_keys(normalized_stem: &str, ctx: ResolveContext) -> Vec<String> {
+    let parent = Path::new(normalized_stem)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| !p.is_empty() && p != ".");
+    let file_stem = Path::new(normalized_stem)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("index");
+    let mut keys = Vec::new();
+    for suffix in platform_suffixes(ctx) {
+        keys.push(match &parent {
+            Some(p) => format!("{p}/{file_stem}.{suffix}.tish"),
+            None => format!("{file_stem}.{suffix}.tish"),
+        });
+    }
+    keys.push(match &parent {
+        Some(p) => format!("{p}/{file_stem}.tish"),
+        None => format!("{file_stem}.tish"),
+    });
+    keys
 }
 
 /// Resolve a relative import specifier to an on-disk path, trying platform variants.
@@ -268,5 +298,64 @@ mod tests {
         };
         let p = resolve_with_platform("./Button.tish", root, ctx).unwrap();
         assert!(p.ends_with("Button.web.tish"));
+    }
+
+    #[test]
+    fn android_native_prefers_android_then_mobile() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Button.mobile.tish"), "").unwrap();
+        fs::write(root.join("Button.android.tish"), "").unwrap();
+        fs::write(root.join("Button.tish"), "").unwrap();
+        let ctx = ResolveContext {
+            platform: Platform::Android,
+            surface: Surface::Native,
+        };
+        let p = resolve_with_platform("./Button", root, ctx).unwrap();
+        assert!(p.ends_with("Button.android.tish"));
+    }
+
+    #[test]
+    fn ios_native_falls_back_to_mobile() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Button.mobile.tish"), "").unwrap();
+        fs::write(root.join("Button.tish"), "").unwrap();
+        let ctx = ResolveContext {
+            platform: Platform::Ios,
+            surface: Surface::Native,
+        };
+        let p = resolve_with_platform("./Button", root, ctx).unwrap();
+        assert!(p.ends_with("Button.mobile.tish"));
+    }
+
+    #[test]
+    fn virtual_keys_cascade_with_and_without_parent() {
+        // nested path keeps the parent dir; macos/native → macos, desktop, native, then base
+        let macos = platform_virtual_keys(
+            "app/Button",
+            ResolveContext {
+                platform: Platform::Macos,
+                surface: Surface::Native,
+            },
+        );
+        assert_eq!(
+            macos,
+            vec![
+                "app/Button.macos.tish",
+                "app/Button.desktop.tish",
+                "app/Button.native.tish",
+                "app/Button.tish",
+            ]
+        );
+        // bare stem (no parent) + web surface → web, then base
+        let web = platform_virtual_keys(
+            "Button",
+            ResolveContext {
+                platform: Platform::Web,
+                surface: Surface::Web,
+            },
+        );
+        assert_eq!(web, vec!["Button.web.tish", "Button.tish"]);
     }
 }
