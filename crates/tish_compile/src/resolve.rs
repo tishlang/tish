@@ -709,6 +709,13 @@ fn find_package_dir(package_name: &str, project_root: &Path) -> Result<PathBuf, 
         {
             return Ok(node_mod);
         }
+        let apple_crate = search.join("tish-apple").join("crates").join(package_name);
+        if apple_crate.join("package.json").exists()
+            && read_package_name(&apple_crate.join("package.json"))
+                == Some(package_name.to_string())
+        {
+            return Ok(apple_crate);
+        }
         let sibling = search.join(package_name);
         if sibling.join("package.json").exists()
             && read_package_name(&sibling.join("package.json")) == Some(package_name.to_string())
@@ -1091,8 +1098,12 @@ fn resolve_import_path(
             spec, spec
         ));
     }
+    let ctx = crate::platform_resolve::resolve_context();
+    if let Some(path) = crate::platform_resolve::resolve_with_platform(spec, from_dir, ctx) {
+        return Ok(path);
+    }
     let base = from_dir.join(spec);
-    // Try with .tish extension if the path has no extension
+    // Fallback: legacy single .tish probe when platform context is empty / file missing
     let path = if base.extension().is_none() {
         let with_ext = base.with_extension("tish");
         if with_ext.exists() {
@@ -2088,5 +2099,36 @@ mod cargo_spec_tests {
             cargo_export_fn_name("cargo:my-crate"),
             "cargo_native_my_crate_object"
         );
+    }
+}
+
+#[cfg(test)]
+mod find_package_dir_tests {
+    use super::find_package_dir;
+
+    #[test]
+    fn prefers_tish_apple_crates_over_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // sibling decoy
+        let sibling = root.join("tish-macos");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(
+            sibling.join("package.json"),
+            r#"{"name":"tish-macos","tish":{"module":true,"crate":"tishlang_macos","export":"macos_object"}}"#,
+        )
+        .unwrap();
+        // preferred apple path
+        let apple = root.join("tish-apple").join("crates").join("tish-macos");
+        std::fs::create_dir_all(&apple).unwrap();
+        std::fs::write(
+            apple.join("package.json"),
+            r#"{"name":"tish-macos","tish":{"module":true,"crate":"tish-macos","export":"macos_object"}}"#,
+        )
+        .unwrap();
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let hit = find_package_dir("tish-macos", &project).expect("resolve");
+        assert_eq!(hit.canonicalize().unwrap(), apple.canonicalize().unwrap());
     }
 }

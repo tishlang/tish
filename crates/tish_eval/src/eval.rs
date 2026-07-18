@@ -1190,6 +1190,10 @@ impl Evaluator {
                 from
             )));
         }
+        let ctx = tishlang_compile::resolve_context();
+        if let Some(path) = tishlang_compile::resolve_with_platform(from, dir, ctx) {
+            return Ok(path);
+        }
         let base = dir.join(from);
         let path = if base.extension().is_none() {
             let with_ext = base.with_extension("tish");
