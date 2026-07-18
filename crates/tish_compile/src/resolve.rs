@@ -978,7 +978,13 @@ fn load_module_recursive(
 /// - cargo:… (Cargo `rustDependencies` + generated wrapper; Rust native backend)
 /// - ffi:… (a C-ABI cdylib loaded via `tish_ffi::load_module` — portable across backends)
 ///
-/// Scoped npm packages (`@scope/pkg`) are merged as Tish source unless imported via `tish:…`.
+/// Scoped npm packages (`@scope/pkg`) are **merged as Tish source** by default — they are NOT
+/// native imports and fall through to the module-merge resolver (`exports.tish` / `tish.module`
+/// path / `tish.source` / `index.tish`). A scoped package is only treated as a native Rust crate
+/// when it opts in via `tish.crate` / `tish.rustDependencies` in its package.json (the tish-apple
+/// crates). This split is why `@scope` is intentionally absent below (#38): matching the ecosystem's
+/// resolution for `import … from "@scope/pkg"` is interop, and the native-vs-merged axis is the one
+/// piece tish adds on top, keyed off the native markers rather than mere presence of `tish.module`.
 pub fn is_native_import(spec: &str) -> bool {
     // A leading `node:` (node:fs, node:fs/promises) resolves the same as the bare form.
     let spec = spec.strip_prefix("node:").unwrap_or(spec);
