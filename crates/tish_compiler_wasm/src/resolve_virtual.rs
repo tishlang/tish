@@ -600,4 +600,38 @@ mod tests {
             "import of re-exported `plus` should bind to dep's `add`"
         );
     }
+
+    #[test]
+    fn resolve_virtual_honors_platform_cascade() {
+        use tishlang_compile::{set_resolve_context, Platform, ResolveContext, Surface};
+        set_resolve_context(ResolveContext {
+            platform: Platform::Macos,
+            surface: Surface::Native,
+        });
+        let mut files = HashMap::new();
+        files.insert(
+            "Button.tish".to_string(),
+            "export fn Button() {}".to_string(),
+        );
+        files.insert(
+            "Button.macos.tish".to_string(),
+            "export fn Button() {}".to_string(),
+        );
+        files.insert(
+            "main.tish".to_string(),
+            "import { Button } from \"./Button\"\nButton()".to_string(),
+        );
+        let modules = resolve_virtual("main.tish", &files).unwrap();
+        // macos/native → the .macos variant wins; the base is never loaded.
+        assert!(
+            modules.iter().any(|m| m.path == "Button.macos.tish"),
+            "platform cascade should resolve Button.macos.tish"
+        );
+        assert!(
+            !modules.iter().any(|m| m.path == "Button.tish"),
+            "base Button.tish must not resolve when the macos variant exists"
+        );
+        // Reset the process-wide context so it doesn't leak into sibling tests.
+        set_resolve_context(ResolveContext::default());
+    }
 }

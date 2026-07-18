@@ -632,4 +632,27 @@ mod receiver_member_tests {
         let k = super::pragma_key_for_native_member(Some("window"), &[Arc::from("innerHeight")]);
         assert_eq!(k.as_deref(), Some("window.innerHeight"));
     }
+
+    // Goto-def resolves relative imports through the platform/surface cascade (same rules as
+    // `tish resolve-id` / disk resolve), falling back to the bare `.tish` when no context is set.
+    #[test]
+    fn resolve_relative_module_path_honors_platform_cascade() {
+        use tishlang_compile::{set_resolve_context, Platform, ResolveContext, Surface};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Button.tish"), "export fn Button() {}").unwrap();
+        std::fs::write(root.join("Button.macos.tish"), "export fn Button() {}").unwrap();
+
+        set_resolve_context(ResolveContext {
+            platform: Platform::Macos,
+            surface: Surface::Native,
+        });
+        let hit = super::resolve_relative_module_path(root, "./Button").expect("macos resolve");
+        assert!(hit.ends_with("Button.macos.tish"));
+
+        // No platform context → legacy bare `.tish`.
+        set_resolve_context(ResolveContext::default());
+        let base = super::resolve_relative_module_path(root, "./Button").expect("base resolve");
+        assert!(base.ends_with("Button.tish"));
+    }
 }

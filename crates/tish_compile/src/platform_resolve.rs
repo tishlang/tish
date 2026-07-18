@@ -328,4 +328,34 @@ mod tests {
         let p = resolve_with_platform("./Button", root, ctx).unwrap();
         assert!(p.ends_with("Button.mobile.tish"));
     }
+
+    #[test]
+    fn virtual_keys_cascade_with_and_without_parent() {
+        // nested path keeps the parent dir; macos/native → macos, desktop, native, then base
+        let macos = platform_virtual_keys(
+            "app/Button",
+            ResolveContext {
+                platform: Platform::Macos,
+                surface: Surface::Native,
+            },
+        );
+        assert_eq!(
+            macos,
+            vec![
+                "app/Button.macos.tish",
+                "app/Button.desktop.tish",
+                "app/Button.native.tish",
+                "app/Button.tish",
+            ]
+        );
+        // bare stem (no parent) + web surface → web, then base
+        let web = platform_virtual_keys(
+            "Button",
+            ResolveContext {
+                platform: Platform::Web,
+                surface: Surface::Web,
+            },
+        );
+        assert_eq!(web, vec!["Button.web.tish", "Button.tish"]);
+    }
 }
