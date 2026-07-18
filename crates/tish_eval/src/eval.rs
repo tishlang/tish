@@ -3916,7 +3916,23 @@ impl Evaluator {
                 if let Some(call) = o.borrow().strings.get("__call").cloned() {
                     return self.call_func(&call, args);
                 }
-                Err(EvalError::Error("Not a function".to_string()))
+                Err(EvalError::Throw(
+                    crate::natives::type_error_construct(&[Value::String(
+                        format!(
+                            "Call of non-function: {}",
+                            match f {
+                                Value::Number(_) => "number",
+                                Value::String(_) => "string",
+                                Value::Bool(_) => "boolean",
+                                Value::Null => "null",
+                                Value::Symbol(_) => "symbol",
+                                _ => "object",
+                            }
+                        )
+                        .into(),
+                    )])
+                    .unwrap_or(Value::Null),
+                ))
             }
             Value::Native(native_fn) => {
                 // #122: Node fs callback form — `readFile(path, (err, data) => …)`. The self-less
@@ -4158,7 +4174,23 @@ impl Evaluator {
                     }
                 }
             }
-            _ => Err(EvalError::Error("Not a function".to_string())),
+            _ => Err(EvalError::Throw(
+                    crate::natives::type_error_construct(&[Value::String(
+                        format!(
+                            "Call of non-function: {}",
+                            match f {
+                                Value::Number(_) => "number",
+                                Value::String(_) => "string",
+                                Value::Bool(_) => "boolean",
+                                Value::Null => "null",
+                                Value::Symbol(_) => "symbol",
+                                _ => "object",
+                            }
+                        )
+                        .into(),
+                    )])
+                    .unwrap_or(Value::Null),
+                )),
         }
     }
 
