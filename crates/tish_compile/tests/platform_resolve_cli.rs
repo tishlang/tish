@@ -67,13 +67,11 @@ fn cascade_orders_match_language_md() {
     assert!(remapped.ends_with("Button.macos.tish"));
 }
 
-/// Locate a `tish` binary that supports `resolve-id`. Returns `None` (the test soft-skips) when no
-/// binary is available. Crucially this does NOT force a separate `cargo build --bin tish`: under
-/// `cargo llvm-cov`, `integration_test::tish_bin()` prefers `target/debug/tish` if present, so a
-/// non-instrumented CLI built into that path would shadow the coverage-instrumented binary and wipe
-/// out the subprocess coverage of vm.rs/main.rs/resolve.rs. Instead we search the same places
-/// `tish_bin()` does — including the coverage-instrumented `llvm-cov-target` — so during the coverage
-/// run we find (and exercise) the instrumented binary.
+/// Locate a `tish` binary that supports `resolve-id`.
+///
+/// Does **not** shell out to `cargo build --bin tish` (under `cargo llvm-cov` that can shadow the
+/// instrumented CLI). Searches the same places as `integration_test::tish_bin()`, including
+/// `llvm-cov-target`. Callers must fail hard if this returns `None` — CI must not soft-skip.
 fn find_tish_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("TISH_PATH") {
         let pb = PathBuf::from(&p);
@@ -130,10 +128,12 @@ fn resolve_id_cli_matches_library() {
     )
     .unwrap();
 
-    let Some(tish) = find_tish_binary() else {
-        eprintln!("skip resolve_id_cli_matches_library: no tish binary available in this context");
-        return;
-    };
+    let tish = find_tish_binary().unwrap_or_else(|| {
+        panic!(
+            "tish binary with resolve-id required (set TISH_PATH or cargo build -p tishlang --bin tish). \
+             Soft-skip is forbidden — Vite and tish build must share resolve rules."
+        )
+    });
     let out = Command::new(&tish)
         .args([
             "resolve-id",
