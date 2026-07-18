@@ -13,3 +13,4 @@ exclude_paths:
   - '**/*.spec.ts'          # *.spec.ts
   - '**/*.tish.expected'    # expected-output fixtures
   - 'regression/**'         # regression harnesses/drivers (examples, downstream, dune-server) — CI tooling, not shipped code
+  - 'npm/*/index.js'        # npm distribution shims (vite-plugin, create-tish-app): thin ESM CLI/subprocess wrappers, `type:module`/Node>=22. Codacy's default ESLint ruleset (repo ESLint config is not applied) forbids modern ESM syntax (block-scoped vars, `??`, `null`) here — all false positives; the shims have their own package tests.

@@ -557,6 +557,12 @@ pub(crate) struct BuildArgs {
     pub crate_type: String,
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
+    /// Platform for RN-style module resolution (`macos`, `ios`, `windows`, `linux`, `web`).
+    #[arg(long, value_name = "NAME", help_heading = "Options")]
+    pub platform: Option<String>,
+    /// Surface for module resolution: `native`, `webview`, or `web` (also `TISH_SURFACE`).
+    #[arg(long, value_name = "NAME", help_heading = "Options")]
+    pub surface: Option<String>,
     /// For `--target js` project builds: emit `OUTPUT.js.map` and `//# sourceMappingURL=…` so JS/TS tools can jump to original `.tish` (implies `--no-optimize` for that build).
     #[arg(long, help_heading = "Options")]
     pub source_map: bool,
@@ -599,6 +605,12 @@ pub(crate) struct CompileModuleArgs {
     /// Project root for resolving bare specifiers / `node_modules` (defaults to the file's parent).
     #[arg(long, value_name = "DIR", help_heading = "Options")]
     pub project_root: Option<String>,
+    /// Platform for RN-style module resolution (`macos`, `ios`, `windows`, `linux`, `web`).
+    #[arg(long, value_name = "NAME", help_heading = "Options")]
+    pub platform: Option<String>,
+    /// Surface for module resolution: `native`, `webview`, or `web`.
+    #[arg(long, value_name = "NAME", help_heading = "Options")]
+    pub surface: Option<String>,
     /// Disable AST optimizations (forced on when a source map is emitted).
     #[arg(long, help_heading = "Options")]
     pub no_optimize: bool,
@@ -626,6 +638,22 @@ pub(crate) enum Commands {
     /// Compile a single `.tish` module to one ES module (for Vite dev / HMR); prints to stdout
     #[command(name = "compile-module")]
     CompileModule(CompileModuleArgs),
+    /// Resolve a relative `.tish` import with platform/surface cascade (for Vite / tooling)
+    #[command(name = "resolve-id")]
+    ResolveId {
+        /// Import specifier (must be relative, e.g. `./Button` or `./Button.tish`).
+        #[arg(required = true, value_name = "SOURCE", help_heading = "Arguments")]
+        source: String,
+        /// Absolute path of the importing file (directory used as resolve base).
+        #[arg(long, value_name = "FILE", help_heading = "Options")]
+        importer: Option<String>,
+        /// Platform token (`macos`, `ios`, `windows`, `linux`, `web`).
+        #[arg(long, value_name = "NAME", help_heading = "Options")]
+        platform: Option<String>,
+        /// Surface token (`native`, `webview`, `web`).
+        #[arg(long, value_name = "NAME", help_heading = "Options")]
+        surface: Option<String>,
+    },
     /// Parse and dump AST
     #[command(name = "dump-ast")]
     DumpAst {

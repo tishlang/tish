@@ -186,7 +186,34 @@ echo 'console.log(1)' | tish -      # same; `-` before clap (not a subcommand)
 tish build main.tish -o app
 tish build main.tish -o app --native-backend cranelift
 tish build main.tish -o app --target wasm | wasi | js
+tish build main.tish -o app --platform macos --surface native
+tish resolve-id ./Button --importer /app/App.tish --platform macos --surface webview
 ```
+
+`--platform` / `--surface` (also `TISH_PLATFORM` / `TISH_SURFACE`) select React Native–style platform files during import resolve. See **Platform module resolution** below. `--target` remains the **backend** (native / js / wasm / …), not the OS platform.
+
+---
+
+## Platform module resolution
+
+Relative imports such as `import { Button } from "./Button"` resolve to the first existing file in a platform/surface cascade (same rules in `tish build`, `compile-module`, and `tish resolve-id` for Vite):
+
+| Token | Meaning |
+|-------|---------|
+| `ios` / `macos` / `windows` / `linux` | OS-native |
+| `desktop` | Family: macos \| windows \| linux |
+| `native` | Any native surface (not web / not webview) |
+| `webview` | DOM UI inside a shell webview (broker bridge) |
+| `web` | Pure browser (no native / Tauri) |
+| *(none)* | Base `Name.tish` |
+
+Examples for `./Button`:
+
+- `--platform macos --surface native` → `Button.macos.tish` → `Button.desktop.tish` → `Button.native.tish` → `Button.tish`
+- `--platform macos --surface webview` → `Button.webview.tish` → `Button.web.tish` → `Button.desktop.tish` → `Button.tish`
+- `--platform web` or `--surface web` → `Button.web.tish` → `Button.tish`
+
+Vite apps should pass `platform` / `surface` into `@tishlang/vite-plugin-tish` (or set the env vars) so `resolveId` calls `tish resolve-id` with the same cascade.
 
 ---
 

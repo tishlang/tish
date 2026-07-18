@@ -5,6 +5,7 @@
 mod check;
 mod codegen;
 mod infer;
+mod platform_resolve;
 mod resolve;
 mod types;
 
@@ -43,6 +44,11 @@ pub use codegen::{
     compile, compile_project, compile_project_full, compile_project_full_emit,
     compile_with_features, compile_with_native_modules, compile_with_native_modules_emit,
     compile_with_project_root,
+};
+pub use platform_resolve::{
+    apply_resolve_env, parse_platform, parse_surface, platform_suffixes, resolve_context,
+    resolve_id_public, resolve_with_platform, set_resolve_context, Platform, ResolveContext,
+    Surface,
 };
 pub use resolve::{
     cargo_export_fn_name, compute_native_build_artifacts, detect_cycles, ensure_tish_canvas_module,

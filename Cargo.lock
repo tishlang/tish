@@ -3454,6 +3454,7 @@ dependencies = [
  "tiny_http",
  "tishlang_ast",
  "tishlang_builtins",
+ "tishlang_compile",
  "tishlang_core",
  "tishlang_parser",
  "tishlang_runtime",

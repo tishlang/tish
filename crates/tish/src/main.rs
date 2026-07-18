@@ -73,7 +73,8 @@ fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
 fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
-        const SUBCOMMANDS: &[&str] = &["run", "repl", "build", "compile-module", "dump-ast"];
+        const SUBCOMMANDS: &[&str] =
+            &["run", "repl", "build", "compile-module", "resolve-id", "dump-ast"];
         let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
@@ -126,6 +127,13 @@ fn main() {
             if let Some(mode) = &a.check {
                 std::env::set_var("TISH_CHECK", mode);
             }
+            if let Err(e) = tishlang_compile::apply_resolve_env(
+                a.platform.as_deref(),
+                a.surface.as_deref(),
+            ) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
             build_file(
                 &a.file,
                 &a.output,
@@ -140,7 +148,30 @@ fn main() {
                 &a.jsx_import_source,
             )
         }
-        Some(Commands::CompileModule(a)) => compile_module(&a),
+        Some(Commands::CompileModule(a)) => {
+            if let Err(e) = tishlang_compile::apply_resolve_env(
+                a.platform.as_deref(),
+                a.surface.as_deref(),
+            ) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            compile_module(&a)
+        }
+        Some(Commands::ResolveId {
+            source,
+            importer,
+            platform,
+            surface,
+        }) => tishlang_compile::resolve_id_public(
+            &source,
+            importer.as_deref(),
+            platform.as_deref(),
+            surface.as_deref(),
+        )
+        .map(|path| {
+            println!("{path}");
+        }),
         Some(Commands::DumpAst {
             file,
             ignore_indent,

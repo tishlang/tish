@@ -4,6 +4,9 @@
 //
 // Dev compiles request a source map (`tish compile-module --source-map`) so Vite's error overlay
 // and the browser debugger resolve back to the original `.tish`.
+//
+// Platform/surface cascade (RN-style `Button.macos.tish` / `.web.tish` / …) is owned by the `tish`
+// CLI (`tish resolve-id`); this plugin must not reimplement those rules.
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -17,14 +20,70 @@ const TISH_EXT = ".tish";
  * @param {string} [opts.projectRoot] Root for resolving bare specifiers / node_modules (default: Vite root).
  * @param {"hmr"|"full-reload"} [opts.mode] `hmr` (default) hot-swaps modules; `full-reload` reloads the
  *        page on any `.tish` change (the documented fallback for `--target bytecode` apps).
+ * @param {string} [opts.platform] Platform token for resolve cascade (`macos`, `ios`, `web`, …).
+ * @param {string} [opts.surface] Surface token (`native`, `webview`, `web`). Defaults from
+ *        `TISH_PLATFORM` / `TISH_SURFACE` when unset.
  */
 export default function tishPlugin(opts = {}) {
   const tishPath = opts.tishPath ?? process.env.TISH_PATH ?? "tish";
   const mode = opts.mode ?? "hmr";
+  const platform = opts.platform ?? process.env.TISH_PLATFORM;
+  const surface = opts.surface ?? process.env.TISH_SURFACE;
   let projectRoot = opts.projectRoot;
+  /** @type {boolean|null} */
+  let supportsPlatformFlags = null;
 
-  // Compile a single `.tish` file to one ES module. In `hmr` mode we request a source map and parse
-  // the `{ js, map }` envelope; otherwise we take raw JS on stdout.
+  function envForChild() {
+    const env = { ...process.env };
+    if (platform) env.TISH_PLATFORM = platform;
+    if (surface) env.TISH_SURFACE = surface;
+    return env;
+  }
+
+  function detectPlatformFlags() {
+    if (supportsPlatformFlags !== null) return supportsPlatformFlags;
+    try {
+      const help = execFileSync(tishPath, ["compile-module", "--help"], {
+        encoding: "utf8",
+        env: envForChild(),
+      });
+      supportsPlatformFlags =
+        help.includes("--platform") && help.includes("--surface");
+    } catch {
+      supportsPlatformFlags = false;
+    }
+    return supportsPlatformFlags;
+  }
+
+  function platformArgs() {
+    if (!detectPlatformFlags()) return [];
+    const args = [];
+    if (platform) args.push("--platform", platform);
+    if (surface) args.push("--surface", surface);
+    return args;
+  }
+
+  function runTish(args, maxBuffer = 1024 * 1024) {
+    return execFileSync(tishPath, args, {
+      encoding: "utf8",
+      maxBuffer,
+      env: envForChild(),
+    });
+  }
+
+  /** Resolve relative imports through `tish resolve-id` (same cascade as compile). */
+  function resolveTishId(source, importer) {
+    if (!detectPlatformFlags()) return null;
+    const args = ["resolve-id", source, ...platformArgs()];
+    if (importer) args.push("--importer", importer.split("?")[0]);
+    try {
+      const out = runTish(args).trim();
+      return out || null;
+    } catch {
+      return null;
+    }
+  }
+
   function compileModule(file) {
     const args = [
       "compile-module",
@@ -34,18 +93,29 @@ export default function tishPlugin(opts = {}) {
       "--format",
       "esm",
       "--vite-dev",
+      ...platformArgs(),
     ];
     args.push(mode === "hmr" ? "--source-map" : "--no-source-map");
     if (projectRoot) args.push("--project-root", projectRoot);
-    const stdout = execFileSync(tishPath, args, {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    if (mode === "hmr") {
-      const { js, map } = JSON.parse(stdout);
-      return { code: js, map };
+    try {
+      const stdout = runTish(args, 64 * 1024 * 1024);
+      if (mode === "hmr") {
+        const { js, map } = JSON.parse(stdout);
+        return { code: js, map };
+      }
+      return { code: stdout, map: null };
+    } catch (err) {
+      const msg = String(err?.stderr || err?.message || err);
+      // Older tish CLIs reject --platform; retry once without flags (env still set).
+      if (
+        supportsPlatformFlags !== false &&
+        /unexpected argument '--platform'|unexpected argument '--surface'/.test(msg)
+      ) {
+        supportsPlatformFlags = false;
+        return compileModule(file);
+      }
+      throw err;
     }
-    return { code: stdout, map: null };
   }
 
   return {
@@ -56,15 +126,17 @@ export default function tishPlugin(opts = {}) {
       if (!projectRoot) projectRoot = config.root;
     },
 
-    // Bring `.tish` imports into Vite's module graph: resolve relative `.tish` specifiers to absolute
-    // file paths so Vite addresses each module and can invalidate it individually. Root-relative URLs
-    // (`/src/x.tish`) and bare specifiers are left to Vite's resolver, which maps them to real files.
     resolveId(source, importer) {
-      if (!source.endsWith(TISH_EXT)) return null;
+      // Relative imports: always try platform cascade (with or without `.tish`).
       if (source.startsWith(".") && importer) {
-        return path.resolve(path.dirname(importer.split("?")[0]), source);
+        const resolved = resolveTishId(source, importer);
+        if (resolved) return resolved;
+        if (source.endsWith(TISH_EXT)) {
+          return path.resolve(path.dirname(importer.split("?")[0]), source);
+        }
+        return null;
       }
-      if (path.isAbsolute(source) && existsSync(source)) {
+      if (source.endsWith(TISH_EXT) && path.isAbsolute(source) && existsSync(source)) {
         return source;
       }
       return null;
@@ -75,8 +147,6 @@ export default function tishPlugin(opts = {}) {
       if (!file.endsWith(TISH_EXT)) return null;
       const { code, map } = compileModule(file);
       if (mode !== "hmr") return { code, map };
-      // Self-accepting boundary: editing this module re-runs it without reloading the page. Frameworks
-      // (e.g. Lattish) can register their own `import.meta.hot.accept` handlers on top.
       const withBoundary = `${code}\nif (import.meta.hot) { import.meta.hot.accept(); }\n`;
       return { code: withBoundary, map };
     },
@@ -88,7 +158,6 @@ export default function tishPlugin(opts = {}) {
         server.ws.send({ type: "full-reload" });
         return [];
       }
-      // Hand Vite the changed module node(s) so it performs per-module HMR rather than a full reload.
       const mods = server.moduleGraph.getModulesByFile(file);
       return mods ? [...mods] : undefined;
     },
