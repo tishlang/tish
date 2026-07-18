@@ -1,0 +1,5 @@
+// Native codegen must treat free `undefined` as null (no bare Rust ident).
+fn missing(props) {
+  return props.label === undefined ? "fallback" : props.label
+}
+console.log(missing({}))

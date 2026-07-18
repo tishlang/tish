@@ -2485,6 +2485,9 @@ impl Codegen {
         self.writeln("let isNaN = Value::native(|args: &[Value]| tish_is_nan(args));");
         self.writeln("let Infinity = Value::Number(f64::INFINITY);");
         self.writeln("let NaN = Value::Number(f64::NAN);");
+        // Tish has no distinct undefined (missing props / holes read as null). Keep a prelude
+        // binding so `=== undefined` / free-var capture in move closures compile.
+        self.writeln("let undefined = Value::Null;");
         self.writeln("let Math = Value::object(ObjectMap::from([");
         self.indent += 1;
         self.writeln("(Arc::from(\"abs\"), Value::native(|args: &[Value]| tish_math_abs(args))),");
@@ -5772,6 +5775,7 @@ impl Codegen {
                     "String",
                     "Infinity",
                     "NaN",
+                    "undefined",
                     "serve",
                 ] {
                     if referenced.contains(*builtin) {
@@ -6660,6 +6664,10 @@ impl Codegen {
                 Literal::Null => "Value::Null".to_string(),
             },
             Expr::Ident { name, .. } => {
+                // Global `undefined` → null (same as JS codegen: tish has no undefined value).
+                if name.as_ref() == "undefined" {
+                    return Ok("Value::Null".to_string());
+                }
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
                     return Ok(format!(
                         "Value::Number({})",
@@ -10029,7 +10037,7 @@ impl Codegen {
         const BUILTINS: &[&str] = &[
             "Boolean", "console", "Math", "JSON", "Date", "Object", "process",
             "setTimeout", "clearTimeout", "setInterval", "clearInterval", "Promise",
-            "Symbol", "RegExp", "Polars", "Infinity", "NaN", "serve",
+            "Symbol", "RegExp", "Polars", "Infinity", "NaN", "undefined", "serve",
         ];
         let mut already_captured: HashSet<String> = outer_vars
             .iter()
