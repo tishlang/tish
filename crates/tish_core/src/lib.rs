@@ -107,7 +107,21 @@ pub fn dec_call_depth() {
 /// Default recursion ceiling shared by every backend that counts call depth (#381). Chosen with the
 /// interpreter: comfortably deep for real programs, but reached long before counted recursion can
 /// exhaust memory or the stack.
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
+
+/// wasm32 ceiling (#531). On wasm the embedded VM runs on the single guest stack — there is no host
+/// worker thread to grow into (`Vm` can't spawn on wasm), and the host runtime (wasmtime) bounds
+/// guest call depth by its own `max_wasm_stack`. That limit is NOT reachable from the `.wasm`: it
+/// overflows into an UNCATCHABLE module trap after only ~300 `Vm::run_chunk` frames — the tish
+/// function locals live in the VM operand stack, so the per-frame host cost is ~constant regardless
+/// of the program, and the trap depth is a stable ~310 under default wasmtime. A far lower ceiling
+/// keeps the frame-counting guard firing first (measured safe with margin below the trap), so deep
+/// recursion raises a CATCHABLE `RangeError` on WASI too — matching interp/vm/native rather than
+/// aborting the process. WASI programs are thus capped much shallower than native; that is inherent
+/// to wasm's host-bounded call stack, not a tish choice.
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 256;
 
 thread_local! {
     // The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A

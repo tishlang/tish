@@ -1,0 +1,34 @@
+// #437 (from #381): unbounded recursion and cyclic structures must throw a CATCHABLE error
+// identically on EVERY backend — interp / vm / native / cranelift / wasi must all recover, never
+// abort the process. Node agrees on all of these, so this doubles as a node-parity lock.
+//
+// WASI is included: it once trapped (uncatchable wasm module abort) on deep recursion because the
+// guest call stack overflows wasmtime's max_wasm_stack before the frame-counting guard fires; #531
+// gave wasm32 a lower DEFAULT_MAX_CALL_DEPTH so the guard wins and the overflow is a catchable
+// RangeError here too. (WASI's depth ceiling is far lower than native — inherent to wasm's
+// host-bounded call stack — but the caught-vs-abort behavior is identical.)
+
+// 1. simple unbounded recursion -> catchable RangeError
+function rec(n) { return rec(n + 1) }
+let simple = "NONE"
+try { rec(0) } catch (e) { simple = e.name }
+console.log("simple=" + simple)
+
+// 2. mutual recursion -> catchable RangeError
+function a(n) { return b(n + 1) }
+function b(n) { return a(n + 1) }
+let mutual = "NONE"
+try { a(0) } catch (e) { mutual = e.name }
+console.log("mutual=" + mutual)
+
+// 3. cyclic structure through JSON.stringify -> catchable TypeError
+let o = { x: 1 }
+o.self = o
+let json = "NONE"
+try { JSON.stringify(o) } catch (e) { json = e.name }
+console.log("json=" + json)
+
+// 4. re-entrancy: after a caught overflow the stack guard must reset so normal calls still work
+try { rec(0) } catch (e) { }
+function add(x, y) { return x + y }
+console.log("reentry=" + add(2, 3))
