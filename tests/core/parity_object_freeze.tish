@@ -1,0 +1,13 @@
+// #437: Object.freeze marks an object frozen and blocks BOTH `o.k = v` and `o["k"] = v` on every
+// backend. tish throws a catchable TypeError on a frozen write (its own stricter spec); node's
+// sloppy mode silently ignores it — either way the value is unchanged, so this asserts the
+// node-safe invariants: isFrozen reflects freeze state, and a frozen property keeps its value.
+let o = { a: 1 }
+Object.freeze(o)
+let frozen = Object.isFrozen(o)
+try { o.a = 99 } catch (e) { }
+try { o["a"] = 88 } catch (e) { }
+let plain = { x: 1 }
+console.log(frozen)
+console.log(o.a)
+console.log(Object.isFrozen(plain))

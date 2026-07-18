@@ -861,6 +861,14 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
         Value::native(|args: &[Value]| globals_builtins::object_from_entries(args)),
     );
     object_methods.insert(
+        "freeze".into(),
+        Value::native(|args: &[Value]| globals_builtins::object_freeze(args)),
+    );
+    object_methods.insert(
+        "isFrozen".into(),
+        Value::native(|args: &[Value]| globals_builtins::object_is_frozen(args)),
+    );
+    object_methods.insert(
         "keys".into(),
         Value::native(|args: &[Value]| globals_builtins::object_keys(args)),
     );
@@ -3189,6 +3197,7 @@ impl Vm {
                     self.stack.push(Value::Object(VmRef::new(ObjectData {
                         strings: map,
                         symbols: None,
+                        frozen: false,
                     })));
                 }
                 Opcode::EnterTry => {
@@ -3744,6 +3753,13 @@ fn ic_set_member(
     use std::sync::atomic::Ordering::Relaxed;
     if let Value::Object(od) = obj {
         let mut b = od.borrow_mut();
+        if b.frozen {
+            // #437: writes to a frozen object throw a catchable TypeError (the SetMember handler
+            // routes this Err through `catchable!` → a TypeError).
+            return Err(format!(
+                "Cannot assign to read only property '{key}' of a frozen object"
+            ));
+        }
         let shape = b.strings.shape();
         let cell = chunk.inline_caches.0.get(name_idx as usize);
         if shape != tishlang_core::DICT_SHAPE {
@@ -4570,6 +4586,11 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
 fn set_member(obj: &Value, key: &Arc<str>, val: Value) -> Result<(), String> {
     match obj {
         Value::Object(m) => {
+            if m.borrow().frozen {
+                return Err(format!(
+                    "Cannot assign to read only property '{key}' of a frozen object"
+                ));
+            }
             m.borrow_mut().strings.insert(Arc::clone(key), val);
             Ok(())
         }
@@ -4813,7 +4834,15 @@ fn set_index(obj: &Value, idx: &Value, val: Value) -> Result<(), String> {
             arr[i] = val;
             Ok(())
         }
-        Value::Object(_) => object_set(obj, idx, val),
+        Value::Object(m) => {
+            if m.borrow().frozen {
+                return Err(format!(
+                    "Cannot assign to read only property '{}' of a frozen object",
+                    idx.to_display_string()
+                ));
+            }
+            object_set(obj, idx, val)
+        }
         _ => Err(format!("Cannot set property of {}", obj.type_name())),
     }
 }
@@ -4954,6 +4983,29 @@ mod undeclared_var_in_fn_tests {
     }
 
     // The propagated error is catchable, matching the interpreter.
+    // Object.freeze marks an object frozen and a subsequent property write throws a catchable
+    // TypeError (#437 — tish's own stricter spec; node's sloppy mode silently ignores it).
+    #[test]
+    fn frozen_write_throws_catchable_typeerror() {
+        // Uncaught: the frozen write propagates as an error.
+        let uncaught = run_src("let o = { a: 1 }\nObject.freeze(o)\no.a = 2");
+        assert!(
+            uncaught.is_err(),
+            "a write to a frozen object must throw, not silently succeed: {uncaught:?}"
+        );
+        // Caught: try/catch recovers it, and the value is unchanged.
+        let caught = run_src(
+            "let o = { a: 1 }\n\
+             Object.freeze(o)\n\
+             try { o.a = 2 } catch (e) { }\n\
+             o.a",
+        );
+        assert!(
+            caught.is_ok(),
+            "the frozen write must be catchable (try/catch recovers): {caught:?}"
+        );
+    }
+
     // The propagated error is catchable, matching the interpreter (issue #437 bucket-A).
     #[test]
     fn undeclared_read_in_fn_is_catchable() {

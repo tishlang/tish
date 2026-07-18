@@ -296,6 +296,25 @@ pub fn string_from_char_code(args: &[Value]) -> Value {
     Value::String(s.into())
 }
 
+/// Object.freeze(obj) — mark the object frozen so later property writes throw a catchable
+/// TypeError (#437). Returns the same object; non-objects pass through unchanged (JS semantics).
+pub fn object_freeze(args: &[Value]) -> Value {
+    if let Some(Value::Object(obj)) = args.first() {
+        obj.borrow_mut().frozen = true;
+    }
+    args.first().cloned().unwrap_or(Value::Null)
+}
+
+/// Object.isFrozen(obj) — true if the object was frozen. Primitives are considered frozen (JS).
+pub fn object_is_frozen(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Object(obj)) => Value::Bool(obj.borrow().frozen),
+        // Arrays are mutable and not freezable in this slice → not frozen; other primitives are.
+        Some(Value::Array(_)) => Value::Bool(false),
+        _ => Value::Bool(true),
+    }
+}
+
 /// Object.keys(obj)
 pub fn object_keys(args: &[Value]) -> Value {
     match args.first() {
