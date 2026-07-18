@@ -26,6 +26,13 @@ jobs:
   dune-server:
     name: distilled dune-server vs tish HEAD
     runs-on: ubuntu-latest
+    # Fleet-safe target-cpu (#223): `tish build` compiles server.tish natively and appends
+    # `-C target-cpu=native` UNLESS RUSTFLAGS already pins a target-cpu (tish_build_utils). On the
+    # virtualized runner `native` detects instructions that then SIGILL at runtime (Illegal
+    # instruction, core dumped) — the recurring dune-server flake. Pin x86-64-v3 so the native build
+    # is fleet-safe, mirroring packed-arrays.yml.
+    env:
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
 
