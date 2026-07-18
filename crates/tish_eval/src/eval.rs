@@ -336,6 +336,8 @@ impl Evaluator {
 
             let mut object = PropMap::with_capacity(5);
             object.insert("keys".into(), Value::Native(Self::object_keys));
+            object.insert("freeze".into(), Value::Native(Self::object_freeze));
+            object.insert("isFrozen".into(), Value::Native(Self::object_is_frozen));
             object.insert("values".into(), Value::Native(Self::object_values));
             object.insert("entries".into(), Value::Native(Self::object_entries));
             object.insert("assign".into(), Value::Native(Self::object_assign));
@@ -3370,6 +3372,17 @@ impl Evaluator {
                 let val = self.eval_expr(value)?;
                 match obj_val {
                     Value::Object(map) => {
+                        if map.borrow().frozen {
+                            return Err(EvalError::Throw(
+                                crate::natives::type_error_construct(&[Value::String(
+                                    format!(
+                                        "Cannot assign to read only property '{prop}' of a frozen object"
+                                    )
+                                    .into(),
+                                )])
+                                .unwrap_or(Value::Null),
+                            ));
+                        }
                         map.borrow_mut()
                             .strings
                             .insert(Arc::clone(prop), val.clone());
@@ -3421,7 +3434,18 @@ impl Evaluator {
                         arr_mut[idx] = val.clone();
                         Ok(val)
                     }
-                    Value::Object(_) => {
+                    Value::Object(ref map) => {
+                        if map.borrow().frozen {
+                            return Err(EvalError::Throw(
+                                crate::natives::type_error_construct(&[Value::String(
+                                    format!(
+                                        "Cannot assign to read only property '{idx_val}' of a frozen object"
+                                    )
+                                    .into(),
+                                )])
+                                .unwrap_or(Value::Null),
+                            ));
+                        }
                         eval_object_set(&obj_val, &idx_val, val.clone())
                             .map_err(EvalError::Error)?;
                         Ok(val)
@@ -4886,6 +4910,23 @@ impl Evaluator {
             // `{ name: "TypeError", message }` — node-identical for the circular case (#381).
             Err(()) => Err("Converting circular structure to JSON".to_string()),
         }
+    }
+
+    /// Object.freeze(obj) — mark frozen so writes throw a catchable TypeError (#437); returns obj.
+    fn object_freeze(args: &[Value]) -> Result<Value, String> {
+        if let Some(Value::Object(obj)) = args.first() {
+            obj.borrow_mut().frozen = true;
+        }
+        Ok(args.first().cloned().unwrap_or(Value::Null))
+    }
+
+    /// Object.isFrozen(obj) — true if frozen; primitives are frozen, arrays are not (this slice).
+    fn object_is_frozen(args: &[Value]) -> Result<Value, String> {
+        Ok(match args.first() {
+            Some(Value::Object(obj)) => Value::Bool(obj.borrow().frozen),
+            Some(Value::Array(_)) => Value::Bool(false),
+            _ => Value::Bool(true),
+        })
     }
 
     fn object_keys(args: &[Value]) -> Result<Value, String> {

@@ -16,6 +16,7 @@ pub fn with_capacity(capacity: usize) -> Value {
     Value::Object(VmRef::new(ObjectData {
         strings: PropMap::with_capacity(capacity),
         symbols: None,
+        frozen: false,
     }))
 }
 

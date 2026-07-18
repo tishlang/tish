@@ -522,6 +522,7 @@ fn parse_object<'a>(
             Value::Object(VmRef::new(crate::ObjectData {
                 strings: map,
                 symbols: None,
+                frozen: false,
             })),
             rest,
         ));
@@ -552,6 +553,7 @@ fn parse_object<'a>(
                     Value::Object(VmRef::new(crate::ObjectData {
                         strings: map,
                         symbols: None,
+                        frozen: false,
                     })),
                     &input[1..],
                 ));

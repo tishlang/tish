@@ -153,6 +153,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
                         let t: VmRef<ObjectData> = VmRef::new(ObjectData {
                             strings: tishlang_core::PropMap::default(),
                             symbols: None,
+                            frozen: false,
                         });
                         c.obj_fwd.insert(addr, (Rc::downgrade(map), t.clone()));
                         c.obj_rev.insert(t.as_ptr() as usize, Rc::downgrade(map));
@@ -176,7 +177,7 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
                 } else {
                     None
                 };
-                Ok(ObjectData { strings, symbols })
+                Ok(ObjectData { strings, symbols, frozen: false })
             })();
             BRIDGE.with(|c| {
                 c.borrow_mut().in_flight.remove(&addr);
@@ -355,6 +356,7 @@ mod bridge_identity_tests {
         let alien = CoreValue::Object(VmRef::new(ObjectData {
             strings: tishlang_core::PropMap::default(),
             symbols: None,
+            frozen: false,
         }));
         assert!(matches!(core_to_eval(alien), Value::Object(_)));
     }

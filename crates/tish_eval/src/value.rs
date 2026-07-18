@@ -24,6 +24,8 @@ pub type PropMap = indexmap::IndexMap<Arc<str>, Value>;
 pub struct EvalObjectData {
     pub strings: PropMap,
     pub symbols: Option<AHashMap<u64, Value>>,
+    /// `Object.freeze` marker (#437) — writes to a frozen object throw a catchable TypeError.
+    pub frozen: bool,
 }
 
 impl EvalObjectData {
@@ -31,7 +33,13 @@ impl EvalObjectData {
         Self {
             strings,
             symbols: None,
+            frozen: false,
         }
+    }
+
+    #[inline]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 }
 

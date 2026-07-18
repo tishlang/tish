@@ -548,7 +548,8 @@ use tishlang_builtins::globals::{
     decode_uri as builtins_decode_uri, encode_uri as builtins_encode_uri,
     is_finite as builtins_is_finite, is_nan as builtins_is_nan,
     object_assign as builtins_object_assign, object_entries as builtins_object_entries,
-    object_from_entries as builtins_object_from_entries, object_keys as builtins_object_keys,
+    object_freeze as builtins_object_freeze, object_from_entries as builtins_object_from_entries,
+    object_is_frozen as builtins_object_is_frozen, object_keys as builtins_object_keys,
     object_values as builtins_object_values,
     number_convert as builtins_number_convert,
     string_convert as builtins_string_convert,
@@ -1565,6 +1566,14 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
             // exists we re-use the existing `Arc<str>` and skip the
             // alloc. Only newly-inserted keys pay for `Arc::from(key)`.
             let mut m = map.borrow_mut();
+            if m.frozen {
+                // #437: a write to a frozen object throws a catchable TypeError (parked in the
+                // pending-throw slot; the generated code surfaces it at the next checkpoint).
+                tishlang_core::set_pending_throw(tishlang_core::type_error(format!(
+                    "Cannot assign to read only property '{key}' of a frozen object"
+                )));
+                return val;
+            }
             if let Some(slot) = m.strings.get_mut(key) {
                 *slot = val.clone();
             } else {
@@ -1639,7 +1648,16 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
             }
             val
         }
-        Value::Object(_) => {
+        Value::Object(map) => {
+            if map.borrow().frozen {
+                // #437: a write to a frozen object throws a catchable TypeError (parked; surfaced at
+                // the next assignment checkpoint, same as `set_prop`).
+                tishlang_core::set_pending_throw(tishlang_core::type_error(format!(
+                    "Cannot assign to read only property '{}' of a frozen object",
+                    idx.to_display_string()
+                )));
+                return val;
+            }
             tishlang_core::object_set(obj, idx, val.clone()).expect("object set");
             val
         }
@@ -1690,6 +1708,14 @@ pub fn object_assign(args: &[Value]) -> Value {
 
 pub fn object_keys(args: &[Value]) -> Value {
     builtins_object_keys(args)
+}
+
+pub fn object_freeze(args: &[Value]) -> Value {
+    builtins_object_freeze(args)
+}
+
+pub fn object_is_frozen(args: &[Value]) -> Value {
+    builtins_object_is_frozen(args)
 }
 
 pub fn object_values(args: &[Value]) -> Value {

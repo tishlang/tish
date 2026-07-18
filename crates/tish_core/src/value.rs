@@ -985,6 +985,10 @@ impl Iterator for PropMapIntoIter {
 pub struct ObjectData {
     pub strings: PropMap,
     pub symbols: Option<AHashMap<u64, Value>>,
+    /// `Object.freeze` marker (#437). When true, property writes must throw a catchable TypeError
+    /// instead of mutating — enforced at every write chokepoint (interp assign, vm `set_member`,
+    /// native `set_prop`). Reference-shared like the rest of the object; a fresh object is not frozen.
+    pub frozen: bool,
 }
 
 impl ObjectData {
@@ -993,7 +997,14 @@ impl ObjectData {
         Self {
             strings: strings.into_iter().collect(),
             symbols: None,
+            frozen: false,
         }
+    }
+
+    /// True if `Object.freeze` has been applied to this object.
+    #[inline]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     #[inline]
@@ -1209,7 +1220,11 @@ pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) ->
             None => symbols = Some(rs.clone()),
         }
     }
-    ObjectData { strings, symbols }
+    ObjectData {
+        strings,
+        symbols,
+        frozen: false,
+    }
 }
 
 impl std::fmt::Debug for Value {
@@ -1586,6 +1601,7 @@ impl Value {
         Value::Object(VmRef::new(ObjectData {
             strings,
             symbols: None,
+            frozen: false,
         }))
     }
 
