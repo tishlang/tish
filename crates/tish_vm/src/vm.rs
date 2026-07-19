@@ -1918,6 +1918,11 @@ impl Vm {
         // SAFETY: `buf` is a valid `[f64; used_slots.len()]`; `deopt` is a valid `*mut u8`. The region
         // was compiled for exactly this chunk+header (fingerprint-checked in the cache).
         let exit_id = loopfn.call(&mut buf, &mut deopt);
+        if deopt != 0 {
+            // #514: an int-slot live-in wasn't an exact in-range integer, so the region bailed at
+            // entry BEFORE touching `buf` — the slots are still their pre-loop values. Re-interpret.
+            return OsrResult::LiveInMiss;
+        }
         for (p, &slot) in loopfn.used_slots.iter().enumerate() {
             if let Some(d) = slots.get_mut(slot_base + slot as usize) {
                 *d = Value::Number(buf[p]);
