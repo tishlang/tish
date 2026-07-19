@@ -54,6 +54,9 @@ parseint-neg -16
 tofixed 3
 tofixed-neg -3
 tofixed-pi 3.14
+tofixed-tielo 2.67 0.61 1.4 5.5
+tofixed-tielo2 4.5 0.01 0.04 8.57
+tofixed-exact 0.13 1 10.00 1000.00
 negzero-tostring 0
 negzero-string 0
 negzero-concat 0

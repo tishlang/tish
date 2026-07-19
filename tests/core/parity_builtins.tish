@@ -68,6 +68,12 @@ console.log("parseint-neg", parseInt("-0x10", 16))
 console.log("tofixed", (2.5).toFixed(0))
 console.log("tofixed-neg", (-2.5).toFixed(0))
 console.log("tofixed-pi", (3.14159).toFixed(2))
+// #438: toFixed rounds the number's TRUE decimal value, ties away from zero. Values stored just
+// below an apparent tie (2.675 is really 2.67499…) round DOWN — the old `(n*10^d).round()` impl
+// rounded these UP. These lock the node-exact behavior across every backend.
+console.log("tofixed-tielo", (2.675).toFixed(2), (0.615).toFixed(2), (1.45).toFixed(1), (5.55).toFixed(1))
+console.log("tofixed-tielo2", (4.55).toFixed(1), (0.015).toFixed(2), (0.045).toFixed(2), (8.575).toFixed(2))
+console.log("tofixed-exact", (0.125).toFixed(2), (0.5).toFixed(0), (9.999).toFixed(2), (999.995).toFixed(2))
 // -0 ToString drops the sign (`String(-0) === "0"`); the console *inspect* form keeps it.
 console.log("negzero-tostring", (-0).toString())
 console.log("negzero-string", String(-0))
