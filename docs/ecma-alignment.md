@@ -87,7 +87,7 @@ This document maps Tish behavior to ECMA-262 and test262. Each concept has a dec
 - **JSON** — Follow (parse, stringify)
 - **global, Infinity, NaN** — Follow
 - **Error, NativeErrors** — Follow or Simplify
-- **parseInt, parseFloat, isFinite, isNaN** — Follow
+- **parseInt, parseFloat, isFinite, isNaN** — Follow (radix inference, rounding, etc. documented in [numeric-formatting-semantics.md](numeric-formatting-semantics.md), #438)
 - **decodeURI, encodeURI** — Follow
 - **ArrayBuffer, BigInt, Date, Map, Set** — Omit or optional
 - **Promise** — Follow (§27.2): `Promise(executor)`, `.then`, `.catch`, `.finally`, `Promise.resolve`, `Promise.reject`, `Promise.all`, `Promise.race`. Host APIs: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`.

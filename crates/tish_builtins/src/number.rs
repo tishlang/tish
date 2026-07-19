@@ -25,8 +25,16 @@ pub fn to_fixed(n: &Value, digits: &Value) -> Value {
 }
 
 /// f64-domain `Number.prototype.toFixed` so the tree-walk interpreter (distinct `Value`) shares the
-/// exact behavior. Rust's `{:.*}` rounds half-to-even (`(2.5).toFixed(0)` → "2"); JS rounds half away
-/// from zero (→ "3"), so pre-round the scaled value with `.round()` (half-away) before formatting. #247
+/// exact behavior. tish's rule (#438): round the number's *true* decimal value to `digits` places,
+/// ties away from zero — matching V8/node's observable `toFixed`.
+///
+/// The obvious `(num * 10^digits).round()` is wrong: float scaling nudges values that are actually
+/// just below a tie up over it, so `(2.675).toFixed(2)` came out `2.68` where node gives `2.67`
+/// (2.675 is stored as 2.67499999…). Instead we render the double's exact decimal expansion to well
+/// beyond `digits` — f64 fractions terminate, so a generous precision captures the real digits — then
+/// round that digit string: if the first dropped digit is ≥ 5, increment with decimal carry; else
+/// truncate. On the magnitude, "first dropped ≥ 5" is round-half-up = round-half-away-from-zero, and
+/// because the expansion is exact, non-ties round the way the true value dictates. #438
 pub fn to_fixed_str(num: f64, digits: usize) -> String {
     if num.is_nan() {
         return "NaN".to_string();
@@ -38,9 +46,61 @@ pub fn to_fixed_str(num: f64, digits: usize) -> String {
     if num.abs() >= 1e21 {
         return format!("{}", num);
     }
-    let factor = 10f64.powi(digits as i32);
-    let rounded = (num * factor).round() / factor;
-    format!("{:.*}", digits, rounded)
+
+    let negative = num.is_sign_negative() && num != 0.0;
+    let magnitude = num.abs();
+
+    // Exact-enough decimal expansion. The digit just past `digits` then reflects the double's TRUE
+    // value; +25 guard digits sit far beyond any position we inspect, so the half-to-even rounding
+    // Rust applies at the cutoff can't perturb our decision (it would take 25 consecutive 9s to carry
+    // back that far, and such a value already rounds up under the exact rule anyway).
+    let guard = digits + 25;
+    let rendered = format!("{:.*}", guard, magnitude);
+    let dot = rendered.find('.').expect("fixed formatting always has a decimal point");
+    let int_str = &rendered[..dot];
+    let frac = rendered[dot + 1..].as_bytes();
+
+    // Kept digits: the whole integer part, then `digits` fractional digits.
+    let mut ds: Vec<u8> = int_str
+        .bytes()
+        .chain(frac[..digits].iter().copied())
+        .map(|b| b - b'0')
+        .collect();
+
+    // Round half-away-from-zero on the magnitude: increment iff the first dropped digit is >= 5.
+    if frac[digits] - b'0' >= 5 {
+        let mut i = ds.len();
+        loop {
+            if i == 0 {
+                ds.insert(0, 1);
+                break;
+            }
+            i -= 1;
+            if ds[i] == 9 {
+                ds[i] = 0;
+            } else {
+                ds[i] += 1;
+                break;
+            }
+        }
+    }
+
+    // Split back into integer (all but the last `digits`) and fractional digits.
+    let int_len = ds.len() - digits;
+    let mut out = String::with_capacity(ds.len() + 2);
+    if negative {
+        out.push('-');
+    }
+    for &d in &ds[..int_len] {
+        out.push((d + b'0') as char);
+    }
+    if digits > 0 {
+        out.push('.');
+        for &d in &ds[int_len..] {
+            out.push((d + b'0') as char);
+        }
+    }
+    out
 }
 
 /// `Number.prototype.toExponential(fractionDigits?)` — ECMA-262 §21.1.3.2. Exponential notation with
