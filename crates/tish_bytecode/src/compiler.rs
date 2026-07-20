@@ -1968,6 +1968,9 @@ impl<'a> Compiler<'a> {
                 }
                 let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.stable_globals = Arc::clone(&self.stable_globals);
+                // #203: `Math` unshadowed is a whole-program property; thread it so `Math.<fn>` in this
+                // function body lowers to the MathUnary intrinsic (else the numeric JIT bails).
+                inner_comp.math_is_global = self.math_is_global;
                 // Recursion-JIT enabler: if `name`'s binding is provably stable in the body (no
                 // param shadows it, no reassignment/redeclaration), direct `name(args)` calls inside
                 // compile to `SelfCall` — no name lookup, and the numeric JIT lowers it to a native
@@ -2686,6 +2689,7 @@ impl<'a> Compiler<'a> {
                 }
                 let mut inner_comp = Compiler::new(&mut inner, false);
                 inner_comp.stable_globals = Arc::clone(&self.stable_globals); // #187
+                inner_comp.math_is_global = self.math_is_global; // #203 (see other call site)
                 if let Some(map) = simple_slots {
                     inner_comp.slot_ctx = Some(map);
                 } else {
@@ -3116,7 +3120,15 @@ fn compile_internal(
     // #186 — `Math` intrinsics are sound only if `Math` is never rebound anywhere in the program.
     // `stmt_rebinds` is conservative (any rebind, destructure, FunDecl, or unknown node → true), so a
     // `false` here only forgoes the optimization, never risks a miscompile.
-    compiler.math_is_global = !program.statements.iter().any(|s| stmt_rebinds(s, "Math"));
+    // #203: whole-program scan (recurses into function bodies/params, unlike `stmt_rebinds` which is
+    // conservatively `true` on any FunDecl) — so `Math` is provably-global even when the program
+    // defines functions, letting `Math.<fn>` inside a function lower to the MathUnary intrinsic (the
+    // numeric/array JIT then compiles the kernel instead of bailing on a generic call). Errs toward
+    // "rebound" ⇒ never falsely global ⇒ no miscompile. Threaded into nested compilers below.
+    compiler.math_is_global = !program
+        .statements
+        .iter()
+        .any(|s| name_rebinds_in_stmt(s, "Math"));
     // #187 — the set of top-level functions safe to call directly from JIT'd code (never reassigned/
     // shadowed/redeclared anywhere). Conservative: a name absent here only forgoes the optimization.
     compiler.stable_globals = Arc::new(compute_stable_globals(program));
