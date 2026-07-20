@@ -693,6 +693,16 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     math.insert("fround".into(), Value::native(|a: &[Value]| math_builtins::fround(a)));
     math.insert("PI".into(), Value::Number(std::f64::consts::PI));
     math.insert("E".into(), Value::Number(std::f64::consts::E));
+    // #539: the remaining ECMAScript Math value constants (were missing → `null`).
+    math.insert("LN2".into(), Value::Number(std::f64::consts::LN_2));
+    math.insert("LN10".into(), Value::Number(std::f64::consts::LN_10));
+    math.insert("LOG2E".into(), Value::Number(std::f64::consts::LOG2_E));
+    math.insert("LOG10E".into(), Value::Number(std::f64::consts::LOG10_E));
+    math.insert("SQRT2".into(), Value::Number(std::f64::consts::SQRT_2));
+    math.insert(
+        "SQRT1_2".into(),
+        Value::Number(std::f64::consts::FRAC_1_SQRT_2),
+    );
     g.insert("Math".into(), value_object_from_map(math));
 
     let mut json = ObjectMap::default();

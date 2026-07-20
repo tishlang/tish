@@ -2548,6 +2548,15 @@ impl Codegen {
         }
         self.writeln("(Arc::from(\"PI\"), Value::Number(std::f64::consts::PI)),");
         self.writeln("(Arc::from(\"E\"), Value::Number(std::f64::consts::E)),");
+        // #539: the remaining ECMAScript Math value constants (were missing → `null`).
+        self.writeln("(Arc::from(\"LN2\"), Value::Number(std::f64::consts::LN_2)),");
+        self.writeln("(Arc::from(\"LN10\"), Value::Number(std::f64::consts::LN_10)),");
+        self.writeln("(Arc::from(\"LOG2E\"), Value::Number(std::f64::consts::LOG2_E)),");
+        self.writeln("(Arc::from(\"LOG10E\"), Value::Number(std::f64::consts::LOG10_E)),");
+        self.writeln("(Arc::from(\"SQRT2\"), Value::Number(std::f64::consts::SQRT_2)),");
+        self.writeln(
+            "(Arc::from(\"SQRT1_2\"), Value::Number(std::f64::consts::FRAC_1_SQRT_2)),",
+        );
         self.indent -= 1;
         self.writeln("]));");
         self.writeln("let JSON = Value::object(ObjectMap::from([");

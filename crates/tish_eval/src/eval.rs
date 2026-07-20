@@ -293,6 +293,16 @@ impl Evaluator {
             math.insert("log10".into(), Value::Native(natives::math_log10));
             math.insert("PI".into(), Value::Number(std::f64::consts::PI));
             math.insert("E".into(), Value::Number(std::f64::consts::E));
+            // #539: the remaining ECMAScript Math value constants (were missing → `null`).
+            math.insert("LN2".into(), Value::Number(std::f64::consts::LN_2));
+            math.insert("LN10".into(), Value::Number(std::f64::consts::LN_10));
+            math.insert("LOG2E".into(), Value::Number(std::f64::consts::LOG2_E));
+            math.insert("LOG10E".into(), Value::Number(std::f64::consts::LOG10_E));
+            math.insert("SQRT2".into(), Value::Number(std::f64::consts::SQRT_2));
+            math.insert(
+                "SQRT1_2".into(),
+                Value::Number(std::f64::consts::FRAC_1_SQRT_2),
+            );
             s.set(
                 "Math".into(),
                 Value::object(math),
