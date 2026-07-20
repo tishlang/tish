@@ -55,6 +55,12 @@ pub struct LoopFn {
     /// region). The region always has ≥1 exit (an exit-less region would be an uninterruptible native
     /// loop, so compilation bails).
     pub exits: Vec<usize>,
+    /// #203 — array live-in slots `(chunk slot, writable)` in marshalling order (ascending slot). EMPTY
+    /// ⇒ the pure-numeric 2-pointer ABI `(slots, deopt)` (unchanged). NON-EMPTY ⇒ the 3-pointer array
+    /// ABI `(slots, handles, deopt)`: `run_osr` extracts each array live-in to a scratch `Vec<f64>`,
+    /// passes it as an [`ArrayHandle`], and (for a `writable` slot) copies the scratch back into the
+    /// caller's `Value::Array` — ONLY on a clean, non-deopt exit.
+    pub array_slots: Vec<(u16, bool)>,
 }
 
 // SAFETY: identical to `NumericFn` — `ptr` is immutable executable code in the process-global,
@@ -64,17 +70,27 @@ unsafe impl Send for LoopFn {}
 unsafe impl Sync for LoopFn {}
 
 impl LoopFn {
-    /// Run the region. `buf` holds the live-ins (`used_slots.len()` `f64`s), updated in place with the
-    /// live-outs on return. `deopt` is a 1-byte flag (unused in v1). Returns the exit id. Safe wrapper
-    /// — the raw-pointer transmute (same soundness as [`NumericFn::call`]: immutable native code with a
-    /// fixed C ABI) is confined here, so call sites need no `unsafe`.
+    /// Run the region. `buf` holds the numeric live-ins (`used_slots.len()` `f64`s), updated in place
+    /// with the live-outs on return. `handles` holds the array live-ins (`array_slots.len()`
+    /// [`ArrayHandle`]s, in `array_slots` order) — empty for a pure-numeric region. `deopt` is a
+    /// 1-byte flag the region sets on an int-slot live-in miss (#514) or an out-of-bounds array index
+    /// (#203); on `deopt != 0` the caller discards `buf` AND the scratch behind `handles` and
+    /// re-interprets. Returns the exit id. Safe wrapper — the raw-pointer transmute (same soundness as
+    /// [`NumericFn::call`]: immutable native code with a fixed C ABI) is confined here.
     #[inline]
-    pub fn call(&self, buf: &mut [f64], deopt: &mut u8) -> i32 {
-        // SAFETY: `ptr` is immutable executable code compiled for exactly this `(*mut f64, *mut u8)`
-        // ABI; `buf`/`deopt` are valid for the call and the region only touches `buf[0..used_slots]`.
+    pub fn call(&self, buf: &mut [f64], handles: &mut [ArrayHandle], deopt: &mut u8) -> i32 {
+        // SAFETY: `ptr` is immutable executable code compiled for exactly this ABI (2-pointer when
+        // `array_slots` is empty, else 3-pointer); `buf`/`handles`/`deopt` are valid for the call and
+        // the region only touches `buf[0..used_slots]` + the handles' backing scratch.
         unsafe {
-            let f: extern "C" fn(*mut f64, *mut u8) -> i32 = std::mem::transmute(self.ptr);
-            f(buf.as_mut_ptr(), deopt as *mut u8)
+            if self.array_slots.is_empty() {
+                let f: extern "C" fn(*mut f64, *mut u8) -> i32 = std::mem::transmute(self.ptr);
+                f(buf.as_mut_ptr(), deopt as *mut u8)
+            } else {
+                let f: extern "C" fn(*mut f64, *mut ArrayHandle, *mut u8) -> i32 =
+                    std::mem::transmute(self.ptr);
+                f(buf.as_mut_ptr(), handles.as_mut_ptr(), deopt as *mut u8)
+            }
         }
     }
 }
@@ -175,6 +191,30 @@ pub fn jit_jv_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("TISH_JIT_JV")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// #203 — bounded array-index (`arr[i]` read / `arr[i] = v` write) inside an OSR loop **region**
+/// (the matmul lever). A hot loop that indexes a numeric `Value::Array` live-in (created BEFORE the
+/// region, e.g. matmul's `a`/`b`/`c`) is marshalled through the [`ArrayHandle`] inline ABI: each
+/// array live-in is extracted to a scratch `Vec<f64>` and passed as `(ptr,len)`; `GetIndex`/`SetIndex`
+/// lower to a bounds-checked native load/store over a COMPUTED index (`a[i*N+k]`), and writable arrays
+/// are copied back only on a clean (non-deopt) exit. Any out-of-bounds index sets the region deopt
+/// flag and the VM re-interprets from the pristine pre-region state (scratch discarded, real array
+/// untouched) — identical to the entry int-slot guard, so a mid-region bail never commits a partial
+/// result. Additive + bail-safe: a misclassified slot fails the runtime `Value::Array` marshalling
+/// check (→ interpret), and an unhandleable region shape is simply not compiled.
+///
+/// **Default ON** (validated: matmul 87×, zero perf regressions across the 29-fixture gauntlet, parity
+/// interp==vm==node, all six backends agree, adversarial review found + fixed the one bool-store bug);
+/// `TISH_JIT_OSR_ARRAY=0` disables it (escape hatch).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn osr_array_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TISH_JIT_OSR_ARRAY")
             .map(|v| v != "0")
             .unwrap_or(true)
     })
@@ -547,6 +587,15 @@ thread_local! {
     static JV_ARENA: std::cell::RefCell<JvArena> = const {
         std::cell::RefCell::new(JvArena { vecs: Vec::new(), free: Vec::new(), deopt: false })
     };
+    /// #203 — cache of `(chunk ptr, inner loop header) → (trig header, trig end, trig indexes arrays)`
+    /// for [`osr_expand_cached`]. The expansion analysis (a whole-chunk scan + per-candidate classify)
+    /// is loop-structure-only, so it is stable for a given chunk+header and computed ONCE here rather
+    /// than on every back-edge — critical for a small hot loop inside a function called millions of
+    /// times (e.g. nbody's `advance`), where recomputing per call is a real regression. A stale entry
+    /// (a freed chunk's address reused) can only mis-route a perf hint: `run_osr`/`compile_loop_region`
+    /// re-validate the region structurally + by fingerprint, so a wrong hint never miscompiles.
+    static OSR_EXPAND_CACHE: std::cell::RefCell<HashMap<(usize, usize), (usize, usize, bool, bool)>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 /// `handle` (1-based, `0` = null) → arena index, or `None` for the null handle.
 #[cfg(not(target_arch = "wasm32"))]
@@ -921,6 +970,121 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
     result
 }
 
+/// #203 — expand a hot inner-loop region to the OUTERMOST enclosing loop that is itself array-OSR-
+/// compilable, so an array-indexing loop nest (matmul) marshals its arrays ONCE and runs the whole
+/// nest natively, instead of re-marshalling O(array) per inner-loop entry (a net wash). Returns the
+/// widest enclosing loop `(header, end)` whose region `classify_osr_arrays` accepts, or the input
+/// region if none encloses it. Only meaningful under `TISH_JIT_OSR_ARRAY`; the caller gates on the
+/// flag. SOUND to trigger at the returned loop's own back-edge: a `for` increment sits inside the
+/// region before the back-edge (so the live-in captures the *next* index) and inner loop vars are
+/// re-initialized by the body, so a native re-entry continues, never re-runs, completed iterations.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn osr_expand_region(chunk: &Chunk, header_ip: usize, region_end: usize) -> (usize, usize) {
+    let code = &chunk.code;
+    let mut best = (header_ip, region_end);
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let size = match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+        if op == Opcode::JumpBack {
+            if let Some(dist) = peek_u16(code, ip + 1) {
+                let pos = ip + 3; // region_end convention: byte AFTER the JumpBack instruction
+                let tgt = pos.saturating_sub(dist as usize); // that loop's header
+                // A loop that STRICTLY encloses the input region (`tgt < header_ip` — starts before it —
+                // and `pos >= region_end`), and that ITSELF INDEXES ARRAYS, is worth expanding to: the
+                // whole point is to marshal its arrays once. Pick the WIDEST (smallest header). Keeping
+                // the header strictly smaller guarantees `best.0 == header_ip ⇒ best.1 == region_end`
+                // (no expansion), so the trigger's "sound entry" test stays exact.
+                let encloses = tgt < header_ip && pos >= region_end && tgt < best.0;
+                if encloses
+                    && classify_osr_arrays(chunk, tgt, pos).is_some_and(|a| !a.slots.is_empty())
+                {
+                    best = (tgt, pos);
+                }
+            }
+        }
+        ip += size;
+    }
+    best
+}
+
+/// #203 — does the OSR region `[header_ip, region_end)` index at least one array? Drives the OSR
+/// trigger cadence: an array-indexing (expandable) loop fires on the first sound entry past the
+/// threshold; a pure-numeric loop keeps the original threshold+retry-modulo sampling.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn osr_region_has_arrays(chunk: &Chunk, header_ip: usize, region_end: usize) -> bool {
+    classify_osr_arrays(chunk, header_ip, region_end).is_some_and(|a| !a.slots.is_empty())
+}
+
+/// #203 — is the region `[header_ip, region_end)` strictly enclosed by ANOTHER loop? An array region
+/// nested inside a non-array outer loop (e.g. k_nucleotide's `seq[i+j]` inner loop inside the Map-op
+/// outer loop) is re-entered per outer iteration, so array-OSR'ing it would re-marshal the whole array
+/// each entry — a net wash. Such regions are left to the interpreter (matching the flag-off path, where
+/// their `GetIndex` bails the numeric OSR anyway). Only an OUTERMOST array loop (matmul's `i` loop)
+/// marshals once and wins.
+#[cfg(not(target_arch = "wasm32"))]
+fn osr_region_enclosed(chunk: &Chunk, header_ip: usize, region_end: usize) -> bool {
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let size = match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => break,
+        };
+        if op == Opcode::JumpBack {
+            if let Some(dist) = peek_u16(code, ip + 1) {
+                let pos = ip + 3;
+                let tgt = pos.saturating_sub(dist as usize);
+                // strictly encloses on at least one side, contains on the other
+                if tgt <= header_ip && pos >= region_end && (tgt < header_ip || pos > region_end) {
+                    return true;
+                }
+            }
+        }
+        ip += size;
+    }
+    false
+}
+
+/// #203 — the OSR trigger decision for the loop at `header_ip`, memoized per `(chunk, header)` in a
+/// thread-local so the whole-chunk scans run at most once per loop header for the life of the thread
+/// (not once per enclosing-function call). Returns `(trig header, trig end, has_arrays, array_worthy)`:
+///   * `trig` = the outermost enclosing array loop to run instead (`== header_ip` if none);
+///   * `has_arrays` = the trig region indexes an array;
+///   * `array_worthy` = `has_arrays` AND the trig region is NOT itself nested in another loop — i.e.
+///     array-OSR'ing it marshals once and wins, rather than re-marshalling per outer iteration (a wash).
+/// The VM's `JumpBack` handler runs the array path only when `array_worthy`, gives up on a `has_arrays
+/// && !array_worthy` nested wash (interpret, matching flag-off), and takes the numeric path otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn osr_expand_cached(
+    chunk: &Chunk,
+    header_ip: usize,
+    region_end: usize,
+) -> (usize, usize, bool, bool) {
+    let key = (chunk as *const Chunk as usize, header_ip);
+    OSR_EXPAND_CACHE.with(|c| {
+        if let Some(&v) = c.borrow().get(&key) {
+            return v;
+        }
+        let (th, te) = osr_expand_region(chunk, header_ip, region_end);
+        let has_arrays = osr_region_has_arrays(chunk, th, te);
+        let array_worthy = has_arrays && !osr_region_enclosed(chunk, th, te);
+        let v = (th, te, has_arrays, array_worthy);
+        c.borrow_mut().insert(key, v);
+        v
+    })
+}
+
 /// Compile the hot loop region `[header_ip, region_end)` of `chunk` to native code (#190 OSR), or
 /// `None` if it is not a pure-numeric slot loop. Cached per `(chunk, header_ip)` with a fingerprint
 /// guard (negative results included, so a non-compilable loop is scanned once). Called from the frame
@@ -957,6 +1121,20 @@ fn compile_loop_region(
         return None;
     }
 
+    // #203 array-index (the matmul lever): behind `TISH_JIT_OSR_ARRAY`, classify the array live-in
+    // slots (`arr[i]` read / `arr[i]=v` write over a computed index). `None` ⇒ the region has array
+    // ops this pass can't lower ⇒ not compilable (its index ops keep bailing). `Some(empty)` ⇒ a
+    // pure-numeric region on the unchanged 2-pointer ABI. `Some(non-empty)` ⇒ the 3-pointer array ABI.
+    let arrays = if osr_array_enabled() {
+        classify_osr_arrays(chunk, header_ip, region_end)?
+    } else {
+        OsrArrays {
+            slots: Vec::new(),
+            writable: std::collections::BTreeSet::new(),
+        }
+    };
+    let array_set: std::collections::BTreeSet<u16> = arrays.slots.iter().copied().collect();
+
     // 1. Scan the region: validate the whitelist (op_size = None ⇒ bail), collect in-region block
     //    leaders, the live slot set, and the EXIT targets (jump targets outside the region). A
     //    JumpBack must stay inside the region (its own loop, possibly nested); one leaving the region
@@ -969,6 +1147,10 @@ fn compile_loop_region(
     while ip < region_end {
         let op = Opcode::from_u8(*code.get(ip)?)?;
         match op {
+            // #203: an `arr[i]` read / `arr[i]=v` write over a classified array slot — validated by
+            // `classify_osr_arrays`, lowered by the region body. `array_set` empty ⇒ these never appear
+            // (their base slot would have been classified an array), so the arm below can't fire.
+            Opcode::GetIndex | Opcode::SetIndex if !array_set.is_empty() => {}
             // Pure slot / stack / arithmetic / structured control flow — the region vocabulary.
             Opcode::Nop
             | Opcode::Pop
@@ -981,7 +1163,12 @@ fn compile_loop_region(
             | Opcode::MathUnary // #186 — `Math.<fn>(x)`: 1 f64 in, 1 f64 out (like UnaryOp)
             | Opcode::MathBinary => {} // #203 — `Math.<fn>(a,b)`: 2 f64 in, 1 f64 out
             Opcode::LoadLocal | Opcode::StoreLocal => {
-                used.insert(peek_u16(code, ip + 1)?);
+                let s = peek_u16(code, ip + 1)?;
+                // #203: an array slot's live-in is a `Value::Array` marshalled through the handles
+                // buffer, NOT an f64 in the slots buffer — keep it out of the numeric live set.
+                if !array_set.contains(&s) {
+                    used.insert(s);
+                }
             }
             Opcode::LoadConst => match chunk.constants.get(peek_u16(code, ip + 1)? as usize) {
                 Some(Constant::Number(_)) | Some(Constant::Bool(_)) => {}
@@ -1047,11 +1234,26 @@ fn compile_loop_region(
     let exits: Vec<usize> = exit_targets.iter().copied().collect();
     let exit_id: HashMap<usize, usize> = exits.iter().enumerate().map(|(i, &t)| (t, i)).collect();
 
-    // 2. Build the region function. Signature: (slots: i64 ptr, deopt: i64 ptr) -> i32 exit id.
+    // #203: array slot → its index in the handles buffer (marshalling order = ascending slot). Empty
+    // ⇒ the pure-numeric 2-pointer ABI (unchanged). The region body loads `(ptr,len)` from the handles
+    // buffer at `16 * array_pos[slot]` for each `arr[i]` access.
+    let has_arrays = !arrays.slots.is_empty();
+    let array_pos: HashMap<u16, usize> = arrays
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(p, &s)| (s, p))
+        .collect();
+
+    // 2. Build the region function. Signature: `(slots, deopt) -> i32` (pure numeric) or
+    //    `(slots, handles, deopt) -> i32` (#203 array mode) — all pointers; returns the exit id.
     let ptr_ty = g.module.target_config().pointer_type();
     let mut sig = g.module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // slots buffer
-    sig.params.push(AbiParam::new(ptr_ty)); // deopt flag (reserved)
+    if has_arrays {
+        sig.params.push(AbiParam::new(ptr_ty)); // #203 handles buffer (ArrayHandle[])
+    }
+    sig.params.push(AbiParam::new(ptr_ty)); // deopt flag (int-slot miss #514 / OOB #203)
     sig.returns.push(AbiParam::new(types::I32));
 
     let name = format!("tish_osr_{}", g.counter);
@@ -1078,6 +1280,7 @@ fn compile_loop_region(
         &exit_id,
         math_fref,
         math_binary_fref,
+        &array_pos,
     );
     if !built {
         g.module.clear_context(&mut ctx);
@@ -1092,10 +1295,16 @@ fn compile_loop_region(
         return None;
     }
     let fptr = g.module.get_finalized_function(id);
+    let array_slots: Vec<(u16, bool)> = arrays
+        .slots
+        .iter()
+        .map(|&s| (s, arrays.writable.contains(&s)))
+        .collect();
     Some(LoopFn {
         ptr: fptr as usize,
         used_slots,
         exits,
+        array_slots,
     })
 }
 
@@ -1117,6 +1326,9 @@ fn build_loop_region_body(
     exit_id: &HashMap<usize, usize>,
     math_fref: cranelift::codegen::ir::FuncRef,
     math_binary_fref: cranelift::codegen::ir::FuncRef,
+    // #203: array slot → its index in the handles buffer (marshalling order). Empty ⇒ the pure-numeric
+    // 2-pointer ABI; non-empty ⇒ the 3-pointer array ABI `(slots, handles, deopt)`.
+    array_pos: &HashMap<u16, usize>,
 ) -> bool {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -1136,7 +1348,26 @@ fn build_loop_region_body(
     bcx.switch_to_block(entry);
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
     let slots_ptr = params[0];
-    let deopt_ptr = params[1]; // #514: set when an int-slot live-in guard fails → the VM re-interprets
+    // #203: the array ABI inserts a `handles` pointer between `slots` and `deopt`. `deopt` is set on an
+    // int-slot live-in guard fail (#514) or an out-of-bounds array index (#203) → the VM re-interprets.
+    let (handles_ptr, deopt_ptr) = if array_pos.is_empty() {
+        (None, params[1])
+    } else {
+        (Some(params[1]), params[2])
+    };
+    // #203: load each array live-in's `(ptr, len)` ONCE at entry (loop-invariant; the entry block
+    // dominates the whole loop). `ArrayHandle` is `#[repr(C)] { ptr: *mut f64 @0, len: usize @8 }`,
+    // 16 bytes. `array_handles[slot] = (data_ptr, len_i64)`.
+    let ptr_ty = bcx.func.dfg.value_type(slots_ptr);
+    let mut array_handles: HashMap<u16, (ClifValue, ClifValue)> = HashMap::new();
+    if let Some(hptr) = handles_ptr {
+        for (&slot, &pos) in array_pos.iter() {
+            let base = (pos * 16) as i32;
+            let data = bcx.ins().load(ptr_ty, MemFlags::new(), hptr, base);
+            let len = bcx.ins().load(types::I64, MemFlags::new(), hptr, base + 8);
+            array_handles.insert(slot, (data, len));
+        }
+    }
 
     // #514: port the fn-body int-typed slots (#511) into the OSR loop region. A slot whose every store
     // is integer-typed lives in an `i64` Variable (`Repr::I64Num`), so an integer hash/PRNG accumulator
@@ -1225,8 +1456,28 @@ fn build_loop_region_body(
         }
     }
 
+    // #203: shared out-of-bounds pad — every array bounds-check that fails branches here, sets the
+    // deopt flag, and returns (exit id 0). The VM sees `deopt != 0` and re-interprets from the pristine
+    // pre-region state (the numeric buffer AND the array scratch are discarded, the real arrays are
+    // untouched), so a mid-region OOB never commits a partial result. Filled now; sealed at the end.
+    let array_deopt_block = if array_pos.is_empty() {
+        None
+    } else {
+        let b = bcx.create_block();
+        bcx.switch_to_block(b);
+        let flag = bcx.ins().iconst(types::I8, 1);
+        bcx.ins().store(MemFlags::new(), flag, deopt_ptr, 0);
+        let zero = bcx.ins().iconst(types::I32, 0);
+        bcx.ins().return_(&[zero]);
+        Some(b)
+    };
+
     // Translate the region. Operand stack is empty at every block boundary (statement-level flow).
     let mut stack: Vec<JV> = Vec::new();
+    // #203: array handles "in flight" — pushed by `LoadLocal(array slot)` as `(data_ptr, len)`, consumed
+    // by the very next `GetIndex`/`SetIndex`. Like `stack`, must be empty at every block boundary (an
+    // array access never spans a branch).
+    let mut arr_pending: Vec<(ClifValue, ClifValue)> = Vec::new();
     bcx.switch_to_block(header_block);
     let mut cur = header_block;
     let mut terminated = false;
@@ -1235,7 +1486,9 @@ fn build_loop_region_body(
         if let Some(&blk) = blocks.get(&ip) {
             if blk != cur {
                 if !terminated {
-                    if !stack.is_empty() {
+                    // #203: an operand OR a pending array handle spanning a block boundary is a shape
+                    // this straight-line-per-block emitter can't carry → bail (region interpreted).
+                    if !stack.is_empty() || !arr_pending.is_empty() {
                         return false;
                     }
                     bcx.ins().jump(blk, &[]);
@@ -1244,6 +1497,7 @@ fn build_loop_region_body(
                 cur = blk;
                 terminated = false;
                 stack.clear();
+                arr_pending.clear();
             }
         }
         let op = match Opcode::from_u8(code[ip]).zip(op_size_at(code, ip)) {
@@ -1263,6 +1517,13 @@ fn build_loop_region_body(
                     Some(s) => s as usize,
                     None => return false,
                 };
+                // #203: an array slot's "value" is its `(data_ptr, len)` handle — stage it OFF the
+                // numeric stack for the next `GetIndex`/`SetIndex` (matches build_body_cfg's jv_pending).
+                if let Some(&handle) = array_handles.get(&(slot as u16)) {
+                    arr_pending.push(handle);
+                    ip += 3;
+                    continue;
+                }
                 let v = match vars.get(slot) {
                     Some(v) => *v,
                     None => return false,
@@ -1414,6 +1675,82 @@ fn build_loop_region_body(
                 let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
                 stack.push(JV::f64(r));
                 ip += 3;
+            }
+            // #203 — `arr[idx]` read. `arr`'s `(data,len)` handle is in `arr_pending`; the computed
+            // index is the f64 top of stack. `idx as usize` (saturating: NaN/neg → 0) matches the VM's
+            // coercion; an out-of-bounds index branches to the shared deopt pad (the VM re-interprets).
+            Opcode::GetIndex if !arr_pending.is_empty() => {
+                let (data, len) = match arr_pending.pop() {
+                    Some(h) => h,
+                    None => return false,
+                };
+                let idx = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let db = match array_deopt_block {
+                    Some(b) => b,
+                    None => return false,
+                };
+                let idx = jv_f64(&mut bcx, idx);
+                let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
+                let inb = bcx.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let cont = bcx.create_block();
+                bcx.ins().brif(inb, cont, &[], db, &[]);
+                bcx.switch_to_block(cont);
+                cur = cont; // keep block-boundary tracking accurate after the mid-stream split
+                let off = bcx.ins().imul_imm(i, 8);
+                let addr = bcx.ins().iadd(data, off);
+                let val = bcx.ins().load(types::F64, MemFlags::new(), addr, 0);
+                stack.push(JV::f64(val));
+                ip += 1;
+            }
+            // #203 — `arr[idx] = v`. Stack: `[idx, val, dup_val]` (a `Dup` of `val` for the expression
+            // result); `arr`'s handle is in `arr_pending`. Store `dup_val` (== `val`) at the bounds-
+            // checked address; OOB → the deopt pad (scratch discarded, real array untouched).
+            Opcode::SetIndex if !arr_pending.is_empty() => {
+                let (data, len) = match arr_pending.pop() {
+                    Some(h) => h,
+                    None => return false,
+                };
+                let dup = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let _val = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let idx = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                // #203 SOUNDNESS: the region flattens every element to f64 and `run_osr` re-boxes the
+                // writeback as `Value::Number`. Storing a BOOLEAN (a comparison result `arr[i] = x>y`,
+                // a `LoadConst(Bool)`, or `!x`) would therefore land as `Number 1`/`0` where the
+                // interpreter stores `Bool true`/`false` — a divergence. There are no bool SLOTS in a
+                // region (StoreLocal bails on a bool), so a bool value is always this transient Repr::Bool
+                // — bail the whole region compile, let the interpreter handle the write.
+                if dup.is_bool() {
+                    return false;
+                }
+                let db = match array_deopt_block {
+                    Some(b) => b,
+                    None => return false,
+                };
+                let store_val = jv_f64(&mut bcx, dup);
+                let idx = jv_f64(&mut bcx, idx);
+                let i = bcx.ins().fcvt_to_uint_sat(types::I64, idx);
+                let inb = bcx.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let cont = bcx.create_block();
+                bcx.ins().brif(inb, cont, &[], db, &[]);
+                bcx.switch_to_block(cont);
+                cur = cont;
+                let off = bcx.ins().imul_imm(i, 8);
+                let addr = bcx.ins().iadd(data, off);
+                bcx.ins().store(MemFlags::new(), store_val, addr, 0);
+                stack.push(JV::f64(store_val)); // assignment yields the value
+                ip += 1;
             }
             Opcode::MathBinary => {
                 // #203 — `Math.<fn>(a, b)`: pop b, pop a, host-call, push. Every 2-arg Math fn routes
@@ -2707,6 +3044,141 @@ fn classify_int_slots(chunk: &Chunk, arity: usize) -> std::collections::HashSet<
         .difference(&other_stores)
         .copied()
         .collect()
+}
+
+/// #203 — the array live-in slots of an OSR loop region (the matmul lever), with the written subset.
+#[cfg(not(target_arch = "wasm32"))]
+struct OsrArrays {
+    /// Array-holding slots in ascending slot order — the marshalling order of the handles buffer.
+    slots: Vec<u16>,
+    /// Subset of `slots` written via `SetIndex` (copied back only after a clean, non-deopt exit).
+    writable: std::collections::BTreeSet<u16>,
+}
+
+/// #203 — classify the array live-in slots of an OSR loop region `[header_ip, region_end)`. Abstract-
+/// interprets the region's operand stack to find every slot used PURELY as the base of an `arr[i]`
+/// read (`GetIndex`) or `arr[i] = v` write (`SetIndex`) with an arbitrary COMPUTED index (`a[i*N+k]`).
+///
+/// Returns `Some(arrays)` — possibly with an empty `slots` (a pure-numeric region: caller keeps the
+/// unchanged 2-pointer ABI) — when the region's array usage is fully lowerable; `None` when it holds a
+/// `GetIndex`/`SetIndex` the emitter can't handle: a non-slot / computed array BASE (`a[i][j]`), an
+/// array slot also used as a scalar or reassigned (`arr = …`), or an operand stack the linear abstract
+/// interp can't balance. `None` leaves the region non-OSR-compilable (its index ops still bail).
+///
+/// Imprecision is always SAFE — never a miscompile: a slot wrongly called an array fails the runtime
+/// `Value::Array` marshalling guard in `run_osr` (→ interpret); a slot wrongly NOT called an array
+/// leaves a `GetIndex`/`SetIndex` the region emitter rejects (→ region not compiled). Only correctly-
+/// classified, all-`Number`-element arrays are ever compiled.
+#[cfg(not(target_arch = "wasm32"))]
+fn classify_osr_arrays(chunk: &Chunk, header_ip: usize, region_end: usize) -> Option<OsrArrays> {
+    let code = &chunk.code;
+    // An abstract stack entry: `Ref(slot)` = a bare `LoadLocal(slot)` result untouched since; any other
+    // producer (const, arithmetic, a loaded element, …) is `Scalar`. An array base must be a `Ref`.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Av {
+        Scalar,
+        Ref(u16),
+    }
+    let mut astack: Vec<Av> = Vec::new();
+    let mut array_slots: std::collections::BTreeSet<u16> = Default::default();
+    let mut writable: std::collections::BTreeSet<u16> = Default::default();
+    // Slots ever consumed as a scalar (arithmetic operand, index, store source, cond, …) or reassigned
+    // — an array slot must appear in NEITHER, else its live-in isn't a stable, index-only array handle.
+    let mut scalar_use: std::collections::BTreeSet<u16> = Default::default();
+    let mut stored: std::collections::BTreeSet<u16> = Default::default();
+    // Consume one operand; a bare `Ref(slot)` reaching a scalar position taints that slot.
+    let taint = |astack: &mut Vec<Av>, scalar_use: &mut std::collections::BTreeSet<u16>| -> Option<()> {
+        match astack.pop()? {
+            Av::Ref(s) => {
+                scalar_use.insert(s);
+            }
+            Av::Scalar => {}
+        }
+        Some(())
+    };
+    let mut ip = header_ip;
+    while ip < region_end {
+        let op = Opcode::from_u8(*code.get(ip)?)?;
+        let size = op_size(op)?; // whitelist-sized ops only; anything else ⇒ region not compilable
+        match op {
+            Opcode::LoadLocal => astack.push(Av::Ref(peek_u16(code, ip + 1)?)),
+            Opcode::LoadConst => astack.push(Av::Scalar),
+            Opcode::StoreLocal => {
+                stored.insert(peek_u16(code, ip + 1)?);
+                taint(&mut astack, &mut scalar_use)?; // the stored value
+            }
+            Opcode::Pop => {
+                astack.pop()?; // discarded — no taint (a bare pop doesn't "use" the slot)
+            }
+            Opcode::Dup => {
+                let top = *astack.last()?;
+                astack.push(top);
+            }
+            Opcode::Nop
+            | Opcode::EnterBlock
+            | Opcode::ExitBlock
+            | Opcode::LoopVarsEnd
+            | Opcode::LoopVarsBegin => {}
+            Opcode::UnaryOp | Opcode::MathUnary => {
+                taint(&mut astack, &mut scalar_use)?;
+                astack.push(Av::Scalar);
+            }
+            Opcode::BinOp | Opcode::MathBinary => {
+                taint(&mut astack, &mut scalar_use)?;
+                taint(&mut astack, &mut scalar_use)?;
+                astack.push(Av::Scalar);
+            }
+            Opcode::GetIndex => {
+                taint(&mut astack, &mut scalar_use)?; // index (a scalar use of whatever produced it)
+                match astack.pop()? {
+                    Av::Ref(s) => {
+                        array_slots.insert(s);
+                    }
+                    Av::Scalar => return None, // computed / nested array base (`a[i][j]`) — bail
+                }
+                astack.push(Av::Scalar); // the loaded element
+            }
+            Opcode::SetIndex => {
+                taint(&mut astack, &mut scalar_use)?; // dup_val
+                taint(&mut astack, &mut scalar_use)?; // val
+                taint(&mut astack, &mut scalar_use)?; // idx
+                match astack.pop()? {
+                    Av::Ref(s) => {
+                        array_slots.insert(s);
+                        writable.insert(s);
+                    }
+                    Av::Scalar => return None,
+                }
+                astack.push(Av::Scalar); // SetIndex leaves the assigned value
+            }
+            // A terminator ends the basic block: the region invariant makes the operand stack empty
+            // here (JumpIfFalse pops its cond first). Clearing keeps the abstract stack self-contained
+            // per block — array access never spans a branch, so this loses nothing we can lower.
+            Opcode::Jump | Opcode::JumpBack => astack.clear(),
+            Opcode::JumpIfFalse => {
+                taint(&mut astack, &mut scalar_use)?; // cond
+                astack.clear();
+            }
+            _ => return None, // an opcode outside the region vocabulary ⇒ not compilable
+        }
+        ip += size;
+    }
+    // An array slot used anywhere as a scalar, or reassigned, isn't a stable index-only handle ⇒ the
+    // whole region is not array-compilable (its index ops keep bailing).
+    if array_slots
+        .iter()
+        .any(|s| scalar_use.contains(s) || stored.contains(s))
+    {
+        return None;
+    }
+    // Cap the handle count (matmul uses 3); keep it small so the marshalling stays cheap.
+    if array_slots.len() > 8 {
+        return None;
+    }
+    Some(OsrArrays {
+        slots: array_slots.into_iter().collect(),
+        writable,
+    })
 }
 
 /// on any misuse of a JV ref (it reaching a numeric op, a return, a call arg, a block boundary, …),
@@ -4397,7 +4869,7 @@ mod tests {
         assert!(!lf.used_slots.is_empty() && !lf.exits.is_empty());
         let mut buf = vec![0.0f64; lf.used_slots.len()];
         let mut deopt = 0u8;
-        let exit = lf.call(&mut buf, &mut deopt);
+        let exit = lf.call(&mut buf, &mut [], &mut deopt);
         assert!((exit as usize) < lf.exits.len(), "exit id in range");
         assert_eq!(deopt, 0, "v1 region never sets the deopt flag");
         let mut got = buf.clone();
@@ -4451,7 +4923,7 @@ mod tests {
             try_compile_loop(&chunk, header, end).expect("branchy numeric loop must OSR-compile");
         let mut buf = vec![0.0f64; lf.used_slots.len()];
         let mut deopt = 0u8;
-        lf.call(&mut buf, &mut deopt);
+        lf.call(&mut buf, &mut [], &mut deopt);
         let mut got = buf.clone();
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(got, vec![20.0, 90.0], "s=90 (0+2+…+18), i=20");
