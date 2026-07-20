@@ -11,7 +11,7 @@ use tishlang_ast::{
 
 use crate::chunk::{Chunk, Constant};
 use crate::encoding::{binop_to_u8, compound_op_to_u8, unaryop_to_u8};
-use crate::opcode::{MathUnaryFn, Opcode};
+use crate::opcode::{MathBinaryFn, MathUnaryFn, Opcode};
 
 enum SimpleMapResult {
     Identity,
@@ -2396,6 +2396,31 @@ impl<'a> Compiler<'a> {
                                 if let Some(mfn) = MathUnaryFn::from_name(fname.as_ref()) {
                                     self.compile_expr(arg)?;
                                     self.emit_u16(Opcode::MathUnary, mfn as u16);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+                // #203: `Math.<binfn>(a, b)` → `<a>; <b>; MathBinary(id)` — the same unshadowed-global
+                // gate, for exactly two positional args (variadic `Math.max(a,b,c)` falls through to a
+                // generic call). Lets the numeric JIT lower clamp/pow kernels instead of bailing.
+                if self.math_is_global && args.len() == 2 {
+                    if let Expr::Member {
+                        object,
+                        prop: MemberProp::Name { name: fname, .. },
+                        optional: false,
+                        ..
+                    } = callee.as_ref()
+                    {
+                        if let (Expr::Ident { name: obj, .. }, CallArg::Expr(a0), CallArg::Expr(a1)) =
+                            (object.as_ref(), &args[0], &args[1])
+                        {
+                            if obj.as_ref() == "Math" && self.resolve_slot("Math").is_none() {
+                                if let Some(bfn) = MathBinaryFn::from_name(fname.as_ref()) {
+                                    self.compile_expr(a0)?;
+                                    self.compile_expr(a1)?;
+                                    self.emit_u16(Opcode::MathBinary, bfn as u16);
                                     return Ok(());
                                 }
                             }

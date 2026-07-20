@@ -2483,6 +2483,23 @@ impl Vm {
                         .ok_or_else(|| format!("Bad MathUnary id: {}", id))?;
                     self.stack.push(Value::Number(mfn.apply(x)));
                 }
+                Opcode::MathBinary => {
+                    // #203 — `Math.<fn>(a, b)` on two numbers. Same reasoning as MathUnary (emitted
+                    // only when `Math` is the global builtin); each non-number coerces to NaN. Args
+                    // were pushed a-then-b, so pop b first.
+                    let id = Self::read_u16(code, &mut ip);
+                    let b = match self.stack.pop() {
+                        Some(Value::Number(n)) => n,
+                        Some(_) | None => f64::NAN,
+                    };
+                    let a = match self.stack.pop() {
+                        Some(Value::Number(n)) => n,
+                        Some(_) | None => f64::NAN,
+                    };
+                    let bfn = tishlang_bytecode::MathBinaryFn::from_u16(id)
+                        .ok_or_else(|| format!("Bad MathBinary id: {}", id))?;
+                    self.stack.push(Value::Number(bfn.apply(a, b)));
+                }
                 Opcode::LoadConst => {
                     let idx = Self::read_u16(code, &mut ip);
                     let c = constants

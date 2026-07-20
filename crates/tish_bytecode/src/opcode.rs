@@ -145,6 +145,11 @@ pub enum Opcode {
     /// lower it to a native op / libcall without a runtime shape guard. Behaviour is identical to
     /// `LoadVar Math; GetMember fn; <arg>; Call 1` on a number.
     MathUnary = 55,
+    /// #203 — apply a BINARY `Math.<fn>` intrinsic (max / min / pow / atan2 / hypot) to the top TWO
+    /// numbers: pop `b`, pop `a`, push `Math.fn(a, b)`. The u16 operand is the [`MathBinaryFn`] id.
+    /// Same emission gate as [`Opcode::MathUnary`] (`Math` provably the unshadowed global) but for
+    /// exactly two args. Behaviour identical to `LoadVar Math; GetMember fn; <a>; <b>; Call 2`.
+    MathBinary = 56,
 }
 
 /// The unary `Math` functions the [`Opcode::MathUnary`] fast path recognizes (#186). f64→f64;
@@ -289,11 +294,81 @@ impl MathUnaryFn {
     }
 }
 
+/// The binary `Math` functions the [`Opcode::MathBinary`] fast path recognizes (#203). `(f64, f64) →
+/// f64`; the discriminant is the opcode operand. Kept in sync with the VM handler and JIT lowering.
+/// (`hypot` is intentionally NOT here — it stays a correct generic call to avoid replicating its
+/// scaled-sum-of-squares in this below-builtins crate.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum MathBinaryFn {
+    Max = 0,
+    Min = 1,
+    Pow = 2,
+    Atan2 = 3,
+}
+
+impl MathBinaryFn {
+    /// Map a `Math.<name>` member to its id, or `None` if it isn't a supported 2-arg intrinsic.
+    pub fn from_name(name: &str) -> Option<MathBinaryFn> {
+        Some(match name {
+            "max" => MathBinaryFn::Max,
+            "min" => MathBinaryFn::Min,
+            "pow" => MathBinaryFn::Pow,
+            "atan2" => MathBinaryFn::Atan2,
+            _ => return None,
+        })
+    }
+
+    /// Decode an opcode operand to the fn id (safe match — no transmute).
+    pub fn from_u16(v: u16) -> Option<MathBinaryFn> {
+        use MathBinaryFn::*;
+        Some(match v {
+            0 => Max,
+            1 => Min,
+            2 => Pow,
+            3 => Atan2,
+            _ => return None,
+        })
+    }
+
+    /// Apply the intrinsic — the single source of truth for VM + JIT result parity. Replicates the JS
+    /// semantics of `tishlang_builtins::math` (this crate sits below builtins), so VM/JIT == interp.
+    #[inline]
+    pub fn apply(self, a: f64, b: f64) -> f64 {
+        match self {
+            // Math.max(a,b): NaN if either is NaN; else the larger, with +0 preferred over -0. Exactly
+            // `max_f64(&[a, b])`.
+            MathBinaryFn::Max => {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a > b || (a == 0.0 && b == 0.0 && a.is_sign_positive()) {
+                    a
+                } else {
+                    b
+                }
+            }
+            // Math.min(a,b): NaN if either is NaN; else the smaller, with -0 preferred. Exactly
+            // `min_f64(&[a, b])`.
+            MathBinaryFn::Min => {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a < b || (a == 0.0 && b == 0.0 && a.is_sign_negative()) {
+                    a
+                } else {
+                    b
+                }
+            }
+            MathBinaryFn::Pow => a.powf(b),
+            MathBinaryFn::Atan2 => a.atan2(b),
+        }
+    }
+}
+
 impl Opcode {
-    /// Decode byte to opcode. Safe for b in 0..=55 (matches #[repr(u8)] discriminants).
+    /// Decode byte to opcode. Safe for b in 0..=56 (matches #[repr(u8)] discriminants).
     #[inline]
     pub fn from_u8(b: u8) -> Option<Opcode> {
-        if b <= 55 {
+        if b <= 56 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(b) })
         } else {
             None
