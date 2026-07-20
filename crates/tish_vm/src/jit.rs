@@ -993,7 +993,9 @@ fn compile_loop_region(
                     .map(|r| r as u8)
                     .and_then(u8_to_binop)?
                 {
-                    BinOp::And | BinOp::Or | BinOp::Pow | BinOp::In => return None,
+                    // #203: `**` (BinOp::Pow) IS lowerable now (a host call to `tish_math_binary_call`
+                    // in the region body), so it stays in the OSR whitelist. Logical/`in` still bail.
+                    BinOp::And | BinOp::Or | BinOp::In => return None,
                     _ => {}
                 }
             }
@@ -1435,6 +1437,26 @@ fn build_loop_region_body(
                 let call = bcx.ins().call(math_binary_fref, &[idc, a, b]);
                 let r = bcx.inst_results(call)[0];
                 stack.push(JV::f64(r));
+                ip += 3;
+            }
+            _ if is_binop_pow(op, code, ip) => {
+                // #203: `a ** b` → host call to `tish_math_binary_call(Pow, a, b)` (== VM's `powf`).
+                let r = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let l = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let r = jv_f64(&mut bcx, r);
+                let l = jv_f64(&mut bcx, l);
+                let idc = bcx
+                    .ins()
+                    .iconst(types::I32, tishlang_bytecode::MathBinaryFn::Pow as i64);
+                let call = bcx.ins().call(math_binary_fref, &[idc, l, r]);
+                let res = bcx.inst_results(call)[0];
+                stack.push(JV::f64(res));
                 ip += 3;
             }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &[], 0) {
@@ -2280,6 +2302,14 @@ fn falsy_flag(bcx: &mut FunctionBuilder, cond: ClifValue) -> ClifValue {
 /// branch, nested branches, calls, member/index, or mismatched `is_bool` all return `None` so the
 /// VM runs the chunk instead — purely additive. Returns `Some(result_is_bool)`.
 /// Byte size of an opcode the loop-JIT understands; `None` ⇒ unsupported (bail → VM).
+/// #203: is the op at `ip` a `BinOp` whose operator is `**` (Pow)? Lets the loop builders intercept
+/// `a ** b` and lower it to a `tish_math_binary_call(Pow, …)` host call before the generic
+/// `emit_simple_op` (which rejects Pow) would bail the function.
+fn is_binop_pow(op: Opcode, code: &[u8], ip: usize) -> bool {
+    op == Opcode::BinOp
+        && peek_u16(code, ip + 1).map(|r| r as u8).and_then(u8_to_binop) == Some(BinOp::Pow)
+}
+
 fn op_size(op: Opcode) -> Option<usize> {
     use Opcode::*;
     Some(match op {
@@ -3328,6 +3358,20 @@ fn build_body_cfg(
                 let zero = bcx.ins().f64const(0.0);
                 bcx.ins().return_(&[zero]);
                 terminated = true; // the following `Return` (and any dead tail) is now skipped
+                ip += 3;
+            }
+            _ if is_binop_pow(op, code, ip) => {
+                // #203: `a ** b` → host call to `tish_math_binary_call(Pow, a, b)` (== VM's `powf`).
+                let r = stack.pop()?;
+                let l = stack.pop()?;
+                let r = jv_f64(&mut bcx, r);
+                let l = jv_f64(&mut bcx, l);
+                let idc = bcx
+                    .ins()
+                    .iconst(types::I32, tishlang_bytecode::MathBinaryFn::Pow as i64);
+                let call = bcx.ins().call(math_binary_fref, &[idc, l, r]);
+                let res = bcx.inst_results(call)[0];
+                stack.push(JV::f64(res));
                 ip += 3;
             }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &params, arity) {
