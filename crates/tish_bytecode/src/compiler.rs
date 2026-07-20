@@ -452,6 +452,23 @@ fn expr_rebinds(e: &Expr, name: &str) -> bool {
 /// so it can't run program-wide), this has an explicit `FunDecl` arm: a `function name` is itself a
 /// binding, and every function body is recursed into. `true` (or any node it can't analyze) ⇒ NOT
 /// stable — which only forgoes the cross-function-call optimization, never risks a miscompile.
+/// #203: the f64 value of a `Math.<name>` constant, or `None` if `name` isn't one. The values are the
+/// IEEE doubles ECMAScript specifies (identical to Rust's `std::f64::consts` and to the `Math` object
+/// built on every backend, #539), so emitting them as a `LoadConst` is byte-identical to `Math.PI` etc.
+fn math_constant(name: &str) -> Option<f64> {
+    Some(match name {
+        "PI" => std::f64::consts::PI,
+        "E" => std::f64::consts::E,
+        "LN2" => std::f64::consts::LN_2,
+        "LN10" => std::f64::consts::LN_10,
+        "LOG2E" => std::f64::consts::LOG2_E,
+        "LOG10E" => std::f64::consts::LOG10_E,
+        "SQRT2" => std::f64::consts::SQRT_2,
+        "SQRT1_2" => std::f64::consts::FRAC_1_SQRT_2,
+        _ => return None,
+    })
+}
+
 fn name_rebinds_in_stmt(s: &Statement, name: &str) -> bool {
     match s {
         Statement::FunDecl {
@@ -2548,6 +2565,26 @@ impl<'a> Compiler<'a> {
                 optional,
                 ..
             } => {
+                // #203: `Math.<CONST>` (PI / E / LN2 / …) when `Math` is the provably-unshadowed
+                // global → a plain `LoadConst`, so the numeric JIT sees a constant instead of bailing
+                // on a `GetMember`. The values match the `Math` object's on every backend (both use
+                // `std::f64::consts`, #539), so this is byte-identical. Same gate as the intrinsics.
+                if !*optional && self.math_is_global {
+                    if let (
+                        Expr::Ident { name: obj, .. },
+                        MemberProp::Name { name: p, .. },
+                    ) = (object.as_ref(), prop)
+                    {
+                        if obj.as_ref() == "Math" && self.resolve_slot("Math").is_none() {
+                            if let Some(v) = math_constant(p.as_ref()) {
+                                let idx = self.constant_idx(Constant::Number(v));
+                                self.emit(Opcode::LoadConst);
+                                self.chunk.write_u16(idx);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 self.compile_expr(object)?;
                 if *optional {
                     self.emit(Opcode::Dup);
