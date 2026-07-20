@@ -1924,18 +1924,89 @@ impl Vm {
                 _ => return OsrResult::LiveInMiss, // a live slot is non-numeric → deopt, keep interpreting
             }
         }
+        // #203: array live-ins → a scratch `Vec<f64>` per array (the matmul lever). `scratch` OWNS the
+        // extracted data; the [`crate::jit::ArrayHandle`]s point into it and are built only AFTER it is
+        // fully populated so no inner buffer reallocates under a live pointer. A live-in that is not an
+        // all-`Number` `Value::Array` (a `NumberArray`, a boxed non-number element, a non-array) bails
+        // to the interpreter — so a misclassified array slot is always correct, just not JIT'd.
+        let mut scratch: Vec<Vec<f64>> = Vec::with_capacity(loopfn.array_slots.len());
+        for &(slot, _writable) in &loopfn.array_slots {
+            match slots.get(slot_base + slot as usize) {
+                Some(Value::Array(a)) => {
+                    let b = a.borrow();
+                    let mut ebuf: Vec<f64> = Vec::with_capacity(b.len());
+                    for el in b.iter() {
+                        match el {
+                            Value::Number(n) => ebuf.push(*n),
+                            _ => return OsrResult::LiveInMiss,
+                        }
+                    }
+                    scratch.push(ebuf);
+                }
+                _ => return OsrResult::LiveInMiss,
+            }
+        }
+        // #203: a WRITABLE array must not alias another array live-in — the region reads/writes a
+        // PRIVATE scratch copy, so aliasing would make one array's writes invisible to the other (the
+        // interpreter shares one backing store). Bail to the interpreter on any such overlap.
+        for (k, &(slot_k, writable_k)) in loopfn.array_slots.iter().enumerate() {
+            if !writable_k {
+                continue;
+            }
+            let ak = match slots.get(slot_base + slot_k as usize) {
+                Some(Value::Array(a)) => a,
+                _ => return OsrResult::LiveInMiss,
+            };
+            for (j, &(slot_j, _)) in loopfn.array_slots.iter().enumerate() {
+                if j == k {
+                    continue;
+                }
+                if let Some(Value::Array(aj)) = slots.get(slot_base + slot_j as usize) {
+                    if VmRef::ptr_eq(ak, aj) {
+                        return OsrResult::LiveInMiss;
+                    }
+                }
+            }
+        }
+        let mut handles: Vec<crate::jit::ArrayHandle> = scratch
+            .iter_mut()
+            .map(|b| crate::jit::ArrayHandle {
+                ptr: b.as_mut_ptr(),
+                len: b.len(),
+            })
+            .collect();
         let mut deopt: u8 = 0;
-        // SAFETY: `buf` is a valid `[f64; used_slots.len()]`; `deopt` is a valid `*mut u8`. The region
-        // was compiled for exactly this chunk+header (fingerprint-checked in the cache).
-        let exit_id = loopfn.call(&mut buf, &mut deopt);
+        // SAFETY: `buf` is a valid `[f64; used_slots.len()]`, `handles` a valid `[ArrayHandle;
+        // array_slots.len()]` whose scratch outlives the call, `deopt` a valid `*mut u8`. The region was
+        // compiled for exactly this chunk+header (fingerprint-checked in the cache) and its ABI matches
+        // `array_slots` (2-pointer when empty, 3-pointer otherwise).
+        let exit_id = loopfn.call(&mut buf, &mut handles, &mut deopt);
         if deopt != 0 {
-            // #514: an int-slot live-in wasn't an exact in-range integer, so the region bailed at
-            // entry BEFORE touching `buf` — the slots are still their pre-loop values. Re-interpret.
+            // An int-slot live-in wasn't an exact in-range integer (#514), OR an array index went
+            // out of bounds mid-region (#203). Either way the region bailed WITHOUT committing — `buf`
+            // and the array scratch are discarded here, the caller's arrays are untouched — so re-
+            // interpreting from the pristine pre-loop slots is correct (no partial result escapes).
             return OsrResult::LiveInMiss;
         }
         for (p, &slot) in loopfn.used_slots.iter().enumerate() {
             if let Some(d) = slots.get_mut(slot_base + slot as usize) {
                 *d = Value::Number(buf[p]);
+            }
+        }
+        // #203: copy each WRITABLE array's (possibly-mutated) scratch back into its `Value::Array`.
+        // Length is unchanged (`SetIndex` can't grow the array; an OOB write deopts above), so this is
+        // a same-length element overwrite — mirroring `try_call_array_jit`'s writeback.
+        for (k, &(slot, writable)) in loopfn.array_slots.iter().enumerate() {
+            if !writable {
+                continue;
+            }
+            if let Some(Value::Array(a)) = slots.get(slot_base + slot as usize) {
+                let mut b = a.borrow_mut();
+                for (j, &v) in scratch[k].iter().enumerate() {
+                    if let Some(el) = b.get_mut(j) {
+                        *el = Value::Number(v);
+                    }
+                }
             }
         }
         match loopfn.exits.get(exit_id as usize) {
@@ -2303,6 +2374,13 @@ impl Vm {
             std::collections::HashMap::new();
         #[cfg(not(target_arch = "wasm32"))]
         let mut osr_hot: (usize, u32) = (usize::MAX, 0);
+        // #203: `trig header → back-edge count at last OSR attempt`, so an outermost (expanded) region
+        // fires on the FIRST sound entry past the threshold and then re-attempts only every `OSR_RETRY`
+        // back-edges (a `LiveInMiss` cooldown). Its own back-edge is too rare for the modulo cadence the
+        // flag-off path uses. Unused when `TISH_JIT_OSR_ARRAY` is off.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut osr_last_attempt: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
         // Frame-local string builder for `acc += x` on a slot local (Opcode::AppendLocal): keeps the
         // accumulator in a growable `sb_buf` so appends are amortized O(1) instead of reallocating the
         // whole string each time. `sb_slot` is the slot currently buffered (at most one). The slot's
@@ -3022,8 +3100,10 @@ impl Vm {
                     if chunk.slot_based && Self::osr_enabled() {
                         let region_end = ip;
                         let header_ip = ip.saturating_sub(dist);
-                        // Switch the fast slot only when the active loop changes: stash the old count,
-                        // load this header's (default 0). The hot loop keeps `header_ip == osr_hot.0`.
+                        // Count on the RAW header via the single-entry fast slot — byte-identical to the
+                        // pre-#203 baseline. ALL #203 expansion work is gated behind the threshold below,
+                        // so a loop that is cold *per enclosing call* (e.g. nbody's `advance`, entered
+                        // 200k× with ~5-iteration loops) never reaches the gate and pays ZERO extra cost.
                         if header_ip != osr_hot.0 {
                             if osr_hot.0 != usize::MAX {
                                 osr_counters.insert(osr_hot.0, osr_hot.1);
@@ -3035,25 +3115,87 @@ impl Vm {
                         }
                         if osr_hot.1 != u32::MAX {
                             osr_hot.1 = osr_hot.1.saturating_add(1);
-                            if osr_hot.1 >= OSR_THRESHOLD
-                                && osr_hot
+                            if osr_hot.1 >= OSR_THRESHOLD {
+                                if crate::jit::osr_array_enabled() {
+                                    // #203: this loop is confirmed hot. Find the OUTERMOST enclosing
+                                    // array-indexing loop so an array nest (matmul) marshals its arrays
+                                    // ONCE and runs the whole nest natively, instead of re-marshalling
+                                    // O(array) per inner entry (a wash).
+                                    let (th, te, has_arr, worthy) = crate::jit::osr_expand_cached(
+                                        chunk, header_ip, region_end,
+                                    );
+                                    if th != header_ip {
+                                        // Expanded to an enclosing array loop: THIS inner loop is a
+                                        // marshalling wash. Give up on it and mark the OUTER hot, so the
+                                        // outer fires at its OWN (sound) back-edge on a later iteration —
+                                        // restarting the outer from this inner point would re-run
+                                        // already-completed iterations.
+                                        osr_counters.insert(th, OSR_THRESHOLD);
+                                        osr_hot.1 = u32::MAX;
+                                    } else if has_arr && !worthy {
+                                        // An array loop nested in a NON-array outer loop (k_nucleotide's
+                                        // `seq[i+j]` inner loop): re-entered per outer iteration, so
+                                        // array-OSR would re-marshal the whole array each time — a wash.
+                                        // Leave it to the interpreter, exactly as the flag-off path does
+                                        // (its `GetIndex` bails the numeric OSR there).
+                                        osr_hot.1 = u32::MAX;
+                                    } else {
+                                        // This loop IS the trigger region. An array-WORTHY (outermost)
+                                        // region fires on the FIRST attempt past the threshold, then
+                                        // re-attempts only every OSR_RETRY back-edges (a LiveInMiss
+                                        // cooldown); a pure-numeric region keeps the original modulo
+                                        // sampling cadence.
+                                        let due = if worthy {
+                                            let last = osr_last_attempt
+                                                .get(&header_ip)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            last == 0
+                                                || osr_hot.1.saturating_sub(last) >= OSR_RETRY
+                                        } else {
+                                            osr_hot
+                                                .1
+                                                .saturating_sub(OSR_THRESHOLD)
+                                                .is_multiple_of(OSR_RETRY)
+                                        };
+                                        if due {
+                                            if worthy {
+                                                osr_last_attempt.insert(header_ip, osr_hot.1);
+                                            }
+                                            match Self::run_osr(
+                                                chunk, header_ip, te, &mut slot_locals, 0,
+                                            ) {
+                                                OsrResult::Compiled(exit_ip) => {
+                                                    ip = exit_ip;
+                                                    continue;
+                                                }
+                                                OsrResult::LiveInMiss => {}
+                                                OsrResult::NotCompilable => {
+                                                    osr_hot.1 = u32::MAX
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if osr_hot
                                     .1
                                     .saturating_sub(OSR_THRESHOLD)
                                     .is_multiple_of(OSR_RETRY)
-                            {
-                                match Self::run_osr(
-                                    chunk,
-                                    header_ip,
-                                    region_end,
-                                    &mut slot_locals,
-                                    0,
-                                ) {
-                                    OsrResult::Compiled(exit_ip) => {
-                                        ip = exit_ip;
-                                        continue;
+                                {
+                                    // Flag OFF: exact pre-#203 threshold+retry-modulo behavior.
+                                    match Self::run_osr(
+                                        chunk,
+                                        header_ip,
+                                        region_end,
+                                        &mut slot_locals,
+                                        0,
+                                    ) {
+                                        OsrResult::Compiled(exit_ip) => {
+                                            ip = exit_ip;
+                                            continue;
+                                        }
+                                        OsrResult::LiveInMiss => {}
+                                        OsrResult::NotCompilable => osr_hot.1 = u32::MAX,
                                     }
-                                    OsrResult::LiveInMiss => {}
-                                    OsrResult::NotCompilable => osr_hot.1 = u32::MAX,
                                 }
                             }
                         }

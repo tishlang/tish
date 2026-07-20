@@ -1,0 +1,98 @@
+// #203: array-index (`arr[i]` read + `arr[i] = v` write) inside a hot loop nest exercises the OSR
+// array JIT path in the bytecode VM (and cranelift, which runs VM bytecode). The output must be
+// byte-for-byte identical to the interpreter / native / js backends — which have no such path — so this
+// fixture is a cross-backend soundness lock for #203. All outputs are deterministic integers.
+//
+// The `console.log` marker inside each function is LOAD-BEARING: it makes the whole function ineligible
+// for the #189 function-local-array JIT, so its hot array loops fall to the OSR loop-region path — the
+// exact code this fixture is meant to lock. Loop counts exceed the OSR trigger threshold so the JIT
+// actually fires under the default-on flag. (Do not remove the markers or these run interpreted.)
+
+// dense matmul: reads a[]/b[], writes c[] over a COMPUTED index `a[i*N+k]` (the matmul lever).
+function matmul(N) {
+  let a = []
+  let b = []
+  let c = []
+  let len = N * N
+  for (let i = 0; i < len; i++) {
+    a.push((i % 7) + 1)
+    b.push((i % 5) + 1)
+    c.push(0)
+  }
+  console.log("matmul")
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      let sum = 0
+      for (let k = 0; k < N; k++) {
+        sum = sum + a[i * N + k] * b[k * N + j]
+      }
+      c[i * N + j] = sum
+    }
+  }
+  let checksum = 0
+  for (let i = 0; i < len; i++) {
+    checksum = (checksum + c[i] * (i + 1)) % 2147483647
+  }
+  return checksum
+}
+
+// read-only dot product with a computed/mod index, repeated so the loop gets hot.
+function dot(n, reps) {
+  let a = []
+  let b = []
+  for (let i = 0; i < n; i++) {
+    a.push(i % 11)
+    b.push((i * 3) % 13)
+  }
+  console.log("dot")
+  let s = 0
+  for (let r = 0; r < reps; r++) {
+    for (let i = 0; i < n; i++) {
+      s = s + a[i] * b[(i * 2) % n]
+    }
+  }
+  return s
+}
+
+// in-place transform: read AND write the same array across a hot loop (aliased read/write per element).
+function prefix(n, reps) {
+  let a = []
+  for (let i = 0; i < n; i++) { a.push(i) }
+  console.log("prefix")
+  for (let r = 0; r < reps; r++) {
+    for (let i = 1; i < n; i++) {
+      a[i] = (a[i] + a[i - 1]) % 100003
+    }
+  }
+  let s = 0
+  for (let i = 0; i < n; i++) { s = (s + a[i]) % 2147483647 }
+  return s
+}
+
+// #203 SOUNDNESS regression: storing a comparison result / bool into a NUMBER-initialized array must
+// land as a `Bool` (matching every other backend), NOT the flattened `Number 1/0` the region works in.
+// The array stays all-number through the OSR warmup, then the last outer rows (running natively) store
+// bools — the region MUST bail on a bool `SetIndex` rather than write back `Number`. With the wrong
+// behavior the VM returns 22500 here instead of 28822200.
+function boolstore(N) {
+  let c = []
+  for (let i = 0; i < N * N; i++) { c.push(0) }
+  console.log("boolstore")
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      if (i > N - 3) { c[i * N + j] = j > 5 } else { c[i * N + j] = i + j }
+    }
+  }
+  let trues = 0
+  let nums = 0
+  for (let i = 0; i < N * N; i++) {
+    if (c[i] === true) { trues = trues + 1 }
+    else if (typeof c[i] === "number") { nums = nums + 1 }
+  }
+  return trues * 100000 + nums
+}
+
+console.log(matmul(24))
+console.log(dot(40, 300))
+console.log(prefix(50, 250))
+console.log(boolstore(150))
