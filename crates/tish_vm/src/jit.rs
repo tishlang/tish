@@ -1101,25 +1101,95 @@ fn build_loop_region_body(
     bcx.append_block_params_for_function_params(entry);
     bcx.switch_to_block(entry);
     let params: Vec<ClifValue> = bcx.block_params(entry).to_vec();
-    let slots_ptr = params[0]; // params[1] = deopt flag, reserved (v1 never writes it)
+    let slots_ptr = params[0];
+    let deopt_ptr = params[1]; // #514: set when an int-slot live-in guard fails → the VM re-interprets
+
+    // #514: port the fn-body int-typed slots (#511) into the OSR loop region. A slot whose every store
+    // is integer-typed lives in an `i64` Variable (`Repr::I64Num`), so an integer hash/PRNG accumulator
+    // stays in integer registers across the loop instead of an f64 materialize per store + ToInt32 per
+    // load. `arity` is 0 at top level (no params). `classify_int_slots` is chunk-level, so a slot that
+    // is int-stored in the region but f64-stored elsewhere in the chunk is (safely) NOT tagged.
+    let int_slots = classify_int_slots(chunk, 0);
     let vars: Vec<Variable> = (0..num_slots)
-        .map(|_| bcx.declare_var(types::F64))
+        .map(|slot| {
+            let ty = if int_slots.contains(&slot) {
+                types::I64
+            } else {
+                types::F64
+            };
+            bcx.declare_var(ty)
+        })
         .collect();
+
+    // Entry marshalling. A non-int slot loads its f64 live-in straight. An int slot's live-in arrives
+    // as f64 from the VM frame, so it must be an EXACT integer that round-trips through i64 — this
+    // rejects non-integers, NaN / ±Inf, out-of-i64-range, and -0 — or the `I64Num` invariant breaks.
+    // On any failure we set the deopt flag and return; the VM discards the (still-pristine) slots and
+    // re-interprets the loop. The guard runs once at region entry, off the per-iteration path.
+    let mut all_ok: Option<ClifValue> = None;
     for (slot, &var) in vars.iter().enumerate() {
-        // Live slots load from their buffer position; slots the region never touches init to 0 (dead).
-        let init = if let Some(&p) = buf_pos.get(&(slot as u16)) {
-            bcx.ins()
-                .load(types::F64, MemFlags::new(), slots_ptr, (p * 8) as i32)
+        let live: Option<ClifValue> = if let Some(&p) = buf_pos.get(&(slot as u16)) {
+            Some(
+                bcx.ins()
+                    .load(types::F64, MemFlags::new(), slots_ptr, (p * 8) as i32),
+            )
         } else {
-            bcx.ins().f64const(0.0)
+            None
         };
-        bcx.def_var(var, init);
+        if int_slots.contains(&slot) {
+            match live {
+                Some(x) => {
+                    let i64c = bcx.ins().fcvt_to_sint_sat(types::I64, x);
+                    let back = bcx.ins().fcvt_from_sint(types::F64, i64c);
+                    let exact = bcx.ins().fcmp(FloatCC::Equal, back, x);
+                    // -0 round-trips to +0 (IEEE `==` is true) but differs as an f64 read, so reject
+                    // it explicitly: 1/(-0) is -∞, 1/(+0) is +∞.
+                    let zero = bcx.ins().f64const(0.0);
+                    let is_zero = bcx.ins().fcmp(FloatCC::Equal, x, zero);
+                    let one = bcx.ins().f64const(1.0);
+                    let recip = bcx.ins().fdiv(one, x);
+                    let recip_neg = bcx.ins().fcmp(FloatCC::LessThan, recip, zero);
+                    let is_neg0 = bcx.ins().band(is_zero, recip_neg);
+                    let not_neg0 = bcx.ins().bxor_imm(is_neg0, 1);
+                    let ok = bcx.ins().band(exact, not_neg0);
+                    all_ok = Some(match all_ok {
+                        Some(a) => bcx.ins().band(a, ok),
+                        None => ok,
+                    });
+                    bcx.def_var(var, i64c);
+                }
+                None => {
+                    let z = bcx.ins().iconst(types::I64, 0);
+                    bcx.def_var(var, z);
+                }
+            }
+        } else {
+            let init = match live {
+                Some(x) => x,
+                None => bcx.ins().f64const(0.0),
+            };
+            bcx.def_var(var, init);
+        }
     }
     let header_block = match blocks.get(&header_ip) {
         Some(&b) => b,
         None => return false,
     };
-    bcx.ins().jump(header_block, &[]);
+    match all_ok {
+        // At least one int slot has a live-in: enter the loop only if every guard passed, else deopt.
+        Some(ok) => {
+            let deopt_block = bcx.create_block();
+            bcx.ins().brif(ok, header_block, &[], deopt_block, &[]);
+            bcx.switch_to_block(deopt_block);
+            let flag = bcx.ins().iconst(types::I8, 1);
+            bcx.ins().store(MemFlags::new(), flag, deopt_ptr, 0);
+            let zero_id = bcx.ins().iconst(types::I32, 0);
+            bcx.ins().return_(&[zero_id]);
+        }
+        None => {
+            bcx.ins().jump(header_block, &[]);
+        }
+    }
 
     // Translate the region. Operand stack is empty at every block boundary (statement-level flow).
     let mut stack: Vec<JV> = Vec::new();
@@ -1163,7 +1233,14 @@ fn build_loop_region_body(
                     Some(v) => *v,
                     None => return false,
                 };
-                stack.push(JV::f64(bcx.use_var(v)));
+                // #514: an int slot's `use_var` is an i64 carrying the exact number (`I64Num`);
+                // downstream int ops take it as identity, one exact convert at an f64 boundary.
+                let lv = bcx.use_var(v);
+                stack.push(if int_slots.contains(&slot) {
+                    JV::i64num(lv)
+                } else {
+                    JV::f64(lv)
+                });
                 ip += 3;
             }
             Opcode::StoreLocal => {
@@ -1182,10 +1259,27 @@ fn build_loop_region_body(
                     Some(v) => *v,
                     None => return false,
                 };
-                // Slots are f64 Variables — one materialize at the store boundary (int-typed
-                // slots are #168's follow-up).
-                let val = jv_f64(&mut bcx, jval);
-                bcx.def_var(v, val);
+                if int_slots.contains(&slot) {
+                    // #514/#168: store the EXACT number as i64 — I32 stores sign-extend, U32
+                    // zero-extend, I64Num is identity, an integral constant re-derives its exact
+                    // i64. Anything else means the optimistic pre-pass mis-tagged this slot (e.g. a
+                    // merge point whose linear predecessor differed) → bail; the VM keeps semantics.
+                    let iv = match jval.repr {
+                        Repr::I32 => bcx.ins().sextend(types::I64, jval.v),
+                        Repr::U32 => bcx.ins().uextend(types::I64, jval.v),
+                        Repr::I64Num => jval.v,
+                        Repr::F64 => match int_const_i64(&mut bcx, chunk, code, ip) {
+                            Some(iv) => iv,
+                            None => return false,
+                        },
+                        Repr::Bool => return false,
+                    };
+                    bcx.def_var(v, iv);
+                } else {
+                    // f64 Variable — one materialize at the store boundary.
+                    let val = jv_f64(&mut bcx, jval);
+                    bcx.def_var(v, val);
+                }
                 ip += 3;
             }
             Opcode::Pop => {
@@ -1301,7 +1395,13 @@ fn build_loop_region_body(
     for (&t, &blk) in &exit_blocks {
         bcx.switch_to_block(blk);
         for (p, &slot) in used_slots.iter().enumerate() {
-            let v = bcx.use_var(vars[slot as usize]);
+            let raw = bcx.use_var(vars[slot as usize]);
+            // #514: an int slot holds an i64 — flush its exact f64 value back to the buffer.
+            let v = if int_slots.contains(&(slot as usize)) {
+                bcx.ins().fcvt_from_sint(types::F64, raw)
+            } else {
+                raw
+            };
             bcx.ins()
                 .store(MemFlags::new(), v, slots_ptr, (p * 8) as i32);
         }
