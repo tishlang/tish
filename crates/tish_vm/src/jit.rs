@@ -497,6 +497,8 @@ struct JitGlobal {
     /// `FuncId` of the imported `tish_math_call` host fn (#186), declared once at module init and
     /// re-imported into each compiled function via `declare_func_in_func`.
     math_call_id: cranelift_module::FuncId,
+    /// `FuncId` of the imported `tish_math_binary_call` host fn (#203), for the `MathBinary` intrinsic.
+    math_binary_call_id: cranelift_module::FuncId,
     /// `FuncId`s of the imported `tish_jv_*` vector runtime (#189).
     jv_fns: JvFns,
     /// #187: directly-callable numeric callees, keyed by the stable global name a top-level function is
@@ -687,9 +689,23 @@ extern "C" fn tish_math_call(id: i32, x: f64) -> f64 {
     }
 }
 
+/// #203 — host call for the `MathBinary` intrinsic (max/min/pow/atan2). Routes through
+/// `MathBinaryFn::apply`, the single source of truth, so JIT ≡ VM ≡ interp.
+extern "C" fn tish_math_binary_call(id: i32, a: f64, b: f64) -> f64 {
+    match tishlang_bytecode::MathBinaryFn::from_u16(id as u16) {
+        Some(m) => m.apply(a, b),
+        None => f64::NAN,
+    }
+}
+
 /// Build the JIT module and declare the imported host functions (`tish_math_call` #186, the
 /// `tish_jv_*` vector runtime #189), returning the module + their `FuncId`s.
-fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
+fn new_module() -> Option<(
+    JITModule,
+    cranelift_module::FuncId,
+    cranelift_module::FuncId,
+    JvFns,
+)> {
     let mut flag_builder = settings::builder();
     // JIT code is loaded at a fixed address; no PIC / colocated libcalls needed.
     flag_builder.set("use_colocated_libcalls", "false").ok()?;
@@ -701,6 +717,7 @@ fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
         .ok()?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("tish_math_call", tish_math_call as *const u8);
+    builder.symbol("tish_math_binary_call", tish_math_binary_call as *const u8);
     builder.symbol("tish_jv_new", tish_jv_new as *const u8);
     builder.symbol("tish_jv_push", tish_jv_push as *const u8);
     builder.symbol("tish_jv_get", tish_jv_get as *const u8);
@@ -717,6 +734,16 @@ fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
     msig.returns.push(AbiParam::new(types::F64));
     let math_id = module
         .declare_function("tish_math_call", Linkage::Import, &msig)
+        .ok()?;
+
+    // `tish_math_binary_call(i32 fn-id, f64 a, f64 b) -> f64` (#203).
+    let mut mbsig = module.make_signature();
+    mbsig.params.push(AbiParam::new(types::I32));
+    mbsig.params.push(AbiParam::new(types::F64));
+    mbsig.params.push(AbiParam::new(types::F64));
+    mbsig.returns.push(AbiParam::new(types::F64));
+    let math_binary_id = module
+        .declare_function("tish_math_binary_call", Linkage::Import, &mbsig)
         .ok()?;
 
     // Helper to declare a `tish_jv_*` import from param/return abi lists.
@@ -761,18 +788,19 @@ fn new_module() -> Option<(JITModule, cranelift_module::FuncId, JvFns)> {
         free: declare("tish_jv_free", &[AbiParam::new(types::I64)], &[])?,
         deopt: declare("tish_jv_deopt", &[], &[])?,
     };
-    Some((module, math_id, jv))
+    Some((module, math_id, math_binary_id, jv))
 }
 
 fn jit() -> Option<&'static Mutex<JitGlobal>> {
     JIT.get_or_init(|| {
-        new_module().map(|(module, math_call_id, jv_fns)| {
+        new_module().map(|(module, math_call_id, math_binary_call_id, jv_fns)| {
             Mutex::new(JitGlobal {
                 module,
                 cache: HashMap::new(),
                 osr_cache: HashMap::new(),
                 counter: 0,
                 math_call_id,
+                math_binary_call_id,
                 jv_fns,
                 callees: HashMap::new(),
             })
@@ -950,7 +978,8 @@ fn compile_loop_region(
             | Opcode::LoopVarsEnd
             | Opcode::LoopVarsBegin
             | Opcode::UnaryOp
-            | Opcode::MathUnary => {} // #186 — `Math.<fn>(x)`: 1 f64 in, 1 f64 out (like UnaryOp)
+            | Opcode::MathUnary // #186 — `Math.<fn>(x)`: 1 f64 in, 1 f64 out (like UnaryOp)
+            | Opcode::MathBinary => {} // #203 — `Math.<fn>(a,b)`: 2 f64 in, 1 f64 out
             Opcode::LoadLocal | Opcode::StoreLocal => {
                 used.insert(peek_u16(code, ip + 1)?);
             }
@@ -1033,6 +1062,7 @@ fn compile_loop_region(
     let mut ctx = g.module.make_context();
     ctx.func.signature = sig.clone();
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
+    let math_binary_fref = g.module.declare_func_in_func(g.math_binary_call_id, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
     let built = build_loop_region_body(
         &mut ctx.func,
@@ -1045,6 +1075,7 @@ fn compile_loop_region(
         &buf_pos,
         &exit_id,
         math_fref,
+        math_binary_fref,
     );
     if !built {
         g.module.clear_context(&mut ctx);
@@ -1083,6 +1114,7 @@ fn build_loop_region_body(
     buf_pos: &HashMap<u16, usize>,
     exit_id: &HashMap<usize, usize>,
     math_fref: cranelift::codegen::ir::FuncRef,
+    math_binary_fref: cranelift::codegen::ir::FuncRef,
 ) -> bool {
     let code = &chunk.code;
     let num_slots = chunk.num_slots as usize;
@@ -1381,6 +1413,30 @@ fn build_loop_region_body(
                 stack.push(JV::f64(r));
                 ip += 3;
             }
+            Opcode::MathBinary => {
+                // #203 — `Math.<fn>(a, b)`: pop b, pop a, host-call, push. Every 2-arg Math fn routes
+                // through the host call (identical to the VM), so there are no native-op semantics to
+                // match — the win is skipping the boxed GetMember+value_call the generic path pays.
+                let id = match peek_u16(code, ip + 1) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let b = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let a = match stack.pop() {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let b = jv_f64(&mut bcx, b);
+                let a = jv_f64(&mut bcx, a);
+                let idc = bcx.ins().iconst(types::I32, id as i64);
+                let call = bcx.ins().call(math_binary_fref, &[idc, a, b]);
+                let r = bcx.inst_results(call)[0];
+                stack.push(JV::f64(r));
+                ip += 3;
+            }
             _ => match emit_simple_op(&mut bcx, chunk, code, &mut ip, &mut stack, &[], 0) {
                 SimpleOp::Handled(_) => {}
                 _ => return false, // LoadConst/BinOp/UnaryOp handled; anything else → keep interpreting
@@ -1666,6 +1722,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
     ctx.func.signature = sig.clone();
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
+    let math_binary_fref = g.module.declare_func_in_func(g.math_binary_call_id, &mut ctx.func);
     // #189: import the `tish_jv_*` FuncRefs into this function when it has local arrays.
     let jv_ctx = if is_jv {
         Some(JvCtx {
@@ -1694,6 +1751,7 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         0,
         recur_guard,
         math_fref,
+        math_binary_fref,
         jv_ctx.as_ref(),
         &resolved,
     ) {
@@ -1945,6 +2003,7 @@ fn compile_chunk_arrays(
     // `handles_ptr`/`deopt_ptr` — only the numeric args are re-marshalled per level.
     let self_ref = g.module.declare_func_in_func(id, &mut ctx.func);
     let math_fref = g.module.declare_func_in_func(g.math_call_id, &mut ctx.func);
+    let math_binary_fref = g.module.declare_func_in_func(g.math_binary_call_id, &mut ctx.func);
     // #187: array-mode functions (e.g. spectral_norm's multiplyAv) may call a register-f64 callee.
     let resolved = build_resolved_callees(g, chunk, &mut ctx.func);
     let mut fbctx = FunctionBuilderContext::new();
@@ -1958,6 +2017,7 @@ fn compile_chunk_arrays(
         mask,
         recursive, // #187: array-mode recursion guard (the entry SP-bail keys off this)
         math_fref,
+        math_binary_fref,
         None,
         &resolved,
     )
@@ -2225,7 +2285,7 @@ fn op_size(op: Opcode) -> Option<usize> {
     Some(match op {
         Nop | Pop | Dup | Return | LoopVarsEnd | EnterBlock | ExitBlock | GetIndex | SetIndex => 1,
         LoadLocal | StoreLocal | LoadConst | BinOp | UnaryOp | Jump | JumpIfFalse | JumpBack
-        | LoopVarsBegin | SelfCall | MathUnary => 3,
+        | LoopVarsBegin | SelfCall | MathUnary | MathBinary => 3,
         _ => return None,
     })
 }
@@ -2576,6 +2636,8 @@ fn build_body_cfg(
     recur_guard: bool,
     // #186: the imported `tish_math_call` host fn, for lowering `Math.<fn>` (`MathUnary`) intrinsics.
     math_fref: cranelift::codegen::ir::FuncRef,
+    // #203: the imported `tish_math_binary_call` host fn, for lowering `MathBinary` (max/min/pow/atan2).
+    math_binary_fref: cranelift::codegen::ir::FuncRef,
     // #189: `Some` when the function has local `f64` arrays — carries the `tish_jv_*` `FuncRef`s + the
     // JV slot set. Those slots become `i64` handle Variables and their array ops lower to `tish_jv_*`
     // calls; an out-of-bounds index sets the per-thread deopt flag the wrapper re-interprets on.
@@ -3098,6 +3160,19 @@ fn build_body_cfg(
                 let x = stack.pop()?;
                 let x = jv_f64(&mut bcx, x);
                 let r = emit_math_unary(&mut bcx, math_fref, mfn, x);
+                stack.push(JV::f64(r));
+                ip += 3;
+            }
+            Opcode::MathBinary => {
+                // #203 — `Math.<fn>(a, b)`: pop b, pop a, host-call, push.
+                let id = peek_u16(code, ip + 1)?;
+                let b = stack.pop()?;
+                let a = stack.pop()?;
+                let b = jv_f64(&mut bcx, b);
+                let a = jv_f64(&mut bcx, a);
+                let idc = bcx.ins().iconst(types::I32, id as i64);
+                let call = bcx.ins().call(math_binary_fref, &[idc, a, b]);
+                let r = bcx.inst_results(call)[0];
                 stack.push(JV::f64(r));
                 ip += 3;
             }
@@ -4029,17 +4104,32 @@ mod tests {
     }
 
     /// #190 — a loop that touches a non-slot value (a general call) is not pure-numeric slot math, so
-    /// the region must be rejected (negative-cached) and the VM keeps interpreting. `Math.max` is a
-    /// 2-arg call (NOT the #186 unary intrinsic), so it stays a `Call` the region must reject.
+    /// the region must be rejected (negative-cached) and the VM keeps interpreting. A user-function
+    /// call is such a value. (`Math.max`/`min`/`pow` used to serve as the example here, but they are
+    /// now the #203 `MathBinary` intrinsic and DO OSR-compile — see `osr_region_handles_math_binary`.)
     #[test]
     fn osr_region_rejects_calls() {
         let chunk = top_chunk(
-            "let a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + Math.max(i, 2.0) }\n",
+            "function g(x) { return x + 1.0 }\nlet a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + g(i) }\n",
         );
         let (header, end) = first_region(&chunk);
         assert!(
             try_compile_loop(&chunk, header, end).is_none(),
             "a loop containing a general call must not OSR-compile"
+        );
+    }
+
+    /// #203 — a loop whose only "call" is a 2-arg `Math.<fn>` (the `MathBinary` intrinsic) IS
+    /// pure-numeric slot math, so the OSR region compiles it (the win for clamp/pow kernels).
+    #[test]
+    fn osr_region_handles_math_binary() {
+        let chunk = top_chunk(
+            "let a = 0.0\nfor (let i = 0; i < 100; i = i + 1) { a = a + Math.max(i, 2.0) }\n",
+        );
+        let (header, end) = first_region(&chunk);
+        assert!(
+            try_compile_loop(&chunk, header, end).is_some(),
+            "a loop with only a 2-arg Math intrinsic must OSR-compile"
         );
     }
 
