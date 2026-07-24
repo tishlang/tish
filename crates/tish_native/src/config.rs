@@ -8,6 +8,9 @@ pub enum NativeArtifact {
     #[default]
     Bin,
     StaticLib,
+    /// A GBA ROM: cargo builds an ELF for `thumbv4t-none-eabi`, then `agb-gbafix`
+    /// converts it to a `.gba`.
+    GbaRom,
 }
 
 /// Options passed from the CLI into nested `cargo build`.
@@ -32,9 +35,26 @@ impl NativeBuildConfig {
         }
     }
 
+    /// Game Boy Advance ROM build (`tish build --target gba`): cross-compile to
+    /// `thumbv4t-none-eabi` with the `Gba` emit mode.
+    pub fn gba() -> Self {
+        Self {
+            artifact: NativeArtifact::GbaRom,
+            cargo_target: Some("thumbv4t-none-eabi".to_string()),
+            emit_mode: NativeEmitMode::Gba,
+        }
+    }
+
     pub fn is_cross_compile(&self) -> bool {
         self.cargo_target.is_some()
     }
+}
+
+/// Feature cap for GBA builds: no host-only runtime capabilities (http/fs/process/
+/// timers/ws/tty/pty). The facade `compile_error!`-stubs them, but capping keeps
+/// the emitted prelude from importing names that don't exist on GBA.
+pub fn gba_runtime_features(_features: &[String]) -> Vec<String> {
+    Vec::new()
 }
 
 /// Filter runtime features for iOS sandbox builds.

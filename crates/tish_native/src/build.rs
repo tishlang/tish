@@ -135,6 +135,17 @@ pub fn build_via_cargo_with_config(
     project_root: Option<&Path>,
     build_config: &NativeBuildConfig,
 ) -> Result<(), String> {
+    if build_config.artifact == NativeArtifact::GbaRom {
+        return build_gba_rom(
+            rust_code,
+            native_modules,
+            output_path,
+            extra_dependencies_toml,
+            generated_native_rs,
+            project_root,
+        );
+    }
+
     let out_stem = output_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -296,6 +307,208 @@ tishlang_runtime = {{ path = {:?}{} }}
     tishlang_build_utils::copy_binary_to_output(&artifact, &target)?;
 
     cleanup_build_dir(&build_dir);
+    Ok(())
+}
+
+/// Build a Game Boy Advance ROM from generated `#![no_std]` Rust.
+///
+/// Emits an agb-style cargo project (nightly + build-std + `thumbv4t-none-eabi` +
+/// `gba.ld`) that links the `tishlang_runtime_gba` facade under the `tishlang_runtime`
+/// name (the `package =` rename), builds it, then runs `agb-gbafix` on the ELF.
+///
+/// Runs its own `cargo build` (NOT `run_cargo_build`) so the `.cargo/config.toml`
+/// rustflags (`-Tgba.ld`, `-Ctarget-cpu=arm7tdmi`) apply — `run_cargo_build` sets a
+/// `RUSTFLAGS` env that would shadow them.
+fn build_gba_rom(
+    rust_code: &str,
+    native_modules: Vec<ResolvedNativeModule>,
+    output_path: &Path,
+    extra_dependencies_toml: &str,
+    generated_native_rs: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<(), String> {
+    use std::process::Command;
+
+    // Locate the facade crate (sibling of tishlang_runtime in the tish workspace).
+    let runtime_path = tishlang_build_utils::find_runtime_path_for_project(project_root)?;
+    let facade_path = Path::new(&runtime_path)
+        .parent()
+        .ok_or_else(|| "invalid tishlang_runtime path (no parent)".to_string())?
+        .join("tish_runtime_gba");
+    if !facade_path.exists() {
+        return Err(format!(
+            "GBA runtime facade not found at {} (expected the tishlang_runtime_gba crate)",
+            facade_path.display()
+        ));
+    }
+
+    let out_stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("tish_out");
+    let cargo_name = tishlang_build_utils::cargo_target_name(out_stem);
+
+    // Persistent build dir under the project so the (expensive) build-std recompile
+    // is cached across runs; the generated Rust stays inspectable.
+    let base = project_root
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let build_dir = base.join(".tish").join("gba").join(out_stem);
+    fs::create_dir_all(build_dir.join("src"))
+        .map_err(|e| format!("Cannot create GBA build dir: {}", e))?;
+    fs::create_dir_all(build_dir.join(".cargo"))
+        .map_err(|e| format!("Cannot create .cargo dir: {}", e))?;
+
+    // Path dependencies for any `cargo:` native modules the program imported.
+    let native_deps: String = native_modules
+        .iter()
+        .filter(|m| m.use_path_dependency)
+        .map(|m| {
+            let path = m.crate_path.display().to_string().replace('\\', "/");
+            format!("{} = {{ path = {:?} }}\n", m.package_name, path)
+        })
+        .collect();
+
+    // `cargo:` module path deps arrive via `extra_dependencies_toml`
+    // (`tish.rustDependencies`); `native_modules` covers any that use a path dep
+    // resolved another way. Both are appended to `[dependencies]`.
+    let mut more_deps = native_deps;
+    if !extra_dependencies_toml.trim().is_empty() {
+        more_deps.push('\n');
+        more_deps.push_str(extra_dependencies_toml);
+    }
+
+    let facade = facade_path.display().to_string().replace('\\', "/");
+    let cargo_toml = format!(
+        r#"[package]
+name = "tish_output"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace so a parent Cargo workspace (e.g. the tish-gba repo, when
+# the build dir lives under it) doesn't try to absorb this generated crate.
+[workspace]
+
+[[bin]]
+name = "{cargo_name}"
+path = "src/main.rs"
+
+[dependencies]
+tishlang_runtime = {{ package = "tishlang_runtime_gba", path = {facade:?} }}
+agb = "0.25.0"
+{more_deps}
+[profile.dev]
+opt-level = 3
+debug = true
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
+
+[profile.release.build-override]
+opt-level = 3
+"#,
+    );
+    fs::write(build_dir.join("Cargo.toml"), cargo_toml)
+        .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
+
+    fs::write(
+        build_dir.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly\"\ncomponents = [\"rust-src\"]\n",
+    )
+    .map_err(|e| format!("Cannot write rust-toolchain.toml: {}", e))?;
+
+    // build-std + target + gba.ld rustflags (agb ships gba.ld via its build.rs).
+    fs::write(
+        build_dir.join(".cargo").join("config.toml"),
+        r#"[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target = "thumbv4t-none-eabi"
+
+[target.thumbv4t-none-eabi]
+runner = ["mgba-qt", "-C", "logToStdout=1", "-C", "logLevel.gba.debug=127"]
+"#,
+    )
+    .map_err(|e| format!("Cannot write .cargo/config.toml: {}", e))?;
+
+    let rust_main = if generated_native_rs.is_some() {
+        inject_generated_native_mod(rust_code)
+    } else {
+        rust_code.to_string()
+    };
+    if let Some(gen) = generated_native_rs {
+        // The `cargo:` wrapper emits the std header (`std::cell/rc/sync`); map it
+        // to the no_std facade equivalents (`alloc` is crate-wide via main.rs's
+        // `extern crate alloc`). The module body is otherwise Value-only.
+        let gen = gen
+            .replace("use std::cell::RefCell;", "use core::cell::RefCell;")
+            .replace("use std::rc::Rc;", "use alloc::rc::Rc;")
+            .replace("use std::sync::Arc;", "use tishlang_runtime::Arc;");
+        fs::write(build_dir.join("src").join("generated_native.rs"), gen)
+            .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
+    }
+    fs::write(build_dir.join("src").join("main.rs"), rust_main)
+        .map_err(|e| format!("Cannot write main.rs: {}", e))?;
+
+    // Pass the GBA linker/target rustflags via the RUSTFLAGS env (which REPLACES,
+    // not joins, any `[target.*].rustflags` from config files). This matters when
+    // the build dir sits inside a project that already has a `.cargo/config.toml`
+    // with `-Tgba.ld` — cargo *joins* rustflags arrays across config files, so a
+    // config-file approach would pass `-Tgba.ld` twice ("region already defined").
+    // build-std still comes from the generated `[unstable]` config (not rustflags).
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .current_dir(&build_dir)
+        .env(
+            "RUSTFLAGS",
+            "-Clink-arg=-Tgba.ld -Ctarget-cpu=arm7tdmi -Cforce-frame-pointers=yes",
+        )
+        .env("CARGO_TERM_COLOR", "always")
+        .status()
+        .map_err(|e| format!("Failed to run cargo for GBA build: {}", e))?;
+    if !status.success() {
+        return Err(format!(
+            "GBA cargo build failed (see output above). Build dir: {}",
+            build_dir.display()
+        ));
+    }
+
+    // ELF → .gba via agb-gbafix.
+    let elf = build_dir
+        .join("target")
+        .join("thumbv4t-none-eabi")
+        .join("release")
+        .join(&cargo_name);
+    if !elf.exists() {
+        return Err(format!("GBA ELF not found at {}", elf.display()));
+    }
+    let rom = if output_path.extension().is_some_and(|e| e == "gba") {
+        output_path.to_path_buf()
+    } else {
+        output_path.with_extension("gba")
+    };
+    let gbafix = Command::new("agb-gbafix")
+        .arg(&elf)
+        .arg("-o")
+        .arg(&rom)
+        .status()
+        .map_err(|e| {
+            format!(
+                "Failed to run agb-gbafix ({}). Install it with: cargo install agb-gbafix",
+                e
+            )
+        })?;
+    if !gbafix.success() {
+        return Err("agb-gbafix failed to produce the ROM".to_string());
+    }
     Ok(())
 }
 

@@ -122,6 +122,11 @@ pub fn resolve_native_modules(
             if is_builtin_native_spec(&s) {
                 continue;
             }
+            // `asset:` loads are baked into the ROM by the GBA codegen, not linked as native
+            // modules — they have no crate to resolve and no Value wrapper to generate.
+            if crate::schemes::is_scheme_import(&s) {
+                continue;
+            }
             if !seen.insert(s.clone()) {
                 continue;
             }
@@ -561,7 +566,7 @@ pub fn infer_native_module_exports(program: &Program) -> HashMap<String, HashSet
                 ..
             } => {
                 let s = spec.as_ref();
-                if is_builtin_native_spec(s) {
+                if is_builtin_native_spec(s) || crate::schemes::is_scheme_import(s) {
                     continue;
                 }
                 map.entry(s.to_string())
@@ -883,7 +888,7 @@ pub fn resolve_project_from_stdin(
 
     for stmt in &program.statements {
         if let Some(from) = stmt_module_dep(stmt) {
-            if is_native_import(from.as_ref()) {
+            if is_native_import(from.as_ref()) || is_scoped_native_import(from.as_ref(), from_dir) || crate::schemes::is_scheme_import(from.as_ref()) {
                 continue;
             }
             let dep_path = resolve_import_path(from.as_ref(), from_dir, &root_canon)?;
@@ -951,7 +956,7 @@ fn load_module_recursive(
     let dir = canonical.parent().unwrap_or(Path::new("."));
     for stmt in &program.statements {
         if let Some(from) = stmt_module_dep(stmt) {
-            if is_native_import(from.as_ref()) {
+            if is_native_import(from.as_ref()) || is_scoped_native_import(from.as_ref(), dir) || crate::schemes::is_scheme_import(from.as_ref()) {
                 continue; // Native imports don't load files
             }
             let dep_path = resolve_import_path(from.as_ref(), dir, project_root)?;
@@ -995,6 +1000,39 @@ pub fn is_native_import(spec: &str) -> bool {
             spec,
             "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty"
         )
+}
+
+// Import schemes (`asset:` and any project-declared prefix) are recognized via the active
+// [`crate::schemes`] registry — `crate::schemes::is_scheme_import(spec)`. Like native imports, a
+// scheme spec is NOT resolved as a `.tish` module or npm package; unlike them it links no crate and
+// generates no Value wrapper — the codegen injects the scheme's include macro and binds each name to
+// an i32 handle. See [`resolve_scheme_spec`] for the file-resolution half.
+
+/// The `@scope/pkg` native opt-in described above (#38): true only when the package resolves and
+/// its package.json carries the native markers — `tish.module == true` (the native-module flag, a
+/// bool; a string is a merged-source entry path) AND `tish.crate` / `tish.rustDependencies` (the
+/// Rust-crate opt-in). Anything else — unresolvable, plain `tish.module: true` with no crate
+/// (#38), or a `.tish` source package like `@tishlang/pg` — falls through to the module-merge
+/// resolver. Package resolution walks up from `from_dir` (the importing module's directory), the
+/// same walk [`resolve_native_module`] later repeats from the project root.
+pub fn is_scoped_native_import(spec: &str, from_dir: &Path) -> bool {
+    if !spec.starts_with('@') {
+        return false;
+    }
+    let Ok(pkg_dir) = find_package_dir(spec, from_dir) else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(pkg_dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let Some(tish) = json.get("tish") else {
+        return false;
+    };
+    tish.get("module").and_then(|v| v.as_bool()).unwrap_or(false)
+        && (tish.get("crate").is_some() || tish.get("rustDependencies").is_some())
 }
 
 /// True for `ffi:…` specs (portable C-ABI cdylib extensions, loadable on every backend). The
@@ -1081,6 +1119,48 @@ pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> O
         }
     }
     None
+}
+
+/// Resolve a scheme import (`asset:relpath`, or any project-declared scheme) to a canonical spec.
+/// For a `resolve_file` scheme, the part after the colon is resolved against the importing module's
+/// directory (`from_dir`) to an absolute path that must exist — a missing file is a compile-time
+/// error, not a device panic — and the spec becomes `prefix:/abs/path` (the codegen feeds that
+/// absolute path to the scheme's include macro; agb's `resolve_path` takes absolute paths as-is, so
+/// no asset-copy step is needed). A non-`resolve_file` scheme passes through unchanged.
+fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
+    let (prefix, resolve_file) = crate::schemes::with_active(|reg| {
+        reg.matches(spec)
+            .map(|s| (s.prefix(), s.resolve_file))
+    })
+    .ok_or_else(|| format!("import '{}' is not a registered scheme", spec))?;
+    let rest = spec.strip_prefix(&prefix).unwrap_or(spec);
+    if !resolve_file {
+        return Ok(spec.to_string());
+    }
+    if rest.is_empty() {
+        return Err(format!(
+            "{} import needs a path, e.g. import {{ player }} from '{}gfx/player.png'",
+            prefix.trim_end_matches(':'),
+            prefix
+        ));
+    }
+    let path = Path::new(rest);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        from_dir.join(path)
+    };
+    let abs = joined.canonicalize().map_err(|e| {
+        format!(
+            "{} import '{}': cannot find '{}' (resolved from {}): {}",
+            prefix.trim_end_matches(':'),
+            spec,
+            rest,
+            from_dir.display(),
+            e
+        )
+    })?;
+    Ok(format!("{}{}", prefix, abs.to_string_lossy()))
 }
 
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils", "lattish") to an absolute path.
@@ -1172,7 +1252,7 @@ fn has_cycle_from(
 ) -> Result<bool, String> {
     for stmt in &program.statements {
         if let Some(from) = stmt_module_dep(stmt) {
-            if is_native_import(from.as_ref()) {
+            if is_native_import(from.as_ref()) || is_scoped_native_import(from.as_ref(), from_dir) || crate::schemes::is_scheme_import(from.as_ref()) {
                 continue;
             }
             let dep_path = resolve_import_path(from.as_ref(), from_dir, Path::new("."))?;
@@ -1854,10 +1934,20 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                     from,
                     span,
                 } => {
-                    if is_native_import(from.as_ref()) {
-                        // Normalize fs/http/process -> tish:fs etc. for Node compatibility
-                        let canonical_spec = normalize_builtin_spec(from.as_ref())
-                            .unwrap_or_else(|| from.to_string());
+                    if is_native_import(from.as_ref())
+                        || is_scoped_native_import(from.as_ref(), dir)
+                        || crate::schemes::is_scheme_import(from.as_ref())
+                    {
+                        // Normalize fs/http/process -> tish:fs etc. for Node compatibility.
+                        // For `asset:` imports, resolve the (relative) file path to an absolute
+                        // one now, while we still know the importing module's directory — the GBA
+                        // codegen emits `include_aseprite_inner!("<abspath>")` from that spec.
+                        let canonical_spec = if crate::schemes::is_scheme_import(from.as_ref()) {
+                            resolve_scheme_spec(from.as_ref(), dir)?
+                        } else {
+                            normalize_builtin_spec(from.as_ref())
+                                .unwrap_or_else(|| from.to_string())
+                        };
                         // Emit VarDecl with NativeModuleLoad for each specifier
                         for spec in specifiers {
                             match spec {

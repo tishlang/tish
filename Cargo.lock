@@ -2306,6 +2306,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "portable-atomic"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
+
+[[package]]
 name = "portable-pty"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3298,16 +3304,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tish_broker"
-version = "0.1.0"
-dependencies = [
- "once_cell",
- "parking_lot",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tishlang"
 version = "0.0.0-dev"
 dependencies = [
@@ -3427,9 +3423,13 @@ dependencies = [
  "arcstr",
  "fancy-regex",
  "getrandom 0.3.4",
+ "hashbrown 0.15.5",
  "indexmap",
  "itoa",
+ "libm",
  "parking_lot",
+ "portable-atomic",
+ "rustc-hash",
  "ryu",
  "smallvec",
 ]

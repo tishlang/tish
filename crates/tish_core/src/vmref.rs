@@ -49,24 +49,24 @@
 //! feature. They both `Deref` (and, for write guards, `DerefMut`) to `T`
 //! just like the underlying types.
 
-use std::fmt;
+use core::fmt;
 
 // --------------------------------------------------------------------------
 // Single-threaded backing store (default): Rc<RefCell<T>>
 // --------------------------------------------------------------------------
 #[cfg(not(feature = "send-values"))]
 mod imp {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
 
     #[derive(Default)]
     pub struct VmRef<T: ?Sized>(pub(super) Rc<RefCell<T>>);
 
     /// Read guard alias. On the single-threaded path this is a true
     /// `Ref<'_, T>`, so multiple readers can coexist.
-    pub type ReadGuard<'a, T> = std::cell::Ref<'a, T>;
+    pub type ReadGuard<'a, T> = core::cell::Ref<'a, T>;
     /// Write guard alias. Exclusive, `DerefMut`.
-    pub type WriteGuard<'a, T> = std::cell::RefMut<'a, T>;
+    pub type WriteGuard<'a, T> = core::cell::RefMut<'a, T>;
 
     impl<T> VmRef<T> {
         #[inline]
@@ -182,6 +182,7 @@ mod imp {
 
 pub use imp::{ReadGuard as VmReadGuard, VmRef, WriteGuard as VmWriteGuard};
 
+#[cfg(not(feature = "portable"))]
 impl<T: fmt::Debug> fmt::Debug for VmRef<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Match `RefCell`'s debug format so snapshot-test output stays
@@ -193,5 +194,16 @@ impl<T: fmt::Debug> fmt::Debug for VmRef<T> {
             Ok(s) => write!(f, "RefCell {{ value: {} }}", s),
             Err(_) => write!(f, "RefCell {{ value: <borrowed> }}"),
         }
+    }
+}
+
+// No unwinding on GBA (`panic = abort`), so `catch_unwind` is unavailable.
+// Debug is used for host snapshot tests, not the runtime hot path, so a direct
+// borrow is fine (a live borrow during Debug would abort, which never happens in
+// practice on the single-threaded target).
+#[cfg(feature = "portable")]
+impl<T: fmt::Debug> fmt::Debug for VmRef<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RefCell {{ value: {:?} }}", &*self.borrow())
     }
 }

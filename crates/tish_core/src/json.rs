@@ -1,12 +1,21 @@
 //! JSON parsing and stringification for Tish values.
 
+use crate::compat::{AHashMap, Arc};
 use crate::{NumArrayBacking, Value, VmRef};
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+use crate::compat::FloatExt;
+#[cfg(feature = "portable")]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Per-`json_parse`-call cache of object-key text → shared `Arc<str>`. A JSON array of records
 /// repeats the same handful of keys across thousands of objects; interning allocates each key
 /// once and `Arc::clone`s it thereafter, instead of a fresh `Arc<str>` allocation per occurrence.
-type KeyCache = ahash::AHashMap<Box<str>, Arc<str>>;
+type KeyCache = AHashMap<Box<str>, Arc<str>>;
 
 #[inline]
 fn intern_key(cache: &mut KeyCache, s: &str) -> Arc<str> {
@@ -133,11 +142,11 @@ fn signal_circular_json_throw() {
     if !crate::has_pending_throw() {
         crate::set_pending_throw(Value::object_from_pairs([
             (
-                std::sync::Arc::from("name"),
+                Arc::from("name"),
                 Value::String("TypeError".into()),
             ),
             (
-                std::sync::Arc::from("message"),
+                Arc::from("message"),
                 Value::String("Converting circular structure to JSON".into()),
             ),
         ]));
@@ -266,7 +275,7 @@ pub fn escape_json_string_into(buf: &mut String, s: &str) {
                 b'\x08' => buf.push_str("\\b"),
                 b'\x0c' => buf.push_str("\\f"),
                 _ => {
-                    use std::fmt::Write;
+                    use core::fmt::Write;
                     let _ = write!(buf, "\\u{:04x}", b as u32);
                 }
             }

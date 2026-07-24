@@ -2,7 +2,18 @@
 //!
 //! This crate provides the unified Value type and utilities used by both
 //! the interpreter (tishlang_eval) and compiled runtime (tishlang_runtime).
+#![cfg_attr(feature = "portable", no_std)]
 
+extern crate alloc;
+
+#[cfg(feature = "portable")]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+
+mod compat;
 mod console_style;
 mod json;
 mod macros;
@@ -11,13 +22,38 @@ mod uri;
 mod value;
 mod vmref;
 
+/// Hidden re-export so the exported `tish_module!` macro can name the right
+/// smart pointer (`std::sync::Arc` on host, `Rc` under `portable`) at its
+/// expansion sites without leaking the private `compat` module.
+#[doc(hidden)]
+pub use compat::Arc as __TishArc;
+
+/// Portable-runtime surface consumed by `tishlang_builtins` and the GBA facade
+/// (`tishlang_runtime_gba`): the libm-backed float trait and the installable
+/// clock / RNG hooks. Only present under `portable`.
+#[cfg(feature = "portable")]
+pub use compat::{
+    install_clock, install_rng, next_u64, now_ms, random_f64, seed_rng, FloatExt, SingleCore,
+};
+
 pub use console_style::{format_value_styled, format_values_for_console, use_console_colors};
 pub use json::{
     escape_json_string_into, json_parse, json_stringify, json_stringify_into, write_json_number,
 };
 pub use shape::{ShapeId, DICT_SHAPE, EMPTY_SHAPE};
 pub use uri::{percent_decode, percent_decode_component, percent_encode, percent_encode_component};
-pub use arcstr::ArcStr;
+pub use compat::ArcStr;
+/// The core type vocabulary, re-exported so `tishlang_builtins`, generated code,
+/// and the GBA facade share one source of truth: `Arc` (std `Arc` / `Rc` under
+/// `portable`), and the object hasher (`ahash` / `FxHasher`). Names match the std
+/// originals so hosted call sites are unchanged.
+pub use compat::{AHashMap, Arc, RandomState};
+/// Lock / once-cell vocabulary, namespaced to avoid polluting the crate root:
+/// std `sync` types on the host, single-core shims under `portable`. Used by
+/// `tishlang_builtins` for its symbol registry.
+pub mod sync {
+    pub use crate::compat::{Mutex, OnceLock, RwLock};
+}
 pub use value::*;
 pub use vmref::{VmReadGuard, VmRef, VmWriteGuard};
 
@@ -26,20 +62,34 @@ pub use vmref::{VmReadGuard, VmRef, VmWriteGuard};
 /// `[tish-exe, <file>, args...]` so a script sees its own args — not the `run` subcommand. Compiled
 /// native binaries don't touch this; they read `std::env::args()` directly (which is already their
 /// own argv). #88
+#[cfg(not(feature = "portable"))]
 static PROCESS_ARGV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 /// Override `process.argv` for the interpreter/VM (set once by `tish run` before executing). A
 /// later call is ignored (the first override wins), matching the single-program-per-process model.
+/// No-op under `portable` (an embedded GBA ROM has no process argv).
+#[cfg(not(feature = "portable"))]
 pub fn set_process_argv(argv: Vec<String>) {
     let _ = PROCESS_ARGV.set(argv);
 }
 
+/// See [`set_process_argv`]. No-op under `portable`.
+#[cfg(feature = "portable")]
+pub fn set_process_argv(_argv: Vec<String>) {}
+
 /// The argv a script should see as `process.argv`: the [`set_process_argv`] override if present,
-/// else the host process's `std::env::args()`.
+/// else the host process's `std::env::args()`. Empty under `portable`.
 pub fn process_argv() -> Vec<String> {
-    match PROCESS_ARGV.get() {
-        Some(v) => v.clone(),
-        None => std::env::args().collect(),
+    #[cfg(not(feature = "portable"))]
+    {
+        match PROCESS_ARGV.get() {
+            Some(v) => v.clone(),
+            None => std::env::args().collect(),
+        }
+    }
+    #[cfg(feature = "portable")]
+    {
+        Vec::new()
     }
 }
 
@@ -54,9 +104,14 @@ pub fn process_argv() -> Vec<String> {
 /// can poll it without a `builtins -> runtime` dependency cycle; `tishlang_runtime` and `tishlang_vm`
 /// share this one slot. First-throw-wins; drained exactly once by [`take_pending_throw`] at the frame
 /// that converts it back into a `Result`.
+#[cfg(not(feature = "portable"))]
 thread_local! {
-    static PENDING_THROW: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+    static PENDING_THROW: core::cell::RefCell<Option<Value>> = const { core::cell::RefCell::new(None) };
 }
+// Single-core: a plain static with the same `.with()` API. See compat::SingleCore.
+#[cfg(feature = "portable")]
+static PENDING_THROW: compat::SingleCore<core::cell::RefCell<Option<Value>>> =
+    compat::SingleCore::new(core::cell::RefCell::new(None));
 
 /// Park a thrown value to propagate across a non-`Result` boundary. First-throw-wins: if one is
 /// already pending (an erroneous continuation reached a second throw before the slot was drained),
@@ -80,13 +135,17 @@ pub fn take_pending_throw() -> Option<Value> {
     PENDING_THROW.with(|c| c.borrow_mut().take())
 }
 
+// Current user-function call depth for the bytecode VM. The VM's recursive path builds a fresh
+// `Vm` per call (so no shared struct field can accumulate) and its `Callable::call` signature is
+// fixed — a thread-local is the VM's equivalent of the interpreter's shared `Rc<Cell>` counter.
+// Lives here (not `tish_vm`) beside `PENDING_THROW` for the same layering reason. #381
+#[cfg(not(feature = "portable"))]
 thread_local! {
-    /// Current user-function call depth for the bytecode VM. The VM's recursive path builds a fresh
-    /// `Vm` per call (so no shared struct field can accumulate) and its `Callable::call` signature is
-    /// fixed — a thread-local is the VM's equivalent of the interpreter's shared `Rc<Cell>` counter.
-    /// Lives here (not `tish_vm`) beside `PENDING_THROW` for the same layering reason. #381
-    static CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CALL_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
+#[cfg(feature = "portable")]
+static CALL_DEPTH: compat::SingleCore<core::cell::Cell<usize>> =
+    compat::SingleCore::new(core::cell::Cell::new(0));
 
 /// Enter one VM call frame; returns the new depth. Pair every call with [`dec_call_depth`].
 #[inline]
@@ -123,12 +182,16 @@ pub const DEFAULT_MAX_CALL_DEPTH: usize = 20_000;
 #[cfg(target_arch = "wasm32")]
 pub const DEFAULT_MAX_CALL_DEPTH: usize = 256;
 
+// The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A
+// thread-local Cell (not OnceLock) so tests can override it per-thread without racing the
+// process-wide env. Shared by the VM's guard and the native backend's boxed-call guard. #381
+#[cfg(not(feature = "portable"))]
 thread_local! {
-    // The recursion ceiling, lazily initialized from `TISH_MAX_CALL_DEPTH` (0 = uninitialized). A
-    // thread-local Cell (not OnceLock) so tests can override it per-thread without racing the
-    // process-wide env. Shared by the VM's guard and the native backend's boxed-call guard. #381
-    static MAX_CALL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAX_CALL_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
+#[cfg(feature = "portable")]
+static MAX_CALL_DEPTH: compat::SingleCore<core::cell::Cell<usize>> =
+    compat::SingleCore::new(core::cell::Cell::new(0));
 
 /// The recursion ceiling for depth-counting guards: user-fn calls deeper than this raise a catchable
 /// `RangeError` instead of overflowing the native stack. `TISH_MAX_CALL_DEPTH` overrides (default
@@ -139,11 +202,14 @@ pub fn max_call_depth() -> usize {
         if v != 0 {
             return v;
         }
+        #[cfg(not(feature = "portable"))]
         let init = std::env::var("TISH_MAX_CALL_DEPTH")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_MAX_CALL_DEPTH);
+        #[cfg(feature = "portable")]
+        let init = DEFAULT_MAX_CALL_DEPTH;
         c.set(init);
         init
     })
@@ -160,11 +226,11 @@ pub fn set_max_call_depth_for_test(n: usize) {
 pub fn stack_overflow_error() -> Value {
     let mut e = ObjectMap::default();
     e.insert(
-        std::sync::Arc::from("name"),
+        Arc::from("name"),
         Value::String("RangeError".into()),
     );
     e.insert(
-        std::sync::Arc::from("message"),
+        Arc::from("message"),
         Value::String("Maximum call stack size exceeded".into()),
     );
     Value::object(e)
@@ -177,11 +243,11 @@ pub fn stack_overflow_error() -> Value {
 pub fn not_a_function_error(message: impl Into<String>) -> Value {
     let mut e = ObjectMap::default();
     e.insert(
-        std::sync::Arc::from("name"),
+        Arc::from("name"),
         Value::String("TypeError".into()),
     );
     e.insert(
-        std::sync::Arc::from("message"),
+        Arc::from("message"),
         Value::String(message.into().into()),
     );
     Value::object(e)
@@ -193,11 +259,11 @@ pub fn not_a_function_error(message: impl Into<String>) -> Value {
 pub fn type_error(message: impl Into<String>) -> Value {
     let mut e = ObjectMap::default();
     e.insert(
-        std::sync::Arc::from("name"),
+        Arc::from("name"),
         Value::String("TypeError".into()),
     );
     e.insert(
-        std::sync::Arc::from("message"),
+        Arc::from("message"),
         Value::String(message.into().into()),
     );
     Value::object(e)
@@ -221,11 +287,11 @@ pub fn str_to_array_index(s: &str) -> Option<usize> {
 pub fn range_error(message: impl Into<String>) -> Value {
     let mut e = ObjectMap::default();
     e.insert(
-        std::sync::Arc::from("name"),
+        Arc::from("name"),
         Value::String("RangeError".into()),
     );
     e.insert(
-        std::sync::Arc::from("message"),
+        Arc::from("message"),
         Value::String(message.into().into()),
     );
     Value::object(e)
@@ -238,11 +304,11 @@ pub fn range_error(message: impl Into<String>) -> Value {
 pub fn cannot_read_property_error(prop: &str) -> Value {
     let mut e = ObjectMap::default();
     e.insert(
-        std::sync::Arc::from("name"),
+        Arc::from("name"),
         Value::String("TypeError".into()),
     );
     e.insert(
-        std::sync::Arc::from("message"),
+        Arc::from("message"),
         Value::String(format!("Cannot read property '{}' of null", prop).into()),
     );
     Value::object(e)

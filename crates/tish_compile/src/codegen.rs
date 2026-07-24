@@ -589,6 +589,9 @@ pub fn compile_project_full_emit(
 > {
     use crate::resolve;
     let root = project_root.unwrap_or_else(|| entry_path.parent().unwrap_or(Path::new(".")));
+    // Install the import-scheme registry (built-ins + any `tish.schemes` from package.json) for
+    // this build, so resolution and codegen recognize `asset:` and any project-declared scheme.
+    crate::schemes::set_active(crate::schemes::SchemeRegistry::from_project(root));
     let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
         message: e,
         span: None,
@@ -749,6 +752,28 @@ pub fn compile_with_native_modules_emit(
     });
     g.emit_program(&program)?;
     Ok(g.output)
+}
+
+/// Rewrite the `std::` paths that survive in `Gba`-mode generated code into their
+/// `core::` equivalents (the emitted crate is `#![no_std]`). Applied once to the
+/// whole output. Each pattern is a specific fully-qualified Rust path — none occur
+/// inside escaped user string literals — so the textual pass is safe. Callers add
+/// to this table as the thumbv4t corpus build surfaces new sites.
+fn gba_no_std_rewrite(src: String) -> String {
+    src.replace("std::error::Error", "core::error::Error")
+        .replace("std::f64::consts", "core::f64::consts")
+        .replace("std::cmp::Ordering", "core::cmp::Ordering")
+        .replace("std::mem::", "core::mem::")
+        .replace("std::slice::", "core::slice::")
+        // Struct→Value boundary conversions (`object_from_pairs`) and a few other
+        // sites emit fully-qualified `::std::sync::Arc` / `std::sync::Arc`. The Gba
+        // prelude imports `Arc` (= facade Rc alias), so map both to it. The `::`
+        // form must be replaced first (it contains the non-`::` form).
+        .replace("::std::sync::Arc", "Arc")
+        .replace("std::sync::Arc", "Arc")
+        // hashbrown lacks `From<[_; N]>` with a custom hasher; route object-literal
+        // construction through the facade helper.
+        .replace("ObjectMap::from(", "tishlang_runtime::object_map_from(")
 }
 
 /// #177 (S-E/S-F): the return shape of a de-virtualized aggregate (struct/array) free fn.
@@ -1110,6 +1135,11 @@ pub(crate) struct Codegen {
     /// closures it must not return a `Result` from a `Value`-returning closure.
     value_fn_depth: u32,
     emit_mode: crate::NativeEmitMode,
+    /// Scheme imports as `(scheme_name, absolute_path)`, in first-seen order. Populated (Gba mode)
+    /// before the entry is emitted from the active [`crate::schemes`] registry; drives the
+    /// `mod __scheme_<name>_<j> { … }` blocks and their per-scheme registration. The handle a tish
+    /// name binds to is its index AMONG same-scheme entries (= its slot in that scheme's arena).
+    scheme_files: Vec<(String, String)>,
     /// Program links `tish:macos` / `tish:ios` — skip HeadlessHost install.
     has_native_ui_host: bool,
     /// Program references browser global `document` — inject tish-canvas.
@@ -1215,6 +1245,7 @@ impl Codegen {
             program_fun_decl_names: std::collections::HashSet::new(),
             value_fn_depth: 0,
             emit_mode: crate::NativeEmitMode::DesktopBin,
+            scheme_files: Vec::new(),
             has_native_ui_host: false,
             program_uses_document: false,
             cse_subst: Vec::new(),
@@ -1348,6 +1379,108 @@ impl Codegen {
     /// an object shape. Each generated struct derives `Clone` + `Debug`
     /// (cheap; field types are all `Copy`-or-cheap-clone in practice) and
     /// is named `TishStruct_<TishAlias>`.
+    /// Split a lowered scheme spec (`<prefix><abspath>`) into `(scheme_name, abspath)` using the
+    /// active registry. `None` if the spec isn't a registered scheme.
+    fn split_scheme_spec(spec: &str) -> Option<(String, String)> {
+        crate::schemes::with_active(|reg| {
+            reg.matches(spec).map(|s| {
+                let prefix = s.prefix();
+                let rest = spec.strip_prefix(&prefix).unwrap_or(spec).to_string();
+                (s.name.clone(), rest)
+            })
+        })
+    }
+
+    /// Populate [`Self::scheme_files`] from the program's scheme imports. Each was lowered (resolve
+    /// phase) to a top-level `let name = NativeModuleLoad { spec: "<prefix><abspath>" }`, so a flat
+    /// scan of the top-level statements finds them all. De-duplicated on `(scheme, path)`.
+    fn collect_scheme_files(&mut self, stmts: &[Statement]) {
+        for s in stmts {
+            if let Statement::VarDecl {
+                init: Some(Expr::NativeModuleLoad { spec, .. }),
+                ..
+            } = s
+            {
+                if let Some(entry) = Self::split_scheme_spec(spec.as_ref()) {
+                    if !self.scheme_files.contains(&entry) {
+                        self.scheme_files.push(entry);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The handle a scheme spec binds to — its index AMONG same-scheme entries (its arena slot).
+    fn scheme_handle_of(&self, spec: &str) -> Option<usize> {
+        let (scheme, path) = Self::split_scheme_spec(spec)?;
+        let mut k = 0usize;
+        for (s, p) in &self.scheme_files {
+            if *s == scheme {
+                if *p == path {
+                    return Some(k);
+                }
+                k += 1;
+            }
+        }
+        None
+    }
+
+    /// The generated `mod` identifier for the `j`-th collected scheme file.
+    fn scheme_mod_ident(scheme: &str, j: usize) -> String {
+        format!("__scheme_{}_{}", scheme, j)
+    }
+
+    /// Emit one `mod __scheme_<name>_<j> { … }` per collected scheme file (Gba only), from the
+    /// scheme's `gba` emit template: its `use`s, module body (the include macro, `{path}` → the
+    /// absolute file), and a same-module accessor (which can see the macro's private statics — the
+    /// only way a tagless image's sprites escape). Registration into the runtime arena happens in
+    /// the entry below.
+    fn emit_scheme_modules(&mut self) -> Result<(), CompileError> {
+        let files = self.scheme_files.clone();
+        for (j, (scheme, path)) in files.iter().enumerate() {
+            let emit = self.scheme_target_emit(scheme)?;
+            let module_ident = Self::scheme_mod_ident(scheme, j);
+            self.writeln(&format!("mod {} {{", module_ident));
+            self.indent += 1;
+            for u in &emit.uses {
+                self.writeln(u);
+            }
+            self.writeln(&crate::schemes::render_template(
+                &emit.module_body,
+                path,
+                &module_ident,
+            ));
+            if !emit.accessor.is_empty() {
+                self.writeln(&emit.accessor);
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        if !files.is_empty() {
+            self.writeln("");
+        }
+        Ok(())
+    }
+
+    /// The `gba` [`crate::schemes::TargetEmit`] for `scheme`, or a compile error if the scheme has
+    /// no template for this target.
+    fn scheme_target_emit(
+        &self,
+        scheme: &str,
+    ) -> Result<crate::schemes::TargetEmit, CompileError> {
+        crate::schemes::with_active(|reg| {
+            reg.matches(&format!("{}:", scheme))
+                .and_then(|s| s.targets.get("gba").cloned())
+        })
+        .ok_or_else(|| CompileError {
+            message: format!(
+                "import scheme '{}:' has no emit template for target 'gba'",
+                scheme
+            ),
+            span: None,
+        })
+    }
+
     fn emit_named_struct_decls(&mut self) {
         // Snapshot keys + values so we can mutate `self` (writing the
         // emitted source) inside the loop.
@@ -2251,10 +2384,27 @@ impl Codegen {
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
-        self.write("#![allow(unused, non_snake_case)]\n\n");
-        self.write("use std::cell::RefCell;\n");
-        self.write("use std::rc::Rc;\n");
-        self.write("use std::sync::Arc;\n");
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
+            // prelude `use tishlang_runtime::{…}` below is unchanged — those names
+            // are re-exported by the tishlang_runtime_gba facade.
+            self.write("#![no_std]\n#![no_main]\n#![allow(unused, non_snake_case)]\n\n");
+            self.write("extern crate alloc;\n");
+            self.write("use core::cell::RefCell;\n");
+            self.write("use alloc::rc::Rc;\n");
+            self.write("use alloc::boxed::Box;\n");
+            self.write("use alloc::vec::Vec;\n");
+            self.write("use alloc::string::{String, ToString};\n");
+            self.write("use alloc::{vec, format};\n");
+            self.write("use tishlang_runtime::Arc;\n");
+            // f64 transcendentals for inline math (`Math.sqrt(x)` → `x.sqrt()`).
+            self.write("use tishlang_runtime::FloatExt;\n");
+        } else {
+            self.write("#![allow(unused, non_snake_case)]\n\n");
+            self.write("use std::cell::RefCell;\n");
+            self.write("use std::rc::Rc;\n");
+            self.write("use std::sync::Arc;\n");
+        }
         self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, encode_uri_component as tish_encode_uri_component, decode_uri_component as tish_decode_uri_component, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_expm1 as tish_math_expm1, math_log1p as tish_math_log1p, math_clz32 as tish_math_clz32, math_fround as tish_math_fround, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_of as tish_array_of, array_from as tish_array_from, object_is as tish_object_is, object_has_own as tish_object_has_own, structured_clone as tish_structured_clone, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, number_is_integer as tish_number_is_integer, number_is_safe_integer as tish_number_is_safe_integer, number_is_nan as tish_number_is_nan, number_is_finite as tish_number_is_finite, object_assign as tish_object_assign, object_freeze as tish_object_freeze, object_is_frozen as tish_object_is_frozen, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, ObjectData, PropMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
@@ -2311,6 +2461,16 @@ impl Codegen {
         // and `x.field` becomes a direct field access.
         self.emit_named_struct_decls();
 
+        // `asset:` imports (Gba only): collect the distinct files (each an i32 sheet handle) and
+        // emit one `mod __asset_F { include_aseprite_inner!("<abspath>"); pub fn sheet() }` block.
+        // The inner macro's `SPRITES` static is private, so the same-module `sheet()` accessor is
+        // how the frames escape the module (a tagless image exposes no public tag). Registration
+        // into the facade arena happens in the entry below, before `run()`.
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            self.collect_scheme_files(&program.statements);
+            self.emit_scheme_modules()?;
+        }
+
         if self.is_async && self.emit_mode == crate::NativeEmitMode::DesktopBin {
             self.writeln("#[tokio::main]");
             self.writeln("async fn main() {");
@@ -2333,10 +2493,36 @@ impl Codegen {
             self.writeln("}");
             self.writeln("");
         }
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            // agb runtime entry: hand the peripherals to the facade, run the
+            // program body, then halt. (Async lands in P5 — `run()` is sync here.)
+            self.writeln("#[agb::entry]");
+            self.writeln("fn agb_main(gba: agb::Gba) -> ! {");
+            self.indent += 1;
+            self.writeln("tishlang_runtime::gba::init(gba);");
+            // Register each scheme file into its runtime arena, in first-seen order, so the handle a
+            // tish name binds to (its per-scheme index) matches the arena slot it gets here.
+            let scheme_files = self.scheme_files.clone();
+            for (j, (scheme, _path)) in scheme_files.iter().enumerate() {
+                let emit = self.scheme_target_emit(scheme)?;
+                if !emit.register.is_empty() {
+                    let module_ident = Self::scheme_mod_ident(scheme, j);
+                    let call = crate::schemes::render_template(&emit.register, "", &module_ident);
+                    self.writeln(&format!("{};", call));
+                }
+            }
+            self.writeln("let _ = run();");
+            self.writeln("tishlang_runtime::gba::halt()");
+            self.indent -= 1;
+            self.writeln("}");
+            self.writeln("");
+        }
         // M5 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out): emit a parallel
         // native `fn f_native` for each eligible top-level numeric fn at top level; direct calls
         // route to it in emit_typed_expr.
-        if crate::native_opts_enabled() {
+        // Gba mode: these passes emit `thread_local!` and other std-isms; gate them off initially
+        // (they are pure perf — correctness is unaffected). Re-audit for no_std later.
+        if crate::native_opts_enabled() && self.emit_mode != crate::NativeEmitMode::Gba {
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
             if !self.native_numeric_globals.is_empty() {
@@ -2444,7 +2630,9 @@ impl Codegen {
         }
         self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
         self.shift_half_of = Self::collect_shift_half_of(&program.statements);
-        if self.is_async {
+        // Gba mode is sync in P2 (real async lowering is P5); `std::error::Error` in
+        // the signature is rewritten to `core::error::Error` by the no_std post-pass.
+        if self.is_async && self.emit_mode != crate::NativeEmitMode::Gba {
             self.writeln("async fn run() -> Result<(), Box<dyn std::error::Error>> {");
         } else if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
             self.writeln("pub fn run() -> Result<(), Box<dyn std::error::Error>> {");
@@ -2838,6 +3026,14 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
         }
+        // Gba mode: rewrite the handful of `std::` paths that survive in emitted
+        // code into their `core::` equivalents (the crate is `#![no_std]`). These
+        // are specific Rust path patterns, not substrings that occur in escaped
+        // user string literals, so a targeted textual pass is safe. Any new site
+        // is caught by the thumbv4t corpus build.
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            self.output = gba_no_std_rewrite(core::mem::take(&mut self.output));
+        }
         Ok(())
     }
 
@@ -2860,7 +3056,12 @@ impl Codegen {
     /// unchanged, and `PropMap` dedup + hidden-class shapes key by text, not pointer — so shapes,
     /// insertion order, and `Object.keys` are all unaffected. Same inline-`static` idiom as the
     /// per-site `PropIC` caches.
-    fn cached_object_key(k: &str) -> String {
+    fn cached_object_key(&self, k: &str) -> String {
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            // No `OnceLock` on no_std GBA; emit a direct interned key (`Arc` = `Rc`).
+            // Object-literal keys in a hot loop are a later perf item on GBA.
+            return format!("Arc::from({:?})", k);
+        }
         format!(
             "{{ static K: ::std::sync::OnceLock<::std::sync::Arc<str>> = \
              ::std::sync::OnceLock::new(); K.get_or_init(|| ::std::sync::Arc::from({:?})).clone() }}",
@@ -2932,6 +3133,13 @@ impl Codegen {
                 return Ok(code);
             }
         }
+        if let Expr::MemberAssign { object, prop, value, .. } = expr {
+            if let Some(code) =
+                self.try_emit_native_member_assign(object, prop.as_ref(), value, true)?
+            {
+                return Ok(code);
+            }
+        }
         match expr {
             Expr::Assign { name, value, .. } => {
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
@@ -2997,7 +3205,24 @@ impl Codegen {
                         }
                     }
                 }
-                if matches!(rust_type, RustType::F64 | RustType::Bool | RustType::String) {
+                // Narrow int local (`let hp: u8 = …; hp = hp - 1`): compute the RHS (promoted to
+                // `f64` by the binary emitter) and truncate-cast to the width on store. No
+                // int32-register trick — these are plain storage locals.
+                if rust_type.is_narrow_int() {
+                    let escaped = Self::escape_ident(name.as_ref());
+                    let native_val = self.emit_coerced_native(value, &rust_type)?;
+                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        return Ok(format!(
+                            "{{ let _t = {}; *{}.borrow_mut() = _t; }}",
+                            native_val, escaped
+                        ));
+                    }
+                    return Ok(format!("{} = {}", escaped, native_val));
+                }
+                if matches!(
+                    rust_type,
+                    RustType::F64 | RustType::Fixed | RustType::Bool | RustType::String
+                ) {
                     if let Expr::Index { object, index, .. } = value.as_ref() {
                         if let Expr::Ident { name: arr_name, .. } = object.as_ref() {
                             if self.index_in_bounds(index, arr_name.as_ref()) {
@@ -3047,6 +3272,47 @@ impl Codegen {
             }
             // `s += x` etc. in statement position: native f64 compound op, no boxed return.
             Expr::CompoundAssign { name, op, value, .. } => {
+                // Narrow int compound-assign (`hp -= 3`): compute in `f64` (JS Number semantics),
+                // truncate-cast back to the width — same model as a narrow-int plain assign, no box.
+                if self.type_context.get_type(name.as_ref()).is_narrow_int() {
+                    let width = self.type_context.get_type(name.as_ref()).to_rust_type_str();
+                    let n = Self::escape_ident(name.as_ref()).into_owned();
+                    let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let (rhs_code, rhs_ty) = self.emit_typed_expr(value)?;
+                    let rhs_f64 = if rhs_ty == RustType::F64 {
+                        rhs_code
+                    } else if rhs_ty.is_integer_scalar() {
+                        format!("(({}) as f64)", rhs_code)
+                    } else {
+                        let rhs_val = if rhs_ty.is_native() {
+                            rhs_ty.to_value_expr(&rhs_code)
+                        } else {
+                            rhs_code
+                        };
+                        format!("(match &({}) {{ Value::Number(n) => *n, v => panic!(\"compound assign: expected number, got {{:?}}\", v) }})", rhs_val)
+                    };
+                    let op_str = match op {
+                        CompoundOp::Add => "+",
+                        CompoundOp::Sub => "-",
+                        CompoundOp::Mul => "*",
+                        CompoundOp::Div => "/",
+                        CompoundOp::Mod => "%",
+                    };
+                    let read = if is_refcell {
+                        format!("(*{}.borrow())", n)
+                    } else {
+                        n.clone()
+                    };
+                    let new_val =
+                        format!("((({}) as f64) {} {}) as {}", read, op_str, rhs_f64, width);
+                    if is_refcell {
+                        return Ok(format!(
+                            "{{ let _t = {}; *{}.borrow_mut() = _t; }}",
+                            new_val, n
+                        ));
+                    }
+                    return Ok(format!("{} = {}", n, new_val));
+                }
                 if self.type_context.get_type(name.as_ref()) == RustType::F64 {
                     let n = Self::escape_ident(name.as_ref());
                     let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
@@ -7621,10 +7887,11 @@ impl Codegen {
                          tishlang_runtime::get_prop(&o, {}) }} }}",
                         obj, key
                     )
-                } else if ic_eligible {
+                } else if ic_eligible && self.emit_mode != crate::NativeEmitMode::Gba {
                     // Per-site inline cache: a block-scoped `static` cell unique to this member-read
                     // site (#179). Caches (shape, slot) so repeat reads skip the key scan. Behaviour is
                     // identical to `get_prop` — non-cacheable objects fall through inside `get_prop_ic`.
+                    // Gba: `PropIC` uses atomics (unavailable on thumbv4t) — use the plain path.
                     format!(
                         "{{ static IC: tishlang_runtime::PropIC = tishlang_runtime::PropIC::new(); \
                          tishlang_runtime::get_prop_ic(&{}, {}, &IC) }}",
@@ -7751,7 +8018,7 @@ impl Codegen {
                         match prop {
                             ObjectProp::KeyValue(k, v, _) => {
                                 let val = self.emit_expr(v)?;
-                                let key = Self::cached_object_key(k.as_ref());
+                                let key = self.cached_object_key(k.as_ref());
                                 if self.should_clone(v) {
                                     parts.push(format!("_obj.insert({}, ({}).clone());", key, val));
                                 } else {
@@ -7783,7 +8050,7 @@ impl Codegen {
                     for prop in props {
                         if let ObjectProp::KeyValue(k, v, _) = prop {
                             let val = self.emit_expr(v)?;
-                            let key = Self::cached_object_key(k.as_ref());
+                            let key = self.cached_object_key(k.as_ref());
                             if self.should_clone(v) {
                                 parts.push(format!("({}, ({}).clone())", key, val));
                             } else {
@@ -8172,6 +8439,11 @@ impl Codegen {
                 format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr)
             }
             Expr::MemberAssign { object, prop, value, .. } => {
+                if let Some(code) =
+                    self.try_emit_native_member_assign(object, prop.as_ref(), value, false)?
+                {
+                    return Ok(code);
+                }
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!(
@@ -8279,6 +8551,27 @@ impl Codegen {
                 )
             }
             Expr::NativeModuleLoad { spec, export_name, .. } => {
+                // A scheme import (`asset:`, or any project-declared scheme) binds to an i32 handle
+                // — its per-scheme index, registered into a runtime arena by the generated
+                // `agb_main`. Only valid in Gba mode; no other target bakes scheme files into a ROM.
+                if crate::schemes::is_scheme_import(spec.as_ref()) {
+                    if self.emit_mode != crate::NativeEmitMode::Gba {
+                        return Err(CompileError {
+                            message: format!(
+                                "scheme import '{}' requires --target gba",
+                                spec.as_ref()
+                            ),
+                            span: None,
+                        });
+                    }
+                    let handle = self.scheme_handle_of(spec.as_ref()).ok_or_else(|| {
+                        CompileError {
+                            message: format!("internal: scheme import '{}' not collected", spec.as_ref()),
+                            span: None,
+                        }
+                    })?;
+                    return Ok(format!("Value::Number({} as f64)", handle));
+                }
                 self.native_module_rust_init(spec.as_ref(), export_name.as_ref())
                     .ok_or_else(|| CompileError {
                         message: if crate::resolve::is_builtin_native_spec(spec.as_ref()) {
@@ -10516,6 +10809,18 @@ impl Codegen {
             if &typed_ty == target_type {
                 return Ok(typed_code);
             }
+            // Integer-scalar target from a native numeric source (`let hp: u8 = 100`,
+            // `hp: dmg` where dmg is f64): truncate-cast directly instead of round-tripping
+            // through `Value::Number`. Covers narrow widths and `i32` uniformly.
+            if target_type.is_integer_scalar()
+                && (typed_ty == RustType::F64 || typed_ty.is_integer_scalar())
+            {
+                return Ok(format!("({}) as {}", typed_code, target_type.to_rust_type_str()));
+            }
+            // `f64` target from an integer-scalar source: widen directly.
+            if *target_type == RustType::F64 && typed_ty.is_integer_scalar() {
+                return Ok(format!("({}) as f64", typed_code));
+            }
         }
 
         // Fall back to emit_expr + conversion
@@ -11947,6 +12252,149 @@ impl Codegen {
         Ok(Some(assign))
     }
 
+    /// `obj.field = value` where `obj` is a native struct — either a local of
+    /// `RustType::Named` (`player.x = …`) or an element of a `Vec<Named>`
+    /// (`entities[i].x = …`). Emits a direct native field store.
+    ///
+    /// The dynamic fallback (`set_prop(&obj_as_value, "x", v)`) boxes the struct to a
+    /// throwaway `Value`, mutates the copy, and drops it — the write is silently lost
+    /// (the interpreter, which keeps identity, gets it right; codegen didn't). This
+    /// closes that gap, which is what makes AoS entity mutation (`e.x = e.x + e.vx`)
+    /// work on the native path. Returns `None` when `obj`/`field` isn't a native struct
+    /// field, so the caller falls back to the dynamic `set_prop` path unchanged.
+    fn try_emit_native_member_assign(
+        &mut self,
+        object: &Expr,
+        prop: &str,
+        value: &Expr,
+        side_effect_only: bool,
+    ) -> Result<Option<String>, CompileError> {
+        // Resolve the native lvalue + the field's type for the two struct shapes.
+        let (lhs, field_ty, needs_temp) = if let Expr::Ident { name, .. } = object {
+            // `var.field = …` — `var` is a native struct local.
+            let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
+                return Ok(None);
+            };
+            let Some((_, field_ty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
+                return Ok(None);
+            };
+            let field_ty = field_ty.clone();
+            let esc = Self::escape_ident(name.as_ref()).into_owned();
+            let field = crate::types::field_ident(prop);
+            if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                (format!("(*{}.borrow_mut()).{}", esc, field), field_ty, true)
+            } else {
+                (format!("{}.{}", esc, field), field_ty, false)
+            }
+        } else if let Expr::Index {
+            object: arr,
+            index,
+            optional: false,
+            ..
+        } = object
+        {
+            // `arr[i].field = …` — element of a `Vec<Named>`.
+            let Expr::Ident { name, .. } = arr.as_ref() else {
+                return Ok(None);
+            };
+            if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                return Ok(None);
+            }
+            let RustType::Vec(elem) = self.type_context.get_type(name.as_ref()) else {
+                return Ok(None);
+            };
+            let RustType::Named { fields, .. } = elem.as_ref() else {
+                return Ok(None);
+            };
+            let Some((_, field_ty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
+                return Ok(None);
+            };
+            let field_ty = field_ty.clone();
+            let esc = Self::escape_ident(name.as_ref()).into_owned();
+            let field = crate::types::field_ident(prop);
+            let idx_usize = self.emit_index_usize(index, name.as_ref())?;
+            (format!("{}[{}].{}", esc, idx_usize, field), field_ty, false)
+        } else {
+            return Ok(None);
+        };
+
+        let native_val = self.emit_coerced_native(value, &field_ty)?;
+        let code = if needs_temp {
+            // Compute the RHS before the mutable borrow so an RHS read of the same
+            // RefCell doesn't panic (already-borrowed).
+            if side_effect_only {
+                format!("{{ let _v = {}; {} = _v; }}", native_val, lhs)
+            } else {
+                format!("{{ let _v = {}; {} = _v; Value::Null }}", native_val, lhs)
+            }
+        } else if side_effect_only {
+            format!("{} = {}", lhs, native_val)
+        } else {
+            format!("{{ {} = {}; Value::Null }}", lhs, native_val)
+        };
+        Ok(Some(code))
+    }
+
+    /// Emit `index` as a `usize` for direct `vec[idx]` element access. Mirrors the index
+    /// handling in [`Self::try_emit_native_vec_index_assign`]: a substituted loop counter
+    /// resolves directly, an `f64`/`i32` index casts, anything else unboxes a `Value::Number`.
+    fn emit_index_usize(
+        &mut self,
+        index: &Expr,
+        _arr_name: &str,
+    ) -> Result<String, CompileError> {
+        if let Expr::Ident { name: idx_name, .. } = index {
+            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
+                return Ok(uv.clone());
+            }
+        }
+        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
+            Ok(format!("({}) as usize", idx_code))
+        } else {
+            let iv = if idx_ty.is_native() {
+                idx_ty.to_value_expr(&idx_code)
+            } else {
+                idx_code
+            };
+            Ok(format!(
+                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                iv
+            ))
+        }
+    }
+
+    /// Emit `value` as a native expression of type `target_ty`, coercing without a
+    /// `Value` round-trip where the conversion is a cheap numeric cast. Same-typed RHS
+    /// passes through; f64↔i32 casts directly; everything else boxes to `Value` then
+    /// converts (correct for Fixed/String/Bool/Value fields, at one box per store).
+    fn emit_coerced_native(
+        &mut self,
+        value: &Expr,
+        target_ty: &RustType,
+    ) -> Result<String, CompileError> {
+        let (val_code, val_ty) = self.emit_typed_expr(value)?;
+        if val_ty == *target_ty {
+            return Ok(val_code);
+        }
+        // Cheap numeric coercions that avoid a `Value` round-trip: an integer scalar target
+        // truncate-casts a numeric RHS (`(v) as u8`), and an `f64` target widens an integer
+        // scalar RHS (`(v) as f64`). Covers i32↔f64 and every narrow width in one shape.
+        if target_ty.is_integer_scalar() && (val_ty == RustType::F64 || val_ty.is_integer_scalar())
+        {
+            return Ok(format!("({}) as {}", val_code, target_ty.to_rust_type_str()));
+        }
+        if *target_ty == RustType::F64 && val_ty.is_integer_scalar() {
+            return Ok(format!("({}) as f64", val_code));
+        }
+        let boxed = if val_ty.is_native() {
+            val_ty.to_value_expr(&val_code)
+        } else {
+            val_code
+        };
+        Ok(target_ty.from_value_expr(&boxed))
+    }
+
     /// `for (i=0; i<r; i++) { arr[i] = arr[i+1] }` → `arr.copy_within(1..(r+1), 0)` (fannkuch perm1 rotation).
     fn try_emit_vec_copy_within_shift_for(
         &mut self,
@@ -12584,6 +13032,24 @@ impl Codegen {
                 ..
             } => Self::int_literal_value(*n),
             _ => None,
+        }
+    }
+
+    /// A numeric literal folded to a compile-time `Fixed` (Q24.8) constant, or `None` if `e`
+    /// isn't a plain number literal. Lets a `fixed ⊕ <literal>` op (`px + 1.5`, `hp * 2`) stay
+    /// native `Num<i32,8>` arithmetic instead of boxing the literal side through `f64`. Uses the
+    /// same truncating `(n * 256) as i32` conversion as the dynamic `fixed`↔`Value` boundary, so
+    /// the constant is bit-identical to the boxed path.
+    fn fixed_literal_of(e: &Expr) -> Option<String> {
+        if let Expr::Literal {
+            value: Literal::Number(n),
+            ..
+        } = e
+        {
+            let raw = (n * 256.0) as i32;
+            Some(format!("tishlang_runtime::Fixed::from_raw({}i32)", raw))
+        } else {
+            None
         }
     }
 
@@ -16868,6 +17334,14 @@ impl Codegen {
             code
         } else if ty == RustType::Value {
             RustType::F64.from_value_expr(&code)
+        } else if ty.is_integer_scalar() {
+            // An integer scalar (`i32` or a narrow width) is exact in `f64` — widen it, rather
+            // than emitting the raw integer where an `f64` is required (e.g. `return total;`
+            // from a native-vec `-> f64` fn whose body yields an `i32` local).
+            format!("(({}) as f64)", code)
+        } else if ty == RustType::Fixed {
+            // Q24.8 → f64 (exact): raw / 256.
+            format!("(({}).to_raw() as f64 / 256.0)", code)
         } else {
             code
         })
@@ -17425,11 +17899,19 @@ impl Codegen {
                 name,
                 params,
                 rest_param: None,
+                return_type,
                 body,
                 ..
             } = s
             {
                 if nonnumeric.contains(name.as_ref()) {
+                    continue;
+                }
+                // The native-vec `_nv` lowering only expresses `f64`/`Vec<f64>`/unit returns
+                // (`VecRetKind`). A `fixed`-returning fn would be forced to `-> f64` while its
+                // body yields `Num<i32,8>` — a hard type error. Keep such fns on the (correct,
+                // boxed) dynamic path until `VecRetKind` learns `Fixed`.
+                if Self::ann_is_simple(return_type.as_ref(), "fixed") {
                     continue;
                 }
                 if let Some(sig) = Self::infer_vec_fn_sig(params, body) {
@@ -17470,6 +17952,7 @@ impl Codegen {
                     name,
                     params,
                     rest_param: None,
+                    return_type,
                     body,
                     ..
                 } = s
@@ -17481,6 +17964,11 @@ impl Codegen {
                     // a fn called with a non-numeric arg, or `body_uses_local_vec_ops` re-adds it here
                     // (e.g. `fn rec(m){ log.push(m) }` called `rec("ran")`).
                     if nonnumeric.contains(name.as_ref()) {
+                        continue;
+                    }
+                    // A `fixed` return can't be expressed by `VecRetKind` (see the initial pass) — the
+                    // forwarding fixpoint must skip it too, or it re-adds the fn via `body_uses_local_vec_ops`.
+                    if Self::ann_is_simple(return_type.as_ref(), "fixed") {
                         continue;
                     }
                     if let Some(sig) = Self::infer_vec_fn_sig_forwarding(params, body, &sigs) {
@@ -21610,15 +22098,37 @@ impl Codegen {
                 // `emit_int32_operand`, which reads the i32 register directly. So coercing here only
                 // governs arithmetic/relational reads (e.g. the `h * 16777619` excursion), where the
                 // operand must be f64 to keep JS Number semantics.
-                let (l, lt) = if lt == RustType::I32 {
+                // A narrow int storage read (`u8` HP, `i16` tile x) promotes the same way — read
+                // as its exact `f64` value so arithmetic keeps JS Number semantics; the truncating
+                // store back to the field happens at the assignment site.
+                let (l, lt) = if lt.is_integer_scalar() {
                     (format!("(({}) as f64)", l), RustType::F64)
                 } else {
                     (l, lt)
                 };
-                let (r, rt) = if rt == RustType::I32 {
+                let (r, rt) = if rt.is_integer_scalar() {
                     (format!("(({}) as f64)", r), RustType::F64)
                 } else {
                     (r, rt)
+                };
+
+                // `fixed ⊕ <numeric-literal>` (`px + 1.5`, `hp * 2`, `y < 100.0`): fold the literal
+                // operand to a compile-time `Fixed` constant so the op lowers to native `Num<i32,8>`
+                // math via the `Fixed⊕Fixed` case below, instead of falling through to the boxed
+                // `ops::*` path. Only a plain literal is folded — a runtime `f64` still boxes (mixing
+                // a runtime f64 with fixed is genuinely lossy and stays on the safe dynamic path).
+                let (l, lt, r, rt) = if lt == RustType::Fixed && rt != RustType::Fixed {
+                    match Self::fixed_literal_of(right) {
+                        Some(fx) => (l, lt, fx, RustType::Fixed),
+                        None => (l, lt, r, rt),
+                    }
+                } else if rt == RustType::Fixed && lt != RustType::Fixed {
+                    match Self::fixed_literal_of(left) {
+                        Some(fx) => (fx, RustType::Fixed, r, rt),
+                        None => (l, lt, r, rt),
+                    }
+                } else {
+                    (l, lt, r, rt)
                 };
 
                 if let Some(result_ty) = RustType::result_type_of_binop(*op, &lt, &rt) {
