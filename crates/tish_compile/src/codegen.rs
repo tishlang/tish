@@ -3194,13 +3194,6 @@ impl Codegen {
                 return Ok(code);
             }
         }
-        if let Expr::MemberAssign { object, prop, value, .. } = expr {
-            if let Some(code) =
-                self.try_emit_native_member_assign(object, prop.as_ref(), value, true)?
-            {
-                return Ok(code);
-            }
-        }
         match expr {
             Expr::Assign { name, value, .. } => {
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
@@ -8500,11 +8493,6 @@ impl Codegen {
                 format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr)
             }
             Expr::MemberAssign { object, prop, value, .. } => {
-                if let Some(code) =
-                    self.try_emit_native_member_assign(object, prop.as_ref(), value, false)?
-                {
-                    return Ok(code);
-                }
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!(
@@ -12311,135 +12299,6 @@ impl Codegen {
             _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
         };
         Ok(Some(assign))
-    }
-
-    /// `obj.field = value` where `obj` is a native struct — either a local of
-    /// `RustType::Named` (`player.x = …`) or an element of a `Vec<Named>`
-    /// (`entities[i].x = …`). Emits a direct native field store.
-    ///
-    /// The dynamic fallback (`set_prop(&obj_as_value, "x", v)`) boxes the struct to a
-    /// throwaway `Value`, mutates the copy, and drops it — the write is silently lost
-    /// (the interpreter, which keeps identity, gets it right; codegen didn't). This
-    /// closes that gap, which is what makes AoS entity mutation (`e.x = e.x + e.vx`)
-    /// work on the native path. Returns `None` when `obj`/`field` isn't a native struct
-    /// field, so the caller falls back to the dynamic `set_prop` path unchanged.
-    fn try_emit_native_member_assign(
-        &mut self,
-        object: &Expr,
-        prop: &str,
-        value: &Expr,
-        side_effect_only: bool,
-    ) -> Result<Option<String>, CompileError> {
-        // Resolve the native lvalue + the field's type for the two struct shapes.
-        let (lhs, field_ty, needs_temp) = if let Expr::Ident { name, .. } = object {
-            // `var.field = …` — `var` is a native struct local.
-            let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
-                return Ok(None);
-            };
-            let Some((_, field_ty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
-                return Ok(None);
-            };
-            let field_ty = field_ty.clone();
-            let esc = Self::escape_ident(name.as_ref()).into_owned();
-            let field = crate::types::field_ident(prop);
-            if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                (format!("(*{}.borrow_mut()).{}", esc, field), field_ty, true)
-            } else {
-                (format!("{}.{}", esc, field), field_ty, false)
-            }
-        } else if let Expr::Index {
-            object: arr,
-            index,
-            optional: false,
-            ..
-        } = object
-        {
-            // `arr[i].field = …` — element of a `Vec<Named>`.
-            let Expr::Ident { name, .. } = arr.as_ref() else {
-                return Ok(None);
-            };
-            if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                return Ok(None);
-            }
-            let RustType::Vec(elem) = self.type_context.get_type(name.as_ref()) else {
-                return Ok(None);
-            };
-            let RustType::Named { fields, .. } = elem.as_ref() else {
-                return Ok(None);
-            };
-            let Some((_, field_ty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
-                return Ok(None);
-            };
-            let field_ty = field_ty.clone();
-            let esc = Self::escape_ident(name.as_ref()).into_owned();
-            let field = crate::types::field_ident(prop);
-            let idx_usize = self.emit_index_usize(index, name.as_ref())?;
-            (format!("{}[{}].{}", esc, idx_usize, field), field_ty, false)
-        } else {
-            return Ok(None);
-        };
-
-        let native_val = self.emit_coerced_native(value, &field_ty)?;
-        // In *statement* position (`side_effect_only`) the assignment yields nothing, so a bare
-        // store suffices. In *expression* position (`let y = (p.x = v)`, chained `a.x = b.y = v`,
-        // `if ((p.x = v) > 0)`) a JS assignment must EVALUATE to the assigned value — emitting
-        // `Value::Null` there was a bug (the value silently vanished). We box the stored (coerced)
-        // field value: identical to the RHS for every in-range numeric store, and consistent with
-        // the typed-scalar model when a narrow field truncates.
-        let code = if side_effect_only {
-            if needs_temp {
-                // Compute the RHS before the mutable borrow so an RHS read of the same
-                // RefCell doesn't panic (already-borrowed).
-                format!("{{ let _v = {}; {} = _v; }}", native_val, lhs)
-            } else {
-                format!("{} = {}", lhs, native_val)
-            }
-        } else {
-            // A `Value`-typed field is already boxed; box a *clone* so the store can still move `_v`.
-            // Every other field type reads `_v` without moving it (numeric copy / string clone /
-            // by-ref), so boxing before the store is sound. Both `_v` and its boxed result are
-            // computed before `lhs` — which, in the RefCell shape, is the `borrow_mut()` — so an RHS
-            // read of the same cell can't collide with the store's mutable borrow.
-            let result_val = if field_ty == RustType::Value {
-                "_v.clone()".to_string()
-            } else {
-                field_ty.to_value_expr("_v")
-            };
-            format!(
-                "{{ let _v = {}; let _r = {}; {} = _v; _r }}",
-                native_val, result_val, lhs
-            )
-        };
-        Ok(Some(code))
-    }
-
-    /// Emit `index` as a `usize` for direct `vec[idx]` element access. Mirrors the index
-    /// handling in [`Self::try_emit_native_vec_index_assign`]: a substituted loop counter
-    /// resolves directly, an `f64`/`i32` index casts, anything else unboxes a `Value::Number`.
-    fn emit_index_usize(
-        &mut self,
-        index: &Expr,
-        _arr_name: &str,
-    ) -> Result<String, CompileError> {
-        if let Expr::Ident { name: idx_name, .. } = index {
-            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
-                return Ok(uv.clone());
-            }
-        }
-        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-            Ok(format!("({}) as usize", idx_code))
-        } else {
-            let iv = if idx_ty.is_native() {
-                idx_ty.to_value_expr(&idx_code)
-            } else {
-                idx_code
-            };
-            Ok(format!(
-                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                iv
-            ))
-        }
     }
 
     /// Emit `value` as a native expression of type `target_ty`, coercing without a
