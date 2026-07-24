@@ -40,8 +40,10 @@ pub enum RustType {
     /// i32 — a `number` local PROVEN to always hold an integer reinterpretable as a JS ToInt32
     /// bit-pattern, kept in an integer register across a bitwise/hash hot loop (bun/JSC-style)
     /// instead of round-tripping `f64`↔`i32` on every op. The value is the signed int32
-    /// (= JS `ToInt32`) view; `>>> 0` results are uint32 reinterpreted into this i32. Only the
-    /// codegen's i32-loop-var lowering produces this type — never `from_annotation`.
+    /// (= JS `ToInt32`) view; `>>> 0` results are uint32 reinterpreted into this i32. Off-GBA only
+    /// the codegen's i32-loop-var lowering produces this type (a proven-in-range value) — never
+    /// `from_annotation`; a `--target gba` build additionally lowers a `: i32` annotation to it
+    /// (part of the GBA typed-scalar vocabulary, gated by `GBA_NUMERICS`).
     I32,
     /// Fixed-point `tishlang_runtime::Fixed` (= agb `Num<i32, 8>`), for the `fixed`
     /// annotation — fast, FPU-free math for positions/velocities on the GBA. Only
@@ -130,10 +132,13 @@ impl RustType {
                 // is exactly an annotated `i32`). The narrow widths are compact struct
                 // storage; `fixed` is agb `Num<i32,8>`.
                 "f64" => RustType::F64,
-                "i32" => RustType::I32,
                 // GBA-only numeric vocabulary (see `GBA_NUMERICS`): off-GBA these fall through to
-                // the `other` arm → boxed `Value`, so `fixed` compiles (no host `Fixed` type) and
-                // narrow widths keep interpreter number semantics instead of truncating.
+                // the `other` arm → boxed `Value`, so `fixed` compiles (no host `Fixed` type),
+                // narrow widths keep interpreter number semantics instead of truncating, and a
+                // `: i32` annotation doesn't saturate/ToInt32 an out-of-range value — restoring the
+                // invariant that `I32` comes ONLY from the proven-in-range i32-loop-var lowering,
+                // never a raw annotation. (`f64` is ungated — it is just `number`.)
+                "i32" if gba_numerics() => RustType::I32,
                 "i8" if gba_numerics() => RustType::I8,
                 "u8" if gba_numerics() => RustType::U8,
                 "i16" if gba_numerics() => RustType::I16,

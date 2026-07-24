@@ -6,6 +6,8 @@
 let a: fixed = 1.5
 let b: u8 = 300
 let c: i16 = 70000
-console.log(a) // 1.5   (not a compile error)
-console.log(b) // 300   (not 255)
-console.log(c) // 70000 (not wrapped)
+let d: i32 = 3000000000
+console.log(a) // 1.5         (not a compile error)
+console.log(b) // 300         (not 255)
+console.log(c) // 70000       (not wrapped)
+console.log(d) // 3000000000  (not saturated to 2147483647)
