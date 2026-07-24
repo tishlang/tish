@@ -260,6 +260,35 @@ pub fn delete_property(obj: &Value, key: &Value) -> Value {
     Value::Bool(true)
 }
 
+/// A valid JS array index: a non-negative integer `< 2^32-1`. Anything else (negative,
+/// fractional, NaN, or too large) is `None` — on GBA we treat such an assignment as a no-op
+/// rather than densifying/aborting (JS would set a named property, which a `Vec`-backed array
+/// can't hold anyway).
+fn array_index(n: f64) -> Option<usize> {
+    if n >= 0.0 && n.fract() == 0.0 && n <= 4_294_967_294.0 {
+        Some(n as usize)
+    } else {
+        None
+    }
+}
+
+/// Grow `v` so `index` is in range, filling with `fill`. Instead of aborting when the
+/// allocation can't be satisfied (a real risk on the GBA's 256KB EWRAM for a large sparse
+/// index), it raises a CATCHABLE tish error and returns `false` so the caller bails out.
+fn grow_or_throw<T: Clone>(v: &mut alloc::vec::Vec<T>, index: usize, fill: T) -> bool {
+    if index >= v.len() {
+        let extra = index - v.len() + 1;
+        if v.try_reserve(extra).is_err() {
+            tishlang_core::set_pending_throw(tishlang_core::type_error(format!(
+                "array index {index} too large to allocate"
+            )));
+            return false;
+        }
+        v.resize(index + 1, fill);
+    }
+    true
+}
+
 pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
     match obj {
         Value::Object(map) => {
@@ -280,56 +309,65 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
         Value::Array(arr) if key == "length" => {
             let n = extract_num(Some(&val)).unwrap_or(f64::NAN);
             if n.is_nan() || n < 0.0 || n.fract() != 0.0 || n > 4_294_967_295.0 {
-                panic!("Invalid array length");
+                tishlang_core::set_pending_throw(tishlang_core::type_error("Invalid array length"));
+                return val;
             }
-            arr.borrow_mut().resize(n as usize, Value::Null);
+            let len = n as usize;
+            let mut arr_mut = arr.borrow_mut();
+            if len > arr_mut.len() {
+                // grow_or_throw indexes to len-1 (so len is in range); catchable on OOM.
+                let _ = grow_or_throw(&mut arr_mut, len - 1, Value::Null);
+            } else {
+                arr_mut.truncate(len);
+            }
             val
         }
-        _ => panic!("Cannot assign property on non-object"),
+        _ => {
+            tishlang_core::set_pending_throw(tishlang_core::type_error("Cannot assign property on a non-object"));
+            val
+        }
     }
 }
 
 pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
+    // Resolve the array index, or `None` for a non-index key (negative/fractional/huge number,
+    // non-numeric string, or non-string/number key). A `None` on an array is a no-op here
+    // rather than an abort: JS would set a named property, which a `Vec`-backed array can't hold.
+    let arr_index = |idx: &Value| -> Option<usize> {
+        match idx {
+            Value::Number(n) => array_index(*n),
+            Value::String(s) => tishlang_core::str_to_array_index(s),
+            _ => None,
+        }
+    };
     match obj {
         Value::Array(arr) => {
-            let index = match idx {
-                Value::Number(n) => *n as usize,
-                Value::String(s) => match tishlang_core::str_to_array_index(s) {
-                    Some(i) => i,
-                    None => return val,
-                },
-                _ => panic!("Array index must be number"),
+            let Some(index) = arr_index(idx) else {
+                return val;
             };
             let mut arr_mut = arr.borrow_mut();
-            while arr_mut.len() <= index {
-                arr_mut.push(Value::Null);
+            if !grow_or_throw(&mut arr_mut, index, Value::Null) {
+                return val;
             }
             arr_mut[index] = val.clone();
             val
         }
         Value::NumberArray(arr) => {
-            let index = match idx {
-                Value::Number(n) => *n as usize,
-                Value::String(s) => match tishlang_core::str_to_array_index(s) {
-                    Some(i) => i,
-                    None => return val,
-                },
-                _ => panic!("Array index must be number"),
+            let Some(index) = arr_index(idx) else {
+                return val;
             };
             let mut b = arr.borrow_mut();
             match (b.as_packed_mut(), val.as_number()) {
                 (Some(nums), Some(n)) => {
-                    while nums.len() <= index {
-                        nums.push(f64::NAN);
+                    if grow_or_throw(nums, index, f64::NAN) {
+                        nums[index] = n;
                     }
-                    nums[index] = n;
                 }
                 _ => {
                     let boxed = b.deopt();
-                    while boxed.len() <= index {
-                        boxed.push(Value::Null);
+                    if grow_or_throw(boxed, index, Value::Null) {
+                        boxed[index] = val.clone();
                     }
-                    boxed[index] = val.clone();
                 }
             }
             val
@@ -342,10 +380,20 @@ pub fn set_index(obj: &Value, idx: &Value, val: Value) -> Value {
                 )));
                 return val;
             }
-            tishlang_core::object_set(obj, idx, val.clone()).expect("object set");
+            // object_set only accepts string/number/symbol keys; on any other key raise a
+            // CATCHABLE error rather than aborting (`.expect`) the console.
+            if tishlang_core::object_set(obj, idx, val.clone()).is_err() {
+                tishlang_core::set_pending_throw(tishlang_core::type_error(format!(
+                    "cannot use {} as an object key",
+                    idx.to_display_string()
+                )));
+            }
             val
         }
-        _ => panic!("Cannot index assign on non-array/object"),
+        _ => {
+            tishlang_core::set_pending_throw(tishlang_core::type_error("Cannot index-assign on a non-array/object"));
+            val
+        }
     }
 }
 

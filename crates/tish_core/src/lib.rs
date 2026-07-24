@@ -4,6 +4,12 @@
 //! the interpreter (tishlang_eval) and compiled runtime (tishlang_runtime).
 #![cfg_attr(feature = "portable", no_std)]
 
+// `portable` (no_std, Arc→Rc) and `send-values` (parking_lot, std-only) are mutually
+// exclusive; unified by Cargo's additive features they'd try to compile parking_lot for a
+// no_std target with a confusing far-from-root-cause error. Fail loudly at the source instead.
+#[cfg(all(feature = "portable", feature = "send-values"))]
+compile_error!("tishlang_core features `portable` and `send-values` are mutually exclusive");
+
 extern crate alloc;
 
 #[cfg(feature = "portable")]

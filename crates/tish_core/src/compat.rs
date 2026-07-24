@@ -208,27 +208,38 @@ mod portable_backing {
         }
         #[inline]
         pub fn get(&self) -> Option<&T> {
-            // SAFETY: single-core; the &mut in get_or_init/set never overlaps a live &.
+            // SAFETY: single-core, no concurrent access. A shared `&Option<T>`; the only
+            // write to the cell happens in the None->Some transition below, which is never
+            // reached while any `&T` handed out here is live (there is no `&T` into a `None`).
             unsafe { &*self.0.get() }.as_ref()
         }
         #[inline]
         pub fn set(&self, value: T) -> Result<(), T> {
-            // SAFETY: see above.
-            let slot = unsafe { &mut *self.0.get() };
-            if slot.is_some() {
+            // Check via a *shared* ref — never form a `&mut` while a `get()` `&T` may be live.
+            // SAFETY: single-core, no concurrent access.
+            if unsafe { &*self.0.get() }.is_some() {
                 return Err(value);
             }
-            *slot = Some(value);
+            // The cell is None here, so no `&T` from `get()` can be outstanding. A raw store
+            // (not a `&mut`) into an unaliased place is sound.
+            // SAFETY: single-core; place is None and unreferenced.
+            unsafe { *self.0.get() = Some(value) };
             Ok(())
         }
         #[inline]
         pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
-            // SAFETY: see above.
-            let slot = unsafe { &mut *self.0.get() };
-            if slot.is_none() {
-                *slot = Some(f());
+            // SAFETY: single-core, no concurrent access. Initialise only when None (no `&T`
+            // outstanding), via a raw store rather than a `&mut`; all reads are shared.
+            if unsafe { &*self.0.get() }.is_none() {
+                let v = f();
+                // `f()` may have re-entered and initialised the cell (or handed out a `&T`).
+                // Only store if it is STILL empty — otherwise drop our late `v`, so we never
+                // overwrite (and thus drop) a value a live `&T` might point into.
+                if unsafe { &*self.0.get() }.is_none() {
+                    unsafe { *self.0.get() = Some(v) };
+                }
             }
-            slot.as_ref().unwrap()
+            unsafe { &*self.0.get() }.as_ref().unwrap()
         }
     }
     impl<T> Default for OnceLock<T> {

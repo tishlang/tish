@@ -760,6 +760,46 @@ pub fn compile_with_native_modules_emit(
 /// inside escaped user string literals — so the textual pass is safe. Callers add
 /// to this table as the thumbv4t corpus build surfaces new sites.
 fn gba_no_std_rewrite(src: String) -> String {
+    // Apply the fixups only to CODE, never to the contents of string literals: a user
+    // string that happens to contain one of these patterns (e.g. `let s = "std::mem::x"`)
+    // must be left byte-for-byte intact. We scan the generated source, copy each `"…"`
+    // literal through verbatim (respecting `\` escapes), and rewrite only the code between
+    // them. (`"` and `\` are ASCII, so a byte scan is UTF-8 safe; char literals can't hold
+    // these multi-char patterns, and any stray `'"'` at worst *misses* a fixup — a loud
+    // no_std compile error — never a silent string corruption.)
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut seg_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            out.push_str(&gba_rewrite_code(&src[seg_start..i]));
+            let str_start = i;
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2, // skip the escape and the (ASCII) escaped byte
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            out.push_str(&src[str_start..i.min(bytes.len())]);
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&gba_rewrite_code(&src[seg_start..]));
+    out
+}
+
+/// The std::→core::/facade path fixups, applied only to non-string-literal code by
+/// [`gba_no_std_rewrite`]. Callers extend this table as the thumbv4t corpus build surfaces
+/// new sites (a surviving `std::` path is a loud `#![no_std]` compile error, not silent).
+fn gba_rewrite_code(src: &str) -> String {
     src.replace("std::error::Error", "core::error::Error")
         .replace("std::f64::consts", "core::f64::consts")
         .replace("std::cmp::Ordering", "core::cmp::Ordering")
