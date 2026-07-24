@@ -11,7 +11,13 @@
 //! is no timezone database in the core builtins (keeps them lean + wasm-friendly). `getTime`,
 //! `valueOf`, the `getUTC*` family and `toISOString` are therefore fully deterministic everywhere.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
+use tishlang_core::Arc;
 use tishlang_core::{ObjectMap, Value, VmRef};
 
 const CONSTRUCT: &str = "__construct";
@@ -23,11 +29,19 @@ const MONTHS: [&str; 12] = [
 ];
 
 /// Current wall-clock time as epoch milliseconds.
+#[cfg(not(feature = "portable"))]
 fn now_ms() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0)
+}
+
+/// No OS clock on GBA: read the runtime-installed clock hook (defaults to 0 until
+/// the facade wires up an agb timer). See `tishlang_core::install_clock`.
+#[cfg(feature = "portable")]
+fn now_ms() -> f64 {
+    tishlang_core::now_ms()
 }
 
 /// A `(method name, field extractor)` pair for the numeric `Date` getters. The explicit

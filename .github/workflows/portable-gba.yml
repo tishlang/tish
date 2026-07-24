@@ -1,0 +1,64 @@
+# Guards the embedded / GBA build surface, which is otherwise invisible to CI: the portable
+# (no_std + alloc) feature and the `tishlang_runtime_gba` facade are excluded from the default
+# workspace build, so a change to tish_core/tish_builtins can break them with nothing red until a
+# game is built by hand. This is the "Option 4" guard from tish-gba/docs/gba-in-tish-core.md — a
+# non-default build that catches a shared-path regression, chosen over a separate `gba` Cargo
+# feature (the runtime's single embedded flag is `portable`; see docs/gba-target.md).
+name: Portable / GBA build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/tish_core/**"
+      - "crates/tish_builtins/**"
+      - "crates/tish_runtime_gba/**"
+      - "crates/tish_compile/src/codegen.rs"
+      - "crates/tish_compile/src/schemes.rs"
+      - "crates/tish_native/src/build.rs"
+      - ".github/workflows/portable-gba.yml"
+
+concurrency:
+  group: portable-gba-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast tier: does the portable runtime type-check with std OFF? Catches no_std violations
+  # (a stray `std::` path) on the host in seconds. Does NOT catch no-atomics regressions — the
+  # host has atomics — so the thumbv4t job below is the real guarantee.
+  portable-check:
+    name: portable feature type-checks (no_std, host)
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: cargo check --features portable (default-features off)
+        run: >
+          cargo check --no-default-features --features portable
+          -p tishlang_core -p tishlang_builtins
+
+  # Real tier: build the GBA runtime facade for the actual device target (thumbv4t-none-eabi) via
+  # build-std, exactly as `tish build --target gba` does. Catches no-atomics breakage (thumbv4t has
+  # no atomics — the reason ahash/foldhash can't be used) that the host check above cannot see. The
+  # facade is a lib, so no linker script is needed.
+  facade-thumbv4t:
+    name: facade builds for thumbv4t-none-eabi (no-atomics guard)
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
+        with:
+          toolchain: nightly
+          components: rust-src
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: build facade for thumbv4t (build-std core+alloc)
+        run: >
+          cargo +nightly build
+          --manifest-path crates/tish_runtime_gba/Cargo.toml
+          --target thumbv4t-none-eabi
+          -Z build-std=core,alloc
+          -Z build-std-features=compiler-builtins-mem

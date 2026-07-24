@@ -1,30 +1,30 @@
 //! ECMAScript-style `Symbol`, `Symbol.for`, `Symbol.keyFor`.
 
-use std::collections::hash_map::Entry;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
-use std::collections::HashMap;
+use tishlang_core::sync::{Mutex, OnceLock};
+use tishlang_core::{alloc_symbol_id, AHashMap, Arc, ObjectMap, TishSymbol, Value};
 
-use tishlang_core::{alloc_symbol_id, ObjectMap, TishSymbol, Value};
+static SYMBOL_FOR_REGISTRY: OnceLock<Mutex<AHashMap<Arc<str>, Arc<TishSymbol>>>> = OnceLock::new();
 
-static SYMBOL_FOR_REGISTRY: OnceLock<Mutex<HashMap<Arc<str>, Arc<TishSymbol>>>> = OnceLock::new();
-
-fn symbol_registry() -> &'static Mutex<HashMap<Arc<str>, Arc<TishSymbol>>> {
-    SYMBOL_FOR_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+fn symbol_registry() -> &'static Mutex<AHashMap<Arc<str>, Arc<TishSymbol>>> {
+    SYMBOL_FOR_REGISTRY.get_or_init(|| Mutex::new(AHashMap::default()))
 }
 
 fn symbol_for_impl(key: &str) -> Value {
     let k: Arc<str> = key.into();
     let mut reg = symbol_registry().lock().unwrap();
-    let sym = match reg.entry(Arc::clone(&k)) {
-        Entry::Occupied(e) => e.get().clone(),
-        Entry::Vacant(v) => {
-            let id = alloc_symbol_id();
-            let sym = TishSymbol::new_registry(id, Arc::clone(&k), None);
-            v.insert(Arc::clone(&sym));
-            sym
-        }
-    };
+    // get-then-insert (rather than the `Entry` API) so this compiles against both
+    // std `HashMap` and the portable `hashbrown` map without a hasher-specific
+    // `Entry` import. `Symbol.for` is not a hot path.
+    if let Some(existing) = reg.get(&k) {
+        return Value::Symbol(existing.clone());
+    }
+    let id = alloc_symbol_id();
+    let sym = TishSymbol::new_registry(id, Arc::clone(&k), None);
+    reg.insert(k, Arc::clone(&sym));
     Value::Symbol(sym)
 }
 

@@ -23,7 +23,7 @@
 #[macro_export]
 macro_rules! tish_module {
     ($($name:expr => $fn:expr),* $(,)?) => {{
-        use std::sync::Arc;
+        use $crate::__TishArc as Arc;
         use $crate::{ObjectMap, Value};
         let mut map = ObjectMap::default();
         $(

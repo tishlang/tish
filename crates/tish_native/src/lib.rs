@@ -97,13 +97,23 @@ pub fn compile_to_native_with_config(
 
     match backend {
         Backend::Rust => {
-            let ios_cap = build_config.cargo_target.as_ref().map(|_| {
-                ios_runtime_features(features)
+            // Cross-target builds cap runtime features to what the target supports:
+            // GBA gets none (no OS), iOS gets its sandbox allow-list.
+            let is_gba = build_config.emit_mode == tishlang_compile::NativeEmitMode::Gba;
+            let cap = |f: &[String]| -> Vec<String> {
+                if is_gba {
+                    crate::config::gba_runtime_features(f)
+                } else {
+                    ios_runtime_features(f)
+                }
+            };
+            let cross_cap = build_config.cargo_target.as_ref().map(|_| {
+                cap(features)
                     .into_iter()
                     .collect::<std::collections::HashSet<_>>()
             });
-            let compile_features = if ios_cap.is_some() {
-                ios_runtime_features(features)
+            let compile_features = if cross_cap.is_some() {
+                cap(features)
             } else {
                 features.to_vec()
             };
@@ -114,14 +124,14 @@ pub fn compile_to_native_with_config(
                     &compile_features,
                     optimize,
                     build_config.emit_mode,
-                    ios_cap.as_ref(),
+                    cross_cap.as_ref(),
                 )
                 .map_err(|e| NativeError {
                     message: e.to_string(),
                 })?;
 
             let features_for_cargo = if build_config.cargo_target.is_some() {
-                ios_runtime_features(&effective_features)
+                cap(&effective_features)
             } else {
                 effective_features
             };

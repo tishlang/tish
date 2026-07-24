@@ -1,0 +1,9 @@
+// Regression: an assignment to a NATIVE STRUCT field used in EXPRESSION position must evaluate to
+// the assigned value (JS/tish assignment is an expression). The native fast path previously emitted
+// `Value::Null` here, silently dropping the value of `let y = (p.x = 5)` / chained assigns.
+type P = { x: i32, y: i32 }
+
+let p: P = { x: 1, y: 2 }
+let y = (p.x = 5)
+console.log(y)     // 5
+console.log(p.x)   // 5

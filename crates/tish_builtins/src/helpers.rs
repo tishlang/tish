@@ -1,6 +1,10 @@
 //! Common helper functions used across builtin implementations.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
+use tishlang_core::Arc;
 use tishlang_core::{ObjectMap, Value};
 
 /// Normalize an array index, handling negative indices.
@@ -20,8 +24,8 @@ pub fn normalize_index(idx: &Value, len: i64, default: usize) -> usize {
 }
 
 /// Create an error object with a single "error" field.
-pub fn make_error_value(e: impl std::fmt::Display) -> Value {
-    let mut obj = ObjectMap::with_capacity(1);
+pub fn make_error_value(e: impl core::fmt::Display) -> Value {
+    let mut obj = ObjectMap::with_capacity_and_hasher(1, Default::default());
     obj.insert(Arc::from("error"), Value::String(e.to_string().into()));
     Value::object(obj)
 }

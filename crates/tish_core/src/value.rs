@@ -1,11 +1,19 @@
 //! Unified Value type for Tish runtime values.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-use ahash::AHashMap;
+use crate::compat::{AHashMap, ArcStr, AtomicU64, Arc, Ordering, RandomState};
 use indexmap::IndexMap;
 use smallvec::SmallVec;
+
+#[cfg(feature = "portable")]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+#[cfg(feature = "portable")]
+use crate::compat::FloatExt;
 
 use crate::vmref::VmRef;
 
@@ -75,12 +83,12 @@ use fancy_regex::Regex;
 pub trait Callable: Send + Sync {
     fn call(&self, args: &[Value]) -> Value;
     /// Downcast hook for the VM frame path; native adapters return themselves (downcast fails).
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 #[cfg(not(feature = "send-values"))]
 pub trait Callable {
     fn call(&self, args: &[Value]) -> Value;
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// Adapter wrapping a plain `Fn` closure (every native builtin) as a [`Callable`].
@@ -91,7 +99,7 @@ impl<F: Fn(&[Value]) -> Value + Send + Sync + 'static> Callable for FnCallable<F
     fn call(&self, args: &[Value]) -> Value {
         (self.0)(args)
     }
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }
@@ -101,7 +109,7 @@ impl<F: Fn(&[Value]) -> Value + 'static> Callable for FnCallable<F> {
     fn call(&self, args: &[Value]) -> Value {
         (self.0)(args)
     }
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }
@@ -109,7 +117,7 @@ impl<F: Fn(&[Value]) -> Value + 'static> Callable for FnCallable<F> {
 #[cfg(feature = "send-values")]
 pub type NativeFn = Arc<dyn Callable>;
 #[cfg(not(feature = "send-values"))]
-pub type NativeFn = std::rc::Rc<dyn Callable>;
+pub type NativeFn = alloc::rc::Rc<dyn Callable>;
 
 /// Build a raw [`NativeFn`] from a plain closure (wraps it in [`FnCallable`]). For sites that
 /// need a `NativeFn` handle directly rather than a `Value::Function` (e.g. HTTP/promise/timer
@@ -120,7 +128,7 @@ pub fn native_fn<F: Fn(&[Value]) -> Value + Send + Sync + 'static>(f: F) -> Nati
 }
 #[cfg(not(feature = "send-values"))]
 pub fn native_fn<F: Fn(&[Value]) -> Value + 'static>(f: F) -> NativeFn {
-    std::rc::Rc::new(FnCallable(f))
+    alloc::rc::Rc::new(FnCallable(f))
 }
 
 /// Trait for opaque Rust types exposed to Tish (e.g. Polars DataFrame).
@@ -141,7 +149,7 @@ pub trait TishOpaque: Send + Sync {
     fn get_method(&self, name: &str) -> Option<NativeFn>;
 
     /// For downcasting `Arc<dyn TishOpaque>` in native crates (e.g. Polars → `DataFrame`).
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// Single-threaded variant (no `Send + Sync` bound); see the `send-values` doc above.
@@ -154,13 +162,13 @@ pub trait TishOpaque {
     fn get_method(&self, name: &str) -> Option<NativeFn>;
 
     /// For downcasting `Arc<dyn TishOpaque>` in native crates (e.g. Polars → `DataFrame`).
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// Trait for Promise-like values that can be awaited (block until settled).
 /// Implemented by the runtime for native compile; interpreter uses its own Promise.
 pub trait TishPromise: Send + Sync {
-    fn block_until_settled(&self) -> std::result::Result<Value, Value>;
+    fn block_until_settled(&self) -> core::result::Result<Value, Value>;
     /// Try to settle WITHOUT blocking. Returns `Some(result)` if the promise was already
     /// settled before this call; returns `None` if it is still pending (a background thread
     /// / I/O task has not completed yet). Default: always pending — implementors of async
@@ -169,7 +177,7 @@ pub trait TishPromise: Send + Sync {
     /// Used by `race`/`any`/`allSettled` to handle already-settled promises in input-order
     /// (deterministic, JS-compatible) before falling back to concurrent thread waiting for
     /// genuinely-pending ones.
-    fn try_settle(&self) -> Option<std::result::Result<Value, Value>> {
+    fn try_settle(&self) -> Option<core::result::Result<Value, Value>> {
         None
     }
 }
@@ -236,8 +244,8 @@ impl RegExpFlags {
 }
 
 #[cfg(feature = "regex")]
-impl std::fmt::Display for RegExpFlags {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RegExpFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if self.global {
             f.write_str("g")?;
         }
@@ -433,7 +441,7 @@ impl NumArrayBacking {
 #[derive(Clone, Default)]
 pub enum Value {
     Number(f64),
-    String(arcstr::ArcStr),
+    String(ArcStr),
     Bool(bool),
     #[default]
     Null,
@@ -472,7 +480,7 @@ pub enum Value {
 // re-attempt the box trick; only a dispatch-level change (e.g. NaN-box's branch-free tag test, not
 // its size) could pay off. Gated to 64-bit: wasm32 (wasi) has 32-bit pointers, so size differs there.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Value>() == 24);
+const _: () = assert!(core::mem::size_of::<Value>() == 24);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // #201 Stage A — representation abstraction (behavior-preserving, zero perf effect).
@@ -513,7 +521,7 @@ pub enum ValueTag {
 /// sites. Zero-cost — each arm borrows the existing payload in place.
 pub enum ValueRef<'a> {
     Number(f64),
-    String(&'a arcstr::ArcStr),
+    String(&'a ArcStr),
     Bool(bool),
     Null,
     Array(&'a VmRef<Vec<Value>>),
@@ -543,7 +551,7 @@ impl Value {
     /// Named constructor for a string (#201 abstraction). Accepts anything that converts
     /// into the interned `ArcStr` (`&str`, `String`, `ArcStr`).
     #[inline]
-    pub fn string(s: impl Into<arcstr::ArcStr>) -> Self {
+    pub fn string(s: impl Into<ArcStr>) -> Self {
         Value::String(s.into())
     }
 
@@ -662,7 +670,7 @@ const PROPMAP_INLINE: usize = 8;
 #[derive(Clone, Debug, Default)]
 pub struct PropMap {
     inline: SmallVec<[(Arc<str>, Value); PROPMAP_INLINE]>,
-    map: Option<Box<IndexMap<Arc<str>, Value, ahash::RandomState>>>,
+    map: Option<Box<IndexMap<Arc<str>, Value, RandomState>>>,
     /// Hidden-class identity for this object's ordered key-set (JSC Structure). `EMPTY_SHAPE` (0)
     /// for `{}`. Maintained by `insert` (new key → `shape::transition`) and reset to `DICT_SHAPE` by
     /// `remove`. Lets the VM's inline caches compare a `u32` instead of hashing a key. INVARIANT: a
@@ -683,7 +691,7 @@ impl PropMap {
                 inline: SmallVec::new(),
                 map: Some(Box::new(IndexMap::with_capacity_and_hasher(
                     n,
-                    ahash::RandomState::default(),
+                    RandomState::default(),
                 ))),
                 shape: crate::shape::EMPTY_SHAPE,
             }
@@ -784,15 +792,15 @@ impl PropMap {
         }
         if let Some(slot) = self.inline.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref()) {
             // Update existing key → value changes, layout (shape) does not.
-            return Some(std::mem::replace(&mut slot.1, val));
+            return Some(core::mem::replace(&mut slot.1, val));
         }
         // New key (inline storage) → transition the shape away from the current one.
         self.shape = crate::shape::transition(self.shape, &key);
         if self.inline.len() >= PROPMAP_INLINE {
             // Promote inline storage to an insertion-ordered map (keys + their order are preserved,
             // so the shape stays valid).
-            let mut m: IndexMap<Arc<str>, Value, ahash::RandomState> =
-                IndexMap::with_capacity_and_hasher(self.inline.len() + 1, ahash::RandomState::default());
+            let mut m: IndexMap<Arc<str>, Value, RandomState> =
+                IndexMap::with_capacity_and_hasher(self.inline.len() + 1, RandomState::default());
             for (k, v) in self.inline.drain(..) {
                 m.insert(k, v);
             }
@@ -869,9 +877,9 @@ impl PropMap {
         // If the combined worst-case size escapes inline storage, promote once up front so the
         // per-key inserts below never reallocate or re-promote.
         if self.map.is_none() && self.inline.len() + incoming > PROPMAP_INLINE {
-            let mut m: IndexMap<Arc<str>, Value, ahash::RandomState> = IndexMap::with_capacity_and_hasher(
+            let mut m: IndexMap<Arc<str>, Value, RandomState> = IndexMap::with_capacity_and_hasher(
                 self.inline.len() + incoming,
-                ahash::RandomState::default(),
+                RandomState::default(),
             );
             for (k, v) in self.inline.drain(..) {
                 m.insert(k, v);
@@ -917,7 +925,7 @@ impl IntoIterator for PropMap {
 
 /// Zero-allocation borrowing iterator over [`PropMap`] entries (insertion order).
 pub enum PropMapIter<'a> {
-    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Inline(core::slice::Iter<'a, (Arc<str>, Value)>),
     Map(indexmap::map::Iter<'a, Arc<str>, Value>),
 }
 impl<'a> Iterator for PropMapIter<'a> {
@@ -933,7 +941,7 @@ impl<'a> Iterator for PropMapIter<'a> {
 
 /// Zero-allocation key iterator over [`PropMap`] (insertion order).
 pub enum PropMapKeys<'a> {
-    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Inline(core::slice::Iter<'a, (Arc<str>, Value)>),
     Map(indexmap::map::Keys<'a, Arc<str>, Value>),
 }
 impl<'a> Iterator for PropMapKeys<'a> {
@@ -949,7 +957,7 @@ impl<'a> Iterator for PropMapKeys<'a> {
 
 /// Zero-allocation value iterator over [`PropMap`] (insertion order).
 pub enum PropMapValues<'a> {
-    Inline(std::slice::Iter<'a, (Arc<str>, Value)>),
+    Inline(core::slice::Iter<'a, (Arc<str>, Value)>),
     Map(indexmap::map::Values<'a, Arc<str>, Value>),
 }
 impl<'a> Iterator for PropMapValues<'a> {
@@ -1227,8 +1235,8 @@ pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) ->
     }
 }
 
-impl std::fmt::Debug for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Value {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "Number({})", n),
             Value::String(s) => write!(f, "String({:?})", s.as_str()),
@@ -1348,7 +1356,7 @@ pub fn js_number_to_string_into(out: &mut String, value: f64) {
         end -= 1;
     }
     let trail = (n - end) as i32;
-    let digits = std::str::from_utf8(&digits_buf[lead..end]).expect("ascii digits");
+    let digits = core::str::from_utf8(&digits_buf[lead..end]).expect("ascii digits");
     let k = digits.len() as i32; // significant digit count (≤ 17 for an f64)
     let point = k + exp - frac_len + trail;
 
@@ -1547,7 +1555,7 @@ impl Value {
             #[cfg(feature = "send-values")]
             (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
             #[cfg(not(feature = "send-values"))]
-            (Value::Function(a), Value::Function(b)) => std::rc::Rc::ptr_eq(a, b),
+            (Value::Function(a), Value::Function(b)) => alloc::rc::Rc::ptr_eq(a, b),
             #[cfg(feature = "regex")]
             (Value::RegExp(a), Value::RegExp(b)) => VmRef::ptr_eq(a, b),
             (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
@@ -1576,7 +1584,7 @@ impl Value {
     where
         F: Fn(&[Value]) -> Value + 'static,
     {
-        Value::Function(std::rc::Rc::new(FnCallable(f)))
+        Value::Function(alloc::rc::Rc::new(FnCallable(f)))
     }
 
     /// Create a new array Value from a Vec.
@@ -1621,12 +1629,21 @@ impl Value {
     /// process starts (as the CI sweep does); mid-process toggling is not observed by design.
     /// The flag is intentionally backwards from the slot/JIT flags (those were default-on) to
     /// keep the default binary behaviour byte-identical while we validate coverage.
+    #[cfg(not(feature = "portable"))]
     #[inline]
     pub fn packed_arrays_enabled() -> bool {
         static PACKED_ARRAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *PACKED_ARRAYS.get_or_init(|| {
             std::env::var("TISH_PACKED_ARRAYS").map(|v| v == "1").unwrap_or(false)
         })
+    }
+
+    /// Packed f64 arrays are off under `portable` (no env to opt in; keeps the
+    /// generic array path, which the GBA runtime already exercises).
+    #[cfg(feature = "portable")]
+    #[inline]
+    pub fn packed_arrays_enabled() -> bool {
+        false
     }
 
     /// Wrap a `Vec<f64>` as a `Value::NumberArray`. Only call when `packed_arrays_enabled()`.

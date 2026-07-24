@@ -23,9 +23,13 @@
 //! - Keys/values use **SameValueZero** equality (NaN equals NaN; `+0`/`-0` are the same; objects by
 //!   identity).
 
-use std::any::Any;
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
+use core::any::Any;
+use core::hash::{Hash, Hasher};
+use tishlang_core::Arc;
 
 use indexmap::IndexMap;
 use tishlang_core::{NativeFn, ObjectMap, TishOpaque, Value, VmRef};
@@ -120,7 +124,7 @@ impl indexmap::Equivalent<Key> for KeyRef<'_> {
 /// stores `Value::Null` values and iterates its keys; a `Map` stores the mapped value. Uses `ahash`
 /// (the same fast hasher `tish_core`'s `PropMap` uses) rather than the default SipHash — iteration
 /// order is insertion order regardless of the hasher, so this is a pure constant-factor speedup.
-type Store = VmRef<IndexMap<Key, Value, ahash::RandomState>>;
+type Store = VmRef<IndexMap<Key, Value, tishlang_core::RandomState>>;
 
 /// Opaque whose length reports a collection's live element count. Stored under [`SIZE_SLOT`] on every
 /// `Set`/`Map` instance.

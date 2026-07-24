@@ -2,9 +2,33 @@
 //!
 //! Maps TypeAnnotation from the AST to concrete Rust types for code generation.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tishlang_ast::{BinOp, FunParam, TypeAnnotation, TypedParam};
+
+thread_local! {
+    /// Whether the extended GBA numeric vocabulary — the narrow integer widths (`i8/u8/i16/u16/u32`)
+    /// and `fixed` — lowers to native scalar types. **Off by default** (standard targets): those
+    /// annotations must fall back to the boxed `Value` path off-GBA, because `fixed` has no host
+    /// runtime type (a hard compile error) and the narrow widths truncate on store (`u8 = 300` → 255),
+    /// diverging from the interpreter and breaking the typed == boxed == interpreter guarantee that
+    /// non-GBA targets rely on. A GBA build turns this on (see `set_gba_numerics`), where those
+    /// types ARE the point. `i32`/`f64` are NOT gated — `f64` is just `number`, and `i32` is the
+    /// pre-existing JS-ToInt32 register lowering.
+    static GBA_NUMERICS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enable (GBA) or disable (every other target) the extended narrow-int/`fixed` numeric vocabulary
+/// for the current compile. Set once at compile start from the emit mode; see [`GBA_NUMERICS`].
+pub fn set_gba_numerics(on: bool) {
+    GBA_NUMERICS.with(|c| c.set(on));
+}
+
+/// Whether `from_annotation` should lower `i8/u8/i16/u16/u32/fixed` to native scalars.
+fn gba_numerics() -> bool {
+    GBA_NUMERICS.with(|c| c.get())
+}
 
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,9 +40,27 @@ pub enum RustType {
     /// i32 — a `number` local PROVEN to always hold an integer reinterpretable as a JS ToInt32
     /// bit-pattern, kept in an integer register across a bitwise/hash hot loop (bun/JSC-style)
     /// instead of round-tripping `f64`↔`i32` on every op. The value is the signed int32
-    /// (= JS `ToInt32`) view; `>>> 0` results are uint32 reinterpreted into this i32. Only the
-    /// codegen's i32-loop-var lowering produces this type — never `from_annotation`.
+    /// (= JS `ToInt32`) view; `>>> 0` results are uint32 reinterpreted into this i32. Off-GBA only
+    /// the codegen's i32-loop-var lowering produces this type (a proven-in-range value) — never
+    /// `from_annotation`; a `--target gba` build additionally lowers a `: i32` annotation to it
+    /// (part of the GBA typed-scalar vocabulary, gated by `GBA_NUMERICS`).
     I32,
+    /// Fixed-point `tishlang_runtime::Fixed` (= agb `Num<i32, 8>`), for the `fixed`
+    /// annotation — fast, FPU-free math for positions/velocities on the GBA. Only
+    /// `from_annotation` (and fixed-typed inference) produces this. Boxes to/from
+    /// `Value::Number` losslessly at boundaries.
+    Fixed,
+    /// Narrow integer STORAGE types (`i8`/`u8`/`i16`/`u16`/`u32` annotations). Their whole
+    /// point is compact struct fields — a `u8` HP or an `i16` tile coordinate costs 1–2
+    /// bytes in scarce EWRAM instead of 8. Arithmetic PROMOTES to `f64` (JS Number
+    /// semantics, exactly like `I32` at [`Self::result_type_of_binop`]); a store back into
+    /// the narrow field truncates with a saturating `as` cast. Only `from_annotation`
+    /// produces these. Box to/from `Value::Number` (every value in-range is exact in f64).
+    I8,
+    U8,
+    I16,
+    U16,
+    U32,
     /// String (for string)
     String,
     /// bool (for boolean)
@@ -83,6 +125,26 @@ impl RustType {
         match ann {
             TypeAnnotation::Simple(name, _) => match name.as_ref() {
                 "number" => RustType::F64,
+                // Concrete Rust scalar names in typed tish (user requirement): they
+                // lower to the corresponding native Rust type instead of a boxed
+                // `Value`. `f64` is an alias for `number`; `i32` reuses the existing
+                // integer-register lowering (its value is the JS ToInt32 view, which
+                // is exactly an annotated `i32`). The narrow widths are compact struct
+                // storage; `fixed` is agb `Num<i32,8>`.
+                "f64" => RustType::F64,
+                // GBA-only numeric vocabulary (see `GBA_NUMERICS`): off-GBA these fall through to
+                // the `other` arm → boxed `Value`, so `fixed` compiles (no host `Fixed` type),
+                // narrow widths keep interpreter number semantics instead of truncating, and a
+                // `: i32` annotation doesn't saturate/ToInt32 an out-of-range value — restoring the
+                // invariant that `I32` comes ONLY from the proven-in-range i32-loop-var lowering,
+                // never a raw annotation. (`f64` is ungated — it is just `number`.)
+                "i32" if gba_numerics() => RustType::I32,
+                "i8" if gba_numerics() => RustType::I8,
+                "u8" if gba_numerics() => RustType::U8,
+                "i16" if gba_numerics() => RustType::I16,
+                "u16" if gba_numerics() => RustType::U16,
+                "u32" if gba_numerics() => RustType::U32,
+                "fixed" if gba_numerics() => RustType::Fixed,
                 "string" => RustType::String,
                 "boolean" | "bool" => RustType::Bool,
                 "void" | "undefined" => RustType::Unit,
@@ -196,6 +258,31 @@ impl RustType {
         matches!(self, RustType::F64)
     }
 
+    /// A native integer scalar (`i32` or one of the narrow storage widths). These share one
+    /// arithmetic model: read as `f64` (JS Number semantics), store with a truncating `as`
+    /// cast. `Fixed` is deliberately excluded — it is fixed-point, not an integer.
+    pub fn is_integer_scalar(&self) -> bool {
+        matches!(
+            self,
+            RustType::I32
+                | RustType::I8
+                | RustType::U8
+                | RustType::I16
+                | RustType::U16
+                | RustType::U32
+        )
+    }
+
+    /// A NARROW integer storage width (`i8`/`u8`/`i16`/`u16`/`u32`) — an integer scalar other
+    /// than the `I32` register type, which has its own JS-ToInt32 lowering. These promote to
+    /// `f64` for arithmetic and truncate-cast on store.
+    pub fn is_narrow_int(&self) -> bool {
+        matches!(
+            self,
+            RustType::I8 | RustType::U8 | RustType::I16 | RustType::U16 | RustType::U32
+        )
+    }
+
     /// Infer the result type of a binary operation given the operand types.
     /// Returns `None` if native code cannot be emitted (fall back to Value path).
     pub fn result_type_of_binop(op: BinOp, lhs: &RustType, rhs: &RustType) -> Option<RustType> {
@@ -213,6 +300,21 @@ impl RustType {
                 | BinOp::Shl
                 | BinOp::Shr
                 | BinOp::UShr => Some(RustType::F64),
+                BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::StrictEq
+                | BinOp::StrictNe => Some(RustType::Bool),
+                _ => None,
+            }
+        } else if lhs == &RustType::Fixed && rhs == &RustType::Fixed {
+            // agb `Num<i32,8>` overloads `+ - * /` (Mul/Div apply the Q24.8 shift
+            // correction) and `PartialOrd`/`PartialEq`, so these lower to native
+            // fixed-point ops — no f64 round-trip, no FPU. `%`/`**`/bitwise fall to
+            // the boxed path (rare on positions/velocities).
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => Some(RustType::Fixed),
                 BinOp::Lt
                 | BinOp::Le
                 | BinOp::Gt
@@ -248,6 +350,12 @@ impl RustType {
             RustType::Value => "Value".to_string(),
             RustType::F64 => "f64".to_string(),
             RustType::I32 => "i32".to_string(),
+            RustType::I8 => "i8".to_string(),
+            RustType::U8 => "u8".to_string(),
+            RustType::I16 => "i16".to_string(),
+            RustType::U16 => "u16".to_string(),
+            RustType::U32 => "u32".to_string(),
+            RustType::Fixed => "tishlang_runtime::Fixed".to_string(),
             RustType::String => "String".to_string(),
             RustType::Bool => "bool".to_string(),
             RustType::Unit => "()".to_string(),
@@ -279,6 +387,12 @@ impl RustType {
             RustType::Value => "Value::Null".to_string(),
             RustType::F64 => "0.0".to_string(),
             RustType::I32 => "0i32".to_string(),
+            RustType::I8 => "0i8".to_string(),
+            RustType::U8 => "0u8".to_string(),
+            RustType::I16 => "0i16".to_string(),
+            RustType::U16 => "0u16".to_string(),
+            RustType::U32 => "0u32".to_string(),
+            RustType::Fixed => "tishlang_runtime::Fixed::from_raw(0)".to_string(),
             RustType::String => "String::new()".to_string(),
             RustType::Bool => "false".to_string(),
             RustType::Unit => "()".to_string(),
@@ -356,6 +470,23 @@ impl RustType {
             // the bitwise/shift path coerces). Only reached for an `I32`-typed binding boundary.
             RustType::I32 => format!(
                 "match &{} {{ Value::Number(n) => tishlang_runtime::to_int32(*n), _ => panic!(\"expected number\") }}",
+                value_expr
+            ),
+            // Narrow int storage: extract the JS Number and truncate-cast to the field width
+            // (Rust `f64 as iN` saturates out-of-range and maps NaN→0 — safe for a storage slot).
+            RustType::I8 | RustType::U8 | RustType::I16 | RustType::U16 | RustType::U32 => {
+                format!(
+                    "match &{} {{ Value::Number(n) => (*n as {}), _ => panic!(\"expected number\") }}",
+                    value_expr,
+                    self.to_rust_type_str()
+                )
+            }
+            // f64 → Q24.8: scale by 256 and TRUNCATE toward zero (`as i32`), keeping only 8
+            // fractional bits (`0.1` → raw 25 ≈ 0.0977, not exact). Must stay bit-identical with
+            // the compile-time literal fold in codegen (`fixed_literal_of`) so a `fixed` value is
+            // the same whether it came from a folded literal or this runtime conversion.
+            RustType::Fixed => format!(
+                "match &{} {{ Value::Number(n) => tishlang_runtime::Fixed::from_raw((*n * 256.0) as i32), _ => panic!(\"expected number\") }}",
                 value_expr
             ),
             RustType::String => format!(
@@ -437,6 +568,12 @@ impl RustType {
             // The signed int32 view boxes as a JS Number (every i32 is exactly representable in
             // f64). The uint32 `>>> 0` reinterpretation is applied at the boxing site, not here.
             RustType::I32 => format!("Value::Number(({}) as f64)", native_expr),
+            // Narrow int → JS Number: every in-range narrow int is exact in f64.
+            RustType::I8 | RustType::U8 | RustType::I16 | RustType::U16 | RustType::U32 => {
+                format!("Value::Number(({}) as f64)", native_expr)
+            }
+            // Q24.8 → f64 is exact (32 significant bits into a 52-bit mantissa).
+            RustType::Fixed => format!("Value::Number(({}).to_raw() as f64 / 256.0)", native_expr),
             RustType::String => format!("Value::String({}.clone().into())", native_expr),
             RustType::Bool => format!("Value::Bool({})", native_expr),
             RustType::Unit => "Value::Null".to_string(),

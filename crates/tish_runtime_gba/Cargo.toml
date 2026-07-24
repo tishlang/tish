@@ -1,0 +1,16 @@
+[package]
+name = "tishlang_runtime_gba"
+version = "0.1.0"
+edition = "2021"
+description = "no_std runtime facade for Tish compiled output on the Game Boy Advance (agb)"
+
+# The GBA `Gba` emit mode declares the generated crate's dependency as
+#   tishlang_runtime = { package = "tishlang_runtime_gba", path = ... }
+# so every emitted `tishlang_runtime::…` path resolves here (the package-rename
+# zero-churn trick). This crate re-exports the portable prelude surface from
+# tishlang_core / tishlang_builtins and adds the GBA `gba::{init, halt, hooks}`.
+
+[dependencies]
+tishlang_core = { path = "../tish_core", default-features = false, features = ["portable"] }
+tishlang_builtins = { path = "../tish_builtins", default-features = false, features = ["portable"] }
+agb = "0.25.0"

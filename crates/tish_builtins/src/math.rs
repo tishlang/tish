@@ -1,5 +1,11 @@
 //! Math builtin functions.
 
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
 use crate::helpers::extract_num;
 use tishlang_core::{to_int32, to_uint32, Value};
 
@@ -120,8 +126,16 @@ pub fn pow(args: &[Value]) -> Value {
     Value::Number(base.powf(exp))
 }
 
+#[cfg(not(feature = "portable"))]
 pub fn random(_args: &[Value]) -> Value {
     Value::Number(rand::random::<f64>())
+}
+
+/// No OS entropy on GBA: read the runtime-installed RNG hook (a seedable xorshift
+/// fallback until the facade wires up `agb::rng`). See `tishlang_core::install_rng`.
+#[cfg(feature = "portable")]
+pub fn random(_args: &[Value]) -> Value {
+    Value::Number(tishlang_core::random_f64())
 }
 
 pub fn sign(args: &[Value]) -> Value {

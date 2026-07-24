@@ -1,0 +1,13 @@
+// Regression: the GBA typed-scalar vocabulary (`fixed` + narrow int widths) must NOT lower to
+// native scalars on non-GBA targets. Off-GBA, `fixed` has no host runtime type (would be a compile
+// error) and `u8` would truncate on store (`300` -> `255`), diverging from the interpreter. On the
+// default (desktop/native) build these annotations must fall back to the boxed `Value` path, so a
+// value stays a plain JS number. (On `--target gba` they DO lower to native — that is the point.)
+let a: fixed = 1.5
+let b: u8 = 300
+let c: i16 = 70000
+let d: i32 = 3000000000
+console.log(a) // 1.5         (not a compile error)
+console.log(b) // 300         (not 255)
+console.log(c) // 70000       (not wrapped)
+console.log(d) // 3000000000  (not saturated to 2147483647)

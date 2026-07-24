@@ -7,7 +7,10 @@ mod codegen;
 mod infer;
 mod platform_resolve;
 mod resolve;
+mod schemes;
 mod types;
+
+pub use schemes::{set_active as set_scheme_registry, SchemeRegistry};
 
 pub use check::{check_program, TypeDiagnostic};
 
@@ -30,13 +33,16 @@ pub(crate) fn native_recur_guard_enabled() -> bool {
     std::env::var("TISH_NATIVE_RECUR_GUARD").map(|v| v != "0").unwrap_or(true)
 }
 
-/// How generated Rust is linked (desktop binary vs embedded iOS staticlib).
+/// How generated Rust is linked (desktop binary vs embedded iOS staticlib vs GBA ROM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeEmitMode {
     #[default]
     DesktopBin,
     /// `[lib] crate-type = ["staticlib"]` — no `fn main()`, host calls `tish_ios_launch`.
     EmbeddedLib,
+    /// Game Boy Advance ROM: `#![no_std]`, `#[agb::entry] fn agb_main(gba)`, links the
+    /// `tishlang_runtime_gba` facade. Numbers/async lowering diverge; see codegen `emit_program`.
+    Gba,
 }
 
 pub use codegen::CompileError;
