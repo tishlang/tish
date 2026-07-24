@@ -10,6 +10,16 @@
 #[cfg(all(feature = "portable", feature = "send-values"))]
 compile_error!("tishlang_core features `portable` and `send-values` are mutually exclusive");
 
+// `portable` implies `#![no_std]`, so `std` must be OFF (depend on this crate as
+// `default-features = false, features = ["portable"]`). If both are on — the usual slip of
+// requesting `portable` without disabling the default `std` feature — the `no_std` attribute
+// above still applies while the `std`-only deps (ahash/arcstr) are pulled in, producing a
+// confusing cascade. Catch it at the source with a message that names the fix.
+#[cfg(all(feature = "portable", feature = "std"))]
+compile_error!(
+    "tishlang_core feature `portable` requires `default-features = false` (the default `std` feature must be disabled)"
+);
+
 extern crate alloc;
 
 #[cfg(feature = "portable")]

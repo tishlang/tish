@@ -310,6 +310,31 @@ tishlang_runtime = {{ path = {:?}{} }}
     Ok(())
 }
 
+/// Read the agb version the facade pins, from `<facade>/Cargo.toml`. This keeps the generated ROM
+/// crate's agb in lockstep with the facade's (the single source of truth) — see [`build_gba_rom`].
+/// Matches an `agb = "X"` or `agb = { version = "X", … }` line; `None` if absent (caller falls back).
+fn read_facade_agb_version(facade_path: &Path) -> Option<String> {
+    let toml = fs::read_to_string(facade_path.join("Cargo.toml")).ok()?;
+    for line in toml.lines() {
+        // Require the key to be exactly `agb` (not `agb_foo`): after `agb`, the next non-space
+        // token must be `=`.
+        let Some(after_key) = line.trim_start().strip_prefix("agb") else {
+            continue;
+        };
+        let Some(after_eq) = after_key.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        // Take the first double-quoted string (the version, in either the bare or table form).
+        let rest = after_eq.trim_start();
+        if let Some(start) = rest.find('"') {
+            if let Some(len) = rest[start + 1..].find('"') {
+                return Some(rest[start + 1..start + 1 + len].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Build a Game Boy Advance ROM from generated `#![no_std]` Rust.
 ///
 /// Emits an agb-style cargo project (nightly + build-std + `thumbv4t-none-eabi` +
@@ -341,6 +366,14 @@ fn build_gba_rom(
             facade_path.display()
         ));
     }
+
+    // Single-source the agb version from the facade's own Cargo.toml — the facade is the one crate
+    // that actually links agb (its `Fixed`, entry-point, and asset arenas are agb types), so it is
+    // the source of truth. The generated ROM crate must depend on the SAME agb: a skew would pull in
+    // two agb crates and mismatch types at the sprite-registration boundary. Falls back to a known
+    // pin only if the line can't be read (never blocks the build on a parse miss).
+    let agb_version =
+        read_facade_agb_version(&facade_path).unwrap_or_else(|| "0.25.0".to_string());
 
     let out_stem = output_path
         .file_stem()
@@ -395,7 +428,7 @@ path = "src/main.rs"
 
 [dependencies]
 tishlang_runtime = {{ package = "tishlang_runtime_gba", path = {facade:?} }}
-agb = "0.25.0"
+agb = "{agb_version}"
 {more_deps}
 [profile.dev]
 opt-level = 3

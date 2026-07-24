@@ -1,9 +1,11 @@
 //! Import-scheme registry — the extension seam for custom import prefixes.
 //!
 //! An *import scheme* is a prefix like `asset:` that means "don't resolve this as a `.tish` module
-//! or npm package; instead resolve it my way and inject my code." tish ships built-in schemes
-//! (currently `asset:`, for baking image files into a GBA ROM), and a project can declare its own
-//! under `package.json` → `tish.schemes` with no changes to the compiler. This is the same
+//! or npm package; instead resolve it my way and inject my code." tish core ships **no** built-in
+//! schemes — it is target-agnostic (see [`SchemeRegistry::builtin`]). Schemes are contributed by
+//! cargo path-dependencies that ship a `tish.schemes.json` (this is how `tish-agb` provides
+//! `asset:`/`sheet:`/`background:`/`wav:`/`map:` for free to any game that depends on it) and by a
+//! project's own `package.json` → `tish.schemes`, with no changes to the compiler. This is the same
 //! philosophy as `cargo:` imports (config-declared, zero core edits per crate), generalized.
 //!
 //! A scheme is described declaratively:
