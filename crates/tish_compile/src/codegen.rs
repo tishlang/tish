@@ -592,6 +592,11 @@ pub fn compile_project_full_emit(
     // Install the import-scheme registry (built-ins + any `tish.schemes` from package.json) for
     // this build, so resolution and codegen recognize `asset:` and any project-declared scheme.
     crate::schemes::set_active(crate::schemes::SchemeRegistry::from_project(root));
+    // Enable the narrow-int/`fixed` numeric vocabulary ONLY for a GBA build. On every other target
+    // those annotations stay boxed `Value` (interpreter number semantics) — `fixed` has no host
+    // type and `u8` would truncate, both of which would break non-GBA programs. Set before
+    // resolution/inference, which also lower annotations.
+    crate::types::set_gba_numerics(emit_mode == crate::NativeEmitMode::Gba);
     let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
         message: e,
         span: None,

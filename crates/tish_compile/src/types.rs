@@ -2,9 +2,33 @@
 //!
 //! Maps TypeAnnotation from the AST to concrete Rust types for code generation.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tishlang_ast::{BinOp, FunParam, TypeAnnotation, TypedParam};
+
+thread_local! {
+    /// Whether the extended GBA numeric vocabulary — the narrow integer widths (`i8/u8/i16/u16/u32`)
+    /// and `fixed` — lowers to native scalar types. **Off by default** (standard targets): those
+    /// annotations must fall back to the boxed `Value` path off-GBA, because `fixed` has no host
+    /// runtime type (a hard compile error) and the narrow widths truncate on store (`u8 = 300` → 255),
+    /// diverging from the interpreter and breaking the typed == boxed == interpreter guarantee that
+    /// non-GBA targets rely on. A GBA build turns this on (see `set_gba_numerics`), where those
+    /// types ARE the point. `i32`/`f64` are NOT gated — `f64` is just `number`, and `i32` is the
+    /// pre-existing JS-ToInt32 register lowering.
+    static GBA_NUMERICS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enable (GBA) or disable (every other target) the extended narrow-int/`fixed` numeric vocabulary
+/// for the current compile. Set once at compile start from the emit mode; see [`GBA_NUMERICS`].
+pub fn set_gba_numerics(on: bool) {
+    GBA_NUMERICS.with(|c| c.set(on));
+}
+
+/// Whether `from_annotation` should lower `i8/u8/i16/u16/u32/fixed` to native scalars.
+fn gba_numerics() -> bool {
+    GBA_NUMERICS.with(|c| c.get())
+}
 
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,12 +131,15 @@ impl RustType {
                 // storage; `fixed` is agb `Num<i32,8>`.
                 "f64" => RustType::F64,
                 "i32" => RustType::I32,
-                "i8" => RustType::I8,
-                "u8" => RustType::U8,
-                "i16" => RustType::I16,
-                "u16" => RustType::U16,
-                "u32" => RustType::U32,
-                "fixed" => RustType::Fixed,
+                // GBA-only numeric vocabulary (see `GBA_NUMERICS`): off-GBA these fall through to
+                // the `other` arm → boxed `Value`, so `fixed` compiles (no host `Fixed` type) and
+                // narrow widths keep interpreter number semantics instead of truncating.
+                "i8" if gba_numerics() => RustType::I8,
+                "u8" if gba_numerics() => RustType::U8,
+                "i16" if gba_numerics() => RustType::I16,
+                "u16" if gba_numerics() => RustType::U16,
+                "u32" if gba_numerics() => RustType::U32,
+                "fixed" if gba_numerics() => RustType::Fixed,
                 "string" => RustType::String,
                 "boolean" | "bool" => RustType::Bool,
                 "void" | "undefined" => RustType::Unit,
