@@ -148,6 +148,13 @@ impl SchemeRegistry {
 /// Parse one `tish.schemes["name"]` JSON entry into a [`SchemeDef`]. Returns `None` (skip) on a
 /// shape that doesn't describe a valid scheme.
 fn parse_scheme_def(name: &str, def: &serde_json::Value) -> Option<SchemeDef> {
+    // The name is interpolated into a generated module identifier (`mod __scheme_<name>_<j>`) and
+    // used as the `<name>:` import prefix, so it must be a valid Rust identifier. A name like
+    // `sprite-sheet` would emit un-compilable Rust (a raw rustc error far from its cause); skip it
+    // instead, consistent with "a malformed entry is skipped, not fatal".
+    if !is_valid_scheme_name(name) {
+        return None;
+    }
     let obj = def.as_object()?;
     let resolve_file = obj.get("file").and_then(|v| v.as_bool()).unwrap_or(true);
     let mut targets = HashMap::new();
@@ -191,6 +198,19 @@ fn parse_scheme_def(name: &str, def: &serde_json::Value) -> Option<SchemeDef> {
         resolve_file,
         targets,
     })
+}
+
+/// A scheme name must be a valid Rust identifier: it becomes part of a generated module ident
+/// (`__scheme_<name>_<j>`) and the `<name>:` import prefix. ASCII letter/underscore, then
+/// letters/digits/underscores. (The same shape `types::is_struct_field_safe` enforces for native
+/// struct field keys, kept local so `schemes` stays self-contained.)
+fn is_valid_scheme_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 thread_local! {

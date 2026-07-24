@@ -1450,17 +1450,33 @@ impl Codegen {
         }
     }
 
-    /// The handle a scheme spec binds to — its index AMONG same-scheme entries (its arena slot).
+    /// The runtime arena a scheme registers into, keyed by its (pre-render) `register` template.
+    /// Schemes that share a template share an arena: `asset:` and `sheet:` both call
+    /// `__asset_register_sheet`, so both index into the same runtime `Vec`. `None` for a scheme with
+    /// no registration call (nothing to index into).
+    fn scheme_arena_key(&self, scheme: &str) -> Option<String> {
+        let emit = self.scheme_target_emit(scheme).ok()?;
+        (!emit.register.is_empty()).then_some(emit.register)
+    }
+
+    /// The handle a scheme spec binds to — its slot in the runtime ARENA it registers into. The
+    /// arena is keyed by the scheme's `register` target, NOT its name: `asset:` and `sheet:` both
+    /// push to `__asset_register_sheet`, so a program mixing them must number handles across BOTH
+    /// (the entry registers every scheme file in one first-seen pass, so same-arena entries land in
+    /// exactly this order). Numbering per-scheme-name collided their handles — an `asset:` and a
+    /// `sheet:` import each got handle 0 while the runtime gave them slots 0 and 1 (#552).
     fn scheme_handle_of(&self, spec: &str) -> Option<usize> {
         let (scheme, path) = Self::split_scheme_spec(spec)?;
+        let arena = self.scheme_arena_key(&scheme)?;
         let mut k = 0usize;
         for (s, p) in &self.scheme_files {
-            if *s == scheme {
-                if *p == path {
-                    return Some(k);
-                }
-                k += 1;
+            if self.scheme_arena_key(s).as_deref() != Some(arena.as_str()) {
+                continue;
             }
+            if *s == scheme && *p == path {
+                return Some(k);
+            }
+            k += 1;
         }
         None
     }
@@ -12359,18 +12375,35 @@ impl Codegen {
         };
 
         let native_val = self.emit_coerced_native(value, &field_ty)?;
-        let code = if needs_temp {
-            // Compute the RHS before the mutable borrow so an RHS read of the same
-            // RefCell doesn't panic (already-borrowed).
-            if side_effect_only {
+        // In *statement* position (`side_effect_only`) the assignment yields nothing, so a bare
+        // store suffices. In *expression* position (`let y = (p.x = v)`, chained `a.x = b.y = v`,
+        // `if ((p.x = v) > 0)`) a JS assignment must EVALUATE to the assigned value — emitting
+        // `Value::Null` there was a bug (the value silently vanished). We box the stored (coerced)
+        // field value: identical to the RHS for every in-range numeric store, and consistent with
+        // the typed-scalar model when a narrow field truncates.
+        let code = if side_effect_only {
+            if needs_temp {
+                // Compute the RHS before the mutable borrow so an RHS read of the same
+                // RefCell doesn't panic (already-borrowed).
                 format!("{{ let _v = {}; {} = _v; }}", native_val, lhs)
             } else {
-                format!("{{ let _v = {}; {} = _v; Value::Null }}", native_val, lhs)
+                format!("{} = {}", lhs, native_val)
             }
-        } else if side_effect_only {
-            format!("{} = {}", lhs, native_val)
         } else {
-            format!("{{ {} = {}; Value::Null }}", lhs, native_val)
+            // A `Value`-typed field is already boxed; box a *clone* so the store can still move `_v`.
+            // Every other field type reads `_v` without moving it (numeric copy / string clone /
+            // by-ref), so boxing before the store is sound. Both `_v` and its boxed result are
+            // computed before `lhs` — which, in the RefCell shape, is the `borrow_mut()` — so an RHS
+            // read of the same cell can't collide with the store's mutable borrow.
+            let result_val = if field_ty == RustType::Value {
+                "_v.clone()".to_string()
+            } else {
+                field_ty.to_value_expr("_v")
+            };
+            format!(
+                "{{ let _v = {}; let _r = {}; {} = _v; _r }}",
+                native_val, result_val, lhs
+            )
         };
         Ok(Some(code))
     }
