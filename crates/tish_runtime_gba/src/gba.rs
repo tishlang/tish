@@ -118,6 +118,26 @@ pub fn asset_bg(handle: i32) -> Option<BgAsset> {
     ASSET_BGS.with(|c| c.borrow().get(handle as usize).copied())
 }
 
+/// Registered maps (`map:` imports) — the raw ROM bytes of a baked map binary. Kept in ROM
+/// (`include_bytes!`), never copied to the tish heap, so large maps don't blow EWRAM.
+static ASSET_MAPS: SingleCore<RefCell<Vec<&'static [u8]>>> =
+    SingleCore::new(RefCell::new(Vec::new()));
+
+/// Register a baked map's ROM bytes, returning its i32 handle.
+pub fn __asset_register_map(data: &'static [u8]) -> i32 {
+    ASSET_MAPS.with(|c| {
+        let mut v = c.borrow_mut();
+        let idx = v.len() as i32;
+        v.push(data);
+        idx
+    })
+}
+
+/// Look up a registered map's ROM bytes by handle. `None` if out of range.
+pub fn asset_map(handle: i32) -> Option<&'static [u8]> {
+    ASSET_MAPS.with(|c| c.borrow().get(handle as usize).copied())
+}
+
 /// Registered sounds (`wav:` imports). `SoundData` is `Copy` (a `&'static [u8]` handle).
 static ASSET_WAVS: SingleCore<RefCell<Vec<agb::sound::mixer::SoundData>>> =
     SingleCore::new(RefCell::new(Vec::new()));
