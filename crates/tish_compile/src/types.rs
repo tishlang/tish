@@ -449,7 +449,10 @@ impl RustType {
                     self.to_rust_type_str()
                 )
             }
-            // Lossless f64 → Q24.8: round the scaled value to the nearest raw unit.
+            // f64 → Q24.8: scale by 256 and TRUNCATE toward zero (`as i32`), keeping only 8
+            // fractional bits (`0.1` → raw 25 ≈ 0.0977, not exact). Must stay bit-identical with
+            // the compile-time literal fold in codegen (`fixed_literal_of`) so a `fixed` value is
+            // the same whether it came from a folded literal or this runtime conversion.
             RustType::Fixed => format!(
                 "match &{} {{ Value::Number(n) => tishlang_runtime::Fixed::from_raw((*n * 256.0) as i32), _ => panic!(\"expected number\") }}",
                 value_expr

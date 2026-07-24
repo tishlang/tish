@@ -242,3 +242,35 @@ pub fn render_template(template: &str, abspath: &str, module_ident: &str) -> Str
         .replace("{path}", &format!("{:?}", abspath))
         .replace("{mod}", module_ident)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheme_name_must_be_a_rust_identifier() {
+        // Valid identifiers pass.
+        assert!(is_valid_scheme_name("asset"));
+        assert!(is_valid_scheme_name("sprite_sheet"));
+        assert!(is_valid_scheme_name("_x"));
+        assert!(is_valid_scheme_name("bg2"));
+        // Anything that would break the generated `mod __scheme_<name>_<j>` is rejected.
+        assert!(!is_valid_scheme_name("sprite-sheet")); // hyphen
+        assert!(!is_valid_scheme_name("")); // empty
+        assert!(!is_valid_scheme_name("2d")); // leading digit
+        assert!(!is_valid_scheme_name("a:b")); // colon
+        assert!(!is_valid_scheme_name("a b")); // space
+    }
+
+    #[test]
+    fn parse_scheme_def_skips_invalid_name() {
+        let def = serde_json::json!({
+            "file": true,
+            "targets": { "gba": { "module": "// x", "register": "" } }
+        });
+        // A hyphenated name is skipped (returns None) rather than emitting un-compilable Rust.
+        assert!(parse_scheme_def("sprite-sheet", &def).is_none());
+        // The same def under a valid name parses.
+        assert!(parse_scheme_def("sheet", &def).is_some());
+    }
+}
