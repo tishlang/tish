@@ -19,9 +19,15 @@ on:
       - "crates/tish_native/src/build.rs"
       - ".github/workflows/portable-gba.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: portable-gba-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   # Fast tier: does the portable runtime type-check with std OFF? Catches no_std violations
