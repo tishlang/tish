@@ -74,6 +74,26 @@ pub fn base64_url_decode(args: &[Value]) -> Value {
     }
 }
 
+/// `utf8Decode(byteArray) -> string` — decode bytes as UTF-8 (lossy: invalid sequences become the
+/// replacement char). The counterpart to `readFileBytes` / a streaming `reader.read()` chunk, whose
+/// `value` is a byte array. Split streamed bytes on a newline BEFORE decoding a line so a multi-byte
+/// sequence is never cut mid-decode (a `\n`=0x0A byte never occurs inside a UTF-8 multi-byte char).
+pub fn utf8_decode(args: &[Value]) -> Value {
+    match arg_bytes(args) {
+        Some(b) => Value::String(String::from_utf8_lossy(&b).into_owned().into()),
+        None => Value::Null,
+    }
+}
+
+/// `utf8Encode(string) -> number[]` — the string's UTF-8 bytes as a byte array. (A byte-array
+/// argument is passed through, so `utf8Encode(utf8Decode(x))` is a no-op round trip.)
+pub fn utf8_encode(args: &[Value]) -> Value {
+    match arg_bytes(args) {
+        Some(b) => bytes_to_value(b),
+        None => Value::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +145,13 @@ mod tests {
             base64_decode(&[Value::String("!!! not base64 !!!".into())]),
             Value::Null
         ));
+    }
+
+    #[test]
+    fn utf8_roundtrip_multibyte() {
+        // "héllo 🚀" exercises 2-byte (é) and 4-byte (🚀) sequences.
+        let bytes = utf8_encode(&[Value::String("héllo 🚀".into())]);
+        let Value::String(s) = utf8_decode(&[bytes]) else { panic!() };
+        assert_eq!(s.to_string(), "héllo 🚀");
     }
 }
