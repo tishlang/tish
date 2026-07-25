@@ -165,7 +165,7 @@ mod portable_backing {
     // -- Single-core lock/once shims. GBA runs one cooperative thread, so these
     //    never actually contend; they exist only to keep the std API surface
     //    (`.read()`/`.write()`/`.lock()`/`.get_or_init()`) at call sites.
-    use core::cell::{Ref, RefCell, RefMut, UnsafeCell};
+    use core::cell::{Ref, RefCell, RefMut};
 
     /// Never-poisoned, never-contended stand-in for `std::sync::RwLock`.
     pub struct RwLock<T>(RefCell<T>);
@@ -197,49 +197,30 @@ mod portable_backing {
         }
     }
 
-    /// Stand-in for `std::sync::OnceLock` (`new`/`get`/`get_or_init`/`set`).
-    pub struct OnceLock<T>(UnsafeCell<Option<T>>);
-    // SAFETY: single-core, cooperative; no concurrent access (see SingleCore).
+    /// Stand-in for `std::sync::OnceLock` (`new`/`get`/`get_or_init`/`set`). The GBA has no atomics,
+    /// so std's atomic `OnceLock` is unavailable; this wraps the SAFE single-threaded
+    /// `core::cell::OnceCell` (which does the write-once interior mutability without hand-rolled
+    /// `unsafe`) and only adds `unsafe impl Sync` so it can live in a `static` — sound because the
+    /// target is single-core and cooperative, so no concurrent access ever occurs (see `SingleCore`).
+    pub struct OnceLock<T>(core::cell::OnceCell<T>);
+    // SAFETY: single-core, cooperative; no concurrent access.
     unsafe impl<T> Sync for OnceLock<T> {}
     impl<T> OnceLock<T> {
         #[inline]
         pub const fn new() -> Self {
-            OnceLock(UnsafeCell::new(None))
+            OnceLock(core::cell::OnceCell::new())
         }
         #[inline]
         pub fn get(&self) -> Option<&T> {
-            // SAFETY: single-core, no concurrent access. A shared `&Option<T>`; the only
-            // write to the cell happens in the None->Some transition below, which is never
-            // reached while any `&T` handed out here is live (there is no `&T` into a `None`).
-            unsafe { &*self.0.get() }.as_ref()
+            self.0.get()
         }
         #[inline]
         pub fn set(&self, value: T) -> Result<(), T> {
-            // Check via a *shared* ref — never form a `&mut` while a `get()` `&T` may be live.
-            // SAFETY: single-core, no concurrent access.
-            if unsafe { &*self.0.get() }.is_some() {
-                return Err(value);
-            }
-            // The cell is None here, so no `&T` from `get()` can be outstanding. A raw store
-            // (not a `&mut`) into an unaliased place is sound.
-            // SAFETY: single-core; place is None and unreferenced.
-            unsafe { *self.0.get() = Some(value) };
-            Ok(())
+            self.0.set(value)
         }
         #[inline]
         pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
-            // SAFETY: single-core, no concurrent access. Initialise only when None (no `&T`
-            // outstanding), via a raw store rather than a `&mut`; all reads are shared.
-            if unsafe { &*self.0.get() }.is_none() {
-                let v = f();
-                // `f()` may have re-entered and initialised the cell (or handed out a `&T`).
-                // Only store if it is STILL empty — otherwise drop our late `v`, so we never
-                // overwrite (and thus drop) a value a live `&T` might point into.
-                if unsafe { &*self.0.get() }.is_none() {
-                    unsafe { *self.0.get() = Some(v) };
-                }
-            }
-            unsafe { &*self.0.get() }.as_ref().unwrap()
+            self.0.get_or_init(f)
         }
     }
     impl<T> Default for OnceLock<T> {
@@ -434,7 +415,7 @@ impl FloatExt for f64 {
 // touches interpreter state.
 // ===========================================================================
 #[cfg(feature = "portable")]
-pub struct SingleCore<T>(core::cell::UnsafeCell<T>);
+pub struct SingleCore<T>(T);
 
 #[cfg(feature = "portable")]
 // SAFETY: single-core, cooperative, no interrupt handler reenters interpreter
@@ -444,14 +425,15 @@ unsafe impl<T> Sync for SingleCore<T> {}
 #[cfg(feature = "portable")]
 impl<T> SingleCore<T> {
     pub const fn new(value: T) -> Self {
-        SingleCore(core::cell::UnsafeCell::new(value))
+        SingleCore(value)
     }
 
-    /// Mirrors `LocalKey::with`: hand out a shared ref to the inner value.
+    /// Mirrors `LocalKey::with`: hand out a shared ref to the inner value. Interior mutability lives
+    /// in `T` (a `RefCell`), so a plain `&self.0` suffices — no `unsafe` block needed here; only the
+    /// `unsafe impl Sync` above, to place a `!Sync` `T` in a `static` on this single-core target.
     #[inline]
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        // SAFETY: see the `unsafe impl Sync` note above.
-        f(unsafe { &*self.0.get() })
+        f(&self.0)
     }
 }
 
