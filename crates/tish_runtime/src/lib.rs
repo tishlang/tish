@@ -1797,6 +1797,11 @@ pub mod encoding;
 #[cfg(feature = "encoding")]
 pub use encoding::{base64_decode, base64_encode, base64_url_decode, base64_url_encode};
 
+#[cfg(feature = "crypto")]
+pub mod crypto;
+#[cfg(feature = "crypto")]
+pub use crypto::{random_bytes, sha256, sha256_hex};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,

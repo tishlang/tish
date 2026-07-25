@@ -61,6 +61,8 @@ net = []
 # Base64 encode/decode (tish:encoding) — bytes <-> string, for file-bytes-over-JSON (extension host
 # vscode.workspace.fs, broker_read_file_base64) and PKCE (URL-safe, no-pad).
 encoding = ["dep:base64"]
+# SHA-256 + secure random (tish:crypto) — PKCE code_challenge/verifier, checkpoint dir hashing.
+crypto = ["dep:sha2", "dep:rand"]
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
 # Pseudoterminal hosting (issue #493): spawn a shell/program on a real PTY, read/write/resize/kill —
@@ -91,6 +93,7 @@ tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "multipart"], optional = true }
 futures = { version = "0.3.32", optional = true }
 base64 = { version = "0.22", optional = true }
+sha2 = { version = "0.10", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
 # fs feature only: random suffix for `mkdtemp`.
