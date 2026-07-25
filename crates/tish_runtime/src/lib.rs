@@ -1777,6 +1777,14 @@ pub mod pty;
 #[cfg(feature = "pty")]
 pub use pty::{pty_kill, pty_pid, pty_read, pty_resize, pty_spawn, pty_write};
 
+#[cfg(feature = "process")]
+pub mod process_spawn;
+#[cfg(feature = "process")]
+pub use process_spawn::{
+    process_close_stdin, process_kill, process_pid, process_read_stderr, process_read_stdout,
+    process_spawn, process_wait, process_write_stdin,
+};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
