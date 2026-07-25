@@ -1965,6 +1965,8 @@ impl Codegen {
                     "base64Decode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_decode(args))"),
                     "base64UrlEncode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_encode(args))"),
                     "base64UrlDecode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_decode(args))"),
+                    "utf8Decode" => Some("Value::native(|args: &[Value]| tishlang_runtime::utf8_decode(args))"),
+                    "utf8Encode" => Some("Value::native(|args: &[Value]| tishlang_runtime::utf8_encode(args))"),
                     _ => None,
                 },
             "tish:crypto" if self.has_feature("crypto") => match export_name {
