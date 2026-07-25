@@ -1975,6 +1975,11 @@ impl Codegen {
                     "randomBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::random_bytes(args))"),
                     _ => None,
                 },
+            "tish:zip" if self.has_feature("zip") => match export_name {
+                    "extract" => Some("Value::native(|args: &[Value]| tishlang_runtime::zip_extract(args))"),
+                    "entries" => Some("Value::native(|args: &[Value]| tishlang_runtime::zip_entries(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -1985,7 +1990,7 @@ impl Codegen {
             matches!(
                 name,
                 "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
-                    | "encoding" | "crypto"
+                    | "encoding" | "crypto" | "zip"
             )
         } else {
             self.features.contains(name)
