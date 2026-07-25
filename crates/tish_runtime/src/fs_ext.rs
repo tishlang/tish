@@ -230,6 +230,32 @@ pub fn truncate_core(args: &[Value]) -> Result<Value, Value> {
         .map_err(io_err)
 }
 
+/// `chmod(path, mode)` — set the file mode (a number, e.g. `0o600` = 384). Unix only; a no-op that
+/// succeeds on other platforms. Needed to write a secrets file 0600.
+pub fn chmod_core(args: &[Value]) -> Result<Value, Value> {
+    let mode = match args.get(1) {
+        Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => *n as u32,
+        _ => {
+            return Err(io_err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chmod: mode must be a number",
+            )))
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path_arg(args, 0), std::fs::Permissions::from_mode(mode))
+            .map(|_| Value::Null)
+            .map_err(io_err)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        Ok(Value::Null)
+    }
+}
+
 /// `mkdtemp(prefix)` — create a uniquely-named temp dir and return its path. Node appends 6 RANDOM
 /// characters; a timestamp suffix is both predictable (a temp-dir security smell) and collision-prone
 /// under rapid calls. Use a random suffix and rely on `create_dir`'s exclusive semantics, retrying on
@@ -319,6 +345,7 @@ fs_method!(copy_file, copy_file_promise, copy_file_core);
 fs_method!(realpath, realpath_promise, realpath_core);
 fs_method!(readlink, readlink_promise, readlink_core);
 fs_method!(truncate, truncate_promise, truncate_core);
+fs_method!(chmod, chmod_promise, chmod_core);
 fs_method!(mkdtemp, mkdtemp_promise, mkdtemp_core);
 fs_method!(cp, cp_promise, cp_core);
 
