@@ -79,6 +79,7 @@ const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("pty", "tish:pty"),
     ("net", "tish:net"),
     ("encoding", "tish:encoding"),
+    ("crypto", "tish:crypto"),
 ];
 
 /// Normalize built-in spec to canonical form. Handles the Node `node:` prefix
@@ -110,10 +111,11 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
             | "tish:pty"
             | "tish:net"
             | "tish:encoding"
+            | "tish:crypto"
     ) || matches!(
         spec,
         "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty" | "pty" | "net"
-            | "encoding"
+            | "encoding" | "crypto"
     )
 }
 
@@ -1035,6 +1037,7 @@ pub fn is_native_import(spec: &str) -> bool {
         || matches!(
             spec,
             "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty" | "net" | "encoding"
+                | "crypto"
         )
 }
 
