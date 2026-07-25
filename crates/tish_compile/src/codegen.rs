@@ -719,12 +719,23 @@ pub fn compile_with_native_modules_emit(
     optimize: bool,
     emit_mode: crate::NativeEmitMode,
 ) -> Result<String, CompileError> {
-    // Set the narrow-int/`fixed`/`i32` numeric profile from THIS compile's emit mode, at the one
-    // funnel every entry point reaches. The thread-local persists across compiles on a thread, so
-    // setting it only in `compile_project_full_emit` let a prior GBA compile leave `true` behind for
-    // a later non-GBA compile via another entry (LSP / `cargo test` share worker threads) — which
-    // would lower those annotations natively off-GBA and diverge from the interpreter. Deriving it
-    // here, from the always-correct `emit_mode`, makes every compile self-consistent.
+    // Per-compile thread-local state — the narrow-int/`fixed`/`i32` numeric profile and the import-
+    // scheme registry — must not outlive THIS compile. Both persist on the thread, so a later compile
+    // on the same thread (LSP, `cargo test` workers share threads) could inherit a prior GBA compile's
+    // state and lower those annotations natively off-GBA / see stale schemes — diverging from the
+    // interpreter. This funnel is the one point every entry reaches, so reset both to their defaults
+    // on the way OUT, even on panic (mirrors tish_resolve's guard). Then set the numeric profile for
+    // THIS compile from the always-correct `emit_mode`. The scheme registry is installed before
+    // resolution by `compile_project_full_emit` (it must exist during resolve); the guard only clears
+    // it afterward so it can't leak forward.
+    struct StateGuard;
+    impl Drop for StateGuard {
+        fn drop(&mut self) {
+            crate::types::set_gba_numerics(false);
+            crate::schemes::set_active(crate::schemes::SchemeRegistry::builtin());
+        }
+    }
+    let _state_guard = StateGuard;
     crate::types::set_gba_numerics(emit_mode == crate::NativeEmitMode::Gba);
     let program = if optimize {
         tishlang_opt::optimize(program)
