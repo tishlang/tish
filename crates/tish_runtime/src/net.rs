@@ -6,7 +6,7 @@
 //! `startDebugging` connect-back), an OAuth loopback callback listener, and connect probes (is a
 //! forwarded port up yet?).
 //!
-//!   import { connect, read, write, close, listen, accept, probe } from 'tish:net'
+//!   import { connect, read, write, close, listen, accept, probe, sleep } from 'tish:net'
 //!
 //!   - `connect(host, port, timeoutMs?) -> id | null`
 //!   - `read(id, timeoutMs?) -> string | null`   ("" = live but no data yet; null = EOF/unknown)
@@ -16,6 +16,7 @@
 //!                                                      returned so a loopback caller can learn it)
 //!   - `accept(listenerId, timeoutMs?) -> id | null`  (a new connection id, or null on timeout)
 //!   - `probe(host, port, timeoutMs?) -> bool`        (can we connect?)
+//!   - `sleep(ms) -> null`                            (blocking backoff for the poll loops above)
 //!
 //! Each connection has a reader thread filling a UTF-8-boundary-drained buffer, exactly like
 //! pty.rs / process_spawn.rs. Global OnceLock<Mutex<HashMap>> registries; errors surface as
@@ -261,17 +262,27 @@ pub fn net_write(args: &[Value]) -> Value {
     }
 }
 
-/// `close(id)` → drop the connection (the reader thread ends on EOF). Returns whether it was live.
+/// `close(id)` → drop a connection (its reader thread ends on EOF) or a listener. Conn and
+/// listener ids share one counter, so an id names at most one of the two; closing a listener frees
+/// its port — the reserve-ephemeral-then-release pattern a TCP DAP `spawn` uses so the child can
+/// bind it. Returns whether anything live was removed.
 pub fn net_close(args: &[Value]) -> Value {
     let id = match arg_u64(args, 0) {
         Some(x) => x,
         None => return Value::Bool(false),
     };
-    let removed = match conns().lock() {
-        Ok(mut g) => g.remove(&id),
+    let removed_conn = match conns().lock() {
+        Ok(mut g) => g.remove(&id).is_some(),
         Err(_) => return Value::Bool(false),
     };
-    Value::Bool(removed.is_some())
+    if removed_conn {
+        return Value::Bool(true);
+    }
+    let removed_listener = match listeners().lock() {
+        Ok(mut g) => g.remove(&id).is_some(),
+        Err(_) => return Value::Bool(false),
+    };
+    Value::Bool(removed_listener)
 }
 
 /// `listen(port, host?)` → `{ id, port }` (the actual bound port, so port-0 loopback callers can
@@ -369,6 +380,20 @@ pub fn net_probe(args: &[Value]) -> Value {
         Ok(_) => Value::Bool(true),
         Err(_) => Value::Bool(false),
     }
+}
+
+/// `sleep(ms)` → block the current OS thread for `ms` milliseconds (draining due timers first),
+/// then return null. A blocking backoff for the socket poll loops that live here — a TCP DAP
+/// adapter needs a moment to bind before `connect` succeeds, and `accept` pollers pace between
+/// tries. Colocated with the socket ops because that's what needs it; unlike `setTimeout` (which
+/// only fires when a blocking op happens to yield), this actually sleeps, so it is usable from a
+/// `Promise.spawn` pump thread. Capped at 60s so a bad argument can't wedge the thread.
+pub fn net_sleep(args: &[Value]) -> Value {
+    let ms = arg_timeout(args, 0).min(60_000);
+    if ms > 0 {
+        crate::timers::sleep_with_drain(ms);
+    }
+    Value::Null
 }
 
 #[cfg(test)]
