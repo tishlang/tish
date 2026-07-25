@@ -1967,6 +1967,12 @@ impl Codegen {
                     "base64UrlDecode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_decode(args))"),
                     _ => None,
                 },
+            "tish:crypto" if self.has_feature("crypto") => match export_name {
+                    "sha256" => Some("Value::native(|args: &[Value]| tishlang_runtime::sha256(args))"),
+                    "sha256Hex" => Some("Value::native(|args: &[Value]| tishlang_runtime::sha256_hex(args))"),
+                    "randomBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::random_bytes(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -1977,7 +1983,7 @@ impl Codegen {
             matches!(
                 name,
                 "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
-                    | "encoding"
+                    | "encoding" | "crypto"
             )
         } else {
             self.features.contains(name)
