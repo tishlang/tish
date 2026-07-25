@@ -315,7 +315,15 @@ pub fn ws_broadcast_native(args: &[Value]) -> Value {
     Value::Number(n as f64)
 }
 
-/// Build connection object: { _id, send, close, readyState, receive }. JS-like.
+/// Is a connection still live (present in the registry)? The read task calls `unregister` when the
+/// stream ends, so this flips to false on close/disconnect. `receiveTimeout` returns Null for BOTH
+/// an idle timeout and a closed socket, so a pump loop needs this to tell them apart (e.g. to emit
+/// EOF exactly once when a remote pty / watch socket drops).
+fn conn_is_open(id: u32) -> bool {
+    CONNS.lock().map(|g| g.contains_key(&id)).unwrap_or(false)
+}
+
+/// Build connection object: { _id, send, close, readyState, receive, receiveTimeout, isOpen }. JS-like.
 fn conn_object(id: u32) -> Value {
     let mut obj: ObjectMap = ObjectMap::default();
     obj.insert(Arc::from("_id"), Value::Number(id as f64));
@@ -329,6 +337,10 @@ fn conn_object(id: u32) -> Value {
                 .unwrap_or_default();
             Value::Bool(conn_send(id, data))
         }),
+    );
+    obj.insert(
+        Arc::from("isOpen"),
+        Value::native(move |_args: &[Value]| Value::Bool(conn_is_open(id))),
     );
     obj.insert(
         Arc::from("close"),
@@ -807,6 +819,19 @@ mod tests {
             "client must dial TCP for a wss URL (proves the TLS connector is wired)"
         );
         let _ = server.join();
+    }
+
+    /// isOpen() must reflect the registry: true while registered, false once the read task
+    /// unregisters on close (a pump loop relies on this to tell an idle receiveTimeout from a closed
+    /// socket and emit EOF exactly once).
+    #[test]
+    fn conn_is_open_reflects_registry() {
+        let (tx, _rx) = tokio_mpsc::unbounded_channel::<String>();
+        let (_stx, srx) = mpsc::sync_channel::<String>(1);
+        let id = register(tx, srx);
+        assert!(conn_is_open(id), "just-registered conn should be open");
+        unregister(id);
+        assert!(!conn_is_open(id), "unregistered conn should be closed");
     }
 
     #[test]
