@@ -73,6 +73,7 @@ ws = [
     "tokio/net",
     "tokio/io-util",
     "dep:tokio-tungstenite",
+    "dep:rustls",
     "dep:futures-util",
     "dep:lazy_static",
     "send-values",
@@ -102,7 +103,13 @@ hyper = { version = "1", default-features = false, features = ["server", "http1"
 hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 core_affinity = { version = "0.8", optional = true }
-tokio-tungstenite = { version = "0.29", optional = true }
+# rustls-tls-native-roots gives `wss://` support (system cert store, no OpenSSL — matches reqwest's
+# rustls backend). Without a TLS feature, connect_async can only do plain `ws://` and rejects wss.
+tokio-tungstenite = { version = "0.29", optional = true, features = ["rustls-tls-native-roots"] }
+# Direct rustls handle so ws.rs can install a process-default CryptoProvider: both aws-lc-rs and ring
+# are in the tree (reqwest + transitive), so rustls 0.23 can't auto-select one, and connect_async's
+# wss path needs the process default. aws_lc_rs matches reqwest's provider.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"], optional = true }
 futures-util = { version = "0.3", optional = true }
 lazy_static = { version = "1", optional = true }
 
