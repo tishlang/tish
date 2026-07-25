@@ -56,6 +56,8 @@ http-hyper = [
 # `mkdtemp` needs a random suffix (predictable/timestamp names are a temp-dir security smell).
 fs = ["promise", "dep:rand"]
 process = []
+# Raw TCP sockets: DAP TCP transports, OAuth loopback listener, connect probes.
+net = []
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
 # Pseudoterminal hosting (issue #493): spawn a shell/program on a real PTY, read/write/resize/kill —
