@@ -131,13 +131,15 @@ impl RustType {
                 // integer-register lowering (its value is the JS ToInt32 view, which
                 // is exactly an annotated `i32`). The narrow widths are compact struct
                 // storage; `fixed` is agb `Num<i32,8>`.
-                "f64" => RustType::F64,
                 // GBA-only numeric vocabulary (see `GBA_NUMERICS`): off-GBA these fall through to
-                // the `other` arm → boxed `Value`, so `fixed` compiles (no host `Fixed` type),
-                // narrow widths keep interpreter number semantics instead of truncating, and a
-                // `: i32` annotation doesn't saturate/ToInt32 an out-of-range value — restoring the
-                // invariant that `I32` comes ONLY from the proven-in-range i32-loop-var lowering,
-                // never a raw annotation. (`f64` is ungated — it is just `number`.)
+                // the `other` arm → boxed `Value` (matching main, where these annotations were
+                // unrecognized), so `fixed` compiles (no host `Fixed` type), narrow widths keep
+                // interpreter number semantics instead of truncating, and a `: i32` annotation
+                // doesn't saturate/ToInt32 an out-of-range value — restoring the invariant that
+                // `I32` comes ONLY from the proven-in-range i32-loop-var lowering, never a raw
+                // annotation. `f64` is the redundant Rust spelling of `number`; gated alongside the
+                // rest so it too is inert off-GBA (`number` itself stays `F64`, always).
+                "f64" if gba_numerics() => RustType::F64,
                 "i32" if gba_numerics() => RustType::I32,
                 "i8" if gba_numerics() => RustType::I8,
                 "u8" if gba_numerics() => RustType::U8,

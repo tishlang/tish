@@ -592,11 +592,9 @@ pub fn compile_project_full_emit(
     // Install the import-scheme registry (built-ins + any `tish.schemes` from package.json) for
     // this build, so resolution and codegen recognize `asset:` and any project-declared scheme.
     crate::schemes::set_active(crate::schemes::SchemeRegistry::from_project(root));
-    // Enable the narrow-int/`fixed` numeric vocabulary ONLY for a GBA build. On every other target
-    // those annotations stay boxed `Value` (interpreter number semantics) — `fixed` has no host
-    // type and `u8` would truncate, both of which would break non-GBA programs. Set before
-    // resolution/inference, which also lower annotations.
-    crate::types::set_gba_numerics(emit_mode == crate::NativeEmitMode::Gba);
+    // (The narrow-int/`fixed`/`i32` numeric profile is set from `emit_mode` in
+    // `compile_with_native_modules_emit`, the funnel every entry point reaches — not here — so it
+    // can't leak across compiles on a shared thread. Resolution/inference don't lower annotations.)
     let modules = resolve::resolve_project(entry_path, project_root).map_err(|e| CompileError {
         message: e,
         span: None,
@@ -668,6 +666,11 @@ pub fn compile_with_native_modules(
     native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
 ) -> Result<String, CompileError> {
+    // This non-project entry (reached by `compile`/`compile_with_features`, never the GBA project
+    // path) compiles an already-resolved program, so no scheme registry was installed for it. Reset
+    // to the empty built-in set, in case a prior GBA compile on this thread left one active — a
+    // normal program has no scheme imports, but this keeps per-compile thread-local state hermetic.
+    crate::schemes::set_active(crate::schemes::SchemeRegistry::builtin());
     compile_with_native_modules_emit(
         program,
         project_root,
@@ -716,6 +719,13 @@ pub fn compile_with_native_modules_emit(
     optimize: bool,
     emit_mode: crate::NativeEmitMode,
 ) -> Result<String, CompileError> {
+    // Set the narrow-int/`fixed`/`i32` numeric profile from THIS compile's emit mode, at the one
+    // funnel every entry point reaches. The thread-local persists across compiles on a thread, so
+    // setting it only in `compile_project_full_emit` let a prior GBA compile leave `true` behind for
+    // a later non-GBA compile via another entry (LSP / `cargo test` share worker threads) — which
+    // would lower those annotations natively off-GBA and diverge from the interpreter. Deriving it
+    // here, from the always-correct `emit_mode`, makes every compile self-consistent.
+    crate::types::set_gba_numerics(emit_mode == crate::NativeEmitMode::Gba);
     let program = if optimize {
         tishlang_opt::optimize(program)
     } else {
