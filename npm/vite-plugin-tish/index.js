@@ -7,12 +7,40 @@
 //
 // Platform/surface cascade (RN-style `Button.macos.tish` / `.web.tish` / …) is owned by the `tish`
 // CLI (`tish resolve-id`); this plugin must not reimplement those rules.
+//
+// Resolution precedence for platform/surface:
+//   1. plugin opts `{ platform, surface }`
+//   2. env `TISH_PLATFORM` / `TISH_SURFACE`
+//   3. package.json `tish.platform` / `tish.surface` (or `tish.desktop.platform` / `.surface`)
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const TISH_EXT = ".tish";
+
+/**
+ * @param {string} root
+ * @returns {{ platform?: string, surface?: string }}
+ */
+export function readPkgTishConfig(root) {
+  try {
+    const pkgPath = path.join(root, "package.json");
+    if (!existsSync(pkgPath)) return {};
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    const t = pkg.tish && typeof pkg.tish === "object" ? pkg.tish : {};
+    const desktop =
+      t.desktop && typeof t.desktop === "object" ? t.desktop : {};
+    const platform = t.platform ?? desktop.platform;
+    const surface = t.surface ?? desktop.surface;
+    return {
+      ...(platform != null && platform !== "" ? { platform: String(platform) } : {}),
+      ...(surface != null && surface !== "" ? { surface: String(surface) } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
 
 /**
  * @param {object} [opts]
@@ -22,13 +50,15 @@ const TISH_EXT = ".tish";
  *        page on any `.tish` change (the documented fallback for `--target bytecode` apps).
  * @param {string} [opts.platform] Platform token for resolve cascade (`macos`, `ios`, `web`, …).
  * @param {string} [opts.surface] Surface token (`native`, `webview`, `web`). Defaults from
- *        `TISH_PLATFORM` / `TISH_SURFACE` when unset.
+ *        `TISH_PLATFORM` / `TISH_SURFACE`, then package.json `tish.*`, when unset.
  */
 export default function tishPlugin(opts = {}) {
   const tishPath = opts.tishPath ?? process.env.TISH_PATH ?? "tish";
   const mode = opts.mode ?? "hmr";
-  const platform = opts.platform ?? process.env.TISH_PLATFORM;
-  const surface = opts.surface ?? process.env.TISH_SURFACE;
+  let platform = opts.platform ?? process.env.TISH_PLATFORM;
+  let surface = opts.surface ?? process.env.TISH_SURFACE;
+  const optsHadPlatform = opts.platform != null;
+  const optsHadSurface = opts.surface != null;
   let projectRoot = opts.projectRoot;
   /** @type {boolean|null} */
   let supportsPlatformFlags = null;
@@ -124,6 +154,14 @@ export default function tishPlugin(opts = {}) {
 
     configResolved(config) {
       if (!projectRoot) projectRoot = config.root;
+      const fromPkg = readPkgTishConfig(projectRoot);
+      // opts > env (already applied) > package.json
+      if (!optsHadPlatform && (platform == null || platform === "") && fromPkg.platform) {
+        platform = fromPkg.platform;
+      }
+      if (!optsHadSurface && (surface == null || surface === "") && fromPkg.surface) {
+        surface = fromPkg.surface;
+      }
     },
 
     resolveId(source, importer) {
