@@ -1785,6 +1785,13 @@ pub use process_spawn::{
     process_spawn, process_wait, process_write_stdin,
 };
 
+#[cfg(feature = "net")]
+pub mod net;
+#[cfg(feature = "net")]
+pub use net::{
+    net_accept, net_close, net_connect, net_listen, net_probe, net_read, net_write,
+};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
