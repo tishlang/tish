@@ -58,6 +58,9 @@ fs = ["promise", "dep:rand"]
 process = []
 # Raw TCP sockets: DAP TCP transports, OAuth loopback listener, connect probes.
 net = []
+# Base64 encode/decode (tish:encoding) — bytes <-> string, for file-bytes-over-JSON (extension host
+# vscode.workspace.fs, broker_read_file_base64) and PKCE (URL-safe, no-pad).
+encoding = ["dep:base64"]
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
 # Pseudoterminal hosting (issue #493): spawn a shell/program on a real PTY, read/write/resize/kill —
@@ -87,6 +90,7 @@ tishlang_builtins = { path = "../tish_builtins", version = ">=0.1" }
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "stream", "multipart"], optional = true }
 futures = { version = "0.3.32", optional = true }
+base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
 # fs feature only: random suffix for `mkdtemp`.

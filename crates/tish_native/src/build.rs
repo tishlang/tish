@@ -19,6 +19,7 @@ const RUNTIME_CARGO_FEATURES: &[&str] = &[
     "tty",
     "pty",
     "net",
+    "encoding",
 ];
 
 /// Map CLI/compile features to flags passed to `tishlang_runtime` in the temp crate's Cargo.toml.
