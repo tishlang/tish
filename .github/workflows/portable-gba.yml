@@ -26,9 +26,6 @@ concurrency:
   group: portable-gba-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
   # Fast tier: does the portable runtime type-check with std OFF? Catches no_std violations
   # (a stray `std::` path) on the host in seconds. Does NOT catch no-atomics regressions — the
