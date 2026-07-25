@@ -1795,7 +1795,9 @@ pub use net::{
 #[cfg(feature = "encoding")]
 pub mod encoding;
 #[cfg(feature = "encoding")]
-pub use encoding::{base64_decode, base64_encode, base64_url_decode, base64_url_encode};
+pub use encoding::{
+    base64_decode, base64_encode, base64_url_decode, base64_url_encode, utf8_decode, utf8_encode,
+};
 
 #[cfg(feature = "crypto")]
 pub mod crypto;
