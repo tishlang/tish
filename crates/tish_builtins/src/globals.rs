@@ -3,7 +3,13 @@
 //! Used by both tishlang_vm (bytecode) and tishlang_runtime (compiled). Keeps tishlang_vm
 //! independent of tishlang_runtime.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
+use tishlang_core::Arc;
 use tishlang_core::VmRef;
 use tishlang_core::{percent_decode, percent_decode_component, percent_encode, percent_encode_component, ObjectMap, Value};
 
@@ -524,7 +530,7 @@ pub fn js_parse_float(s: &str) -> f64 {
 pub fn object_from_entries(args: &[Value]) -> Value {
     if let Some(Value::Array(entries)) = args.first() {
         let entries_borrow = entries.borrow();
-        let mut obj: ObjectMap = ObjectMap::with_capacity(entries_borrow.len());
+        let mut obj: ObjectMap = ObjectMap::with_capacity_and_hasher(entries_borrow.len(), Default::default());
 
         for entry in entries_borrow.iter() {
             if let Value::Array(pair) = entry {

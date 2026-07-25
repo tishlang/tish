@@ -5,6 +5,12 @@
 //! and the tree-walk interpreter all route through here so every backend produces
 //! byte-identical output — see `tish/docs/full-backend-parity-plan.md` (Workstream A).
 
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
 use tishlang_core::Value;
 
 /// `Number.prototype.toFixed(digits)` — ECMA-262 §21.1.3.3.
@@ -330,7 +336,7 @@ pub fn number_to_string_radix(num: f64, radix: i64) -> Option<String> {
     if negative {
         out.push('-');
     }
-    out.push_str(std::str::from_utf8(&int_digits).unwrap());
+    out.push_str(core::str::from_utf8(&int_digits).unwrap());
 
     // Fractional part: multiply-by-radix, emitting the integer overflow each step.
     if frac > 0.0 {

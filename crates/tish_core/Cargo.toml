@@ -7,8 +7,25 @@ description = "Shared Value type and utilities for Tish (used by interpreter and
 license-file = { workspace = true }
 repository = { workspace = true }
 [features]
-default = []
+# `std` is on by default, so every existing consumer builds exactly as before
+# (ahash + arcstr + indexmap/std). No workspace crate disables default-features on
+# tishlang_core, so gating the std-only deps here is safe.
+default = ["std"]
+std = ["dep:ahash", "dep:arcstr", "indexmap/std"]
 regex = ["dep:fancy-regex"]
+# no_std + alloc build for embedded targets (Game Boy Advance, thumbv4t-none-eabi).
+# Depend on it as `default-features = false, features = ["portable"]`. It swaps the
+# std-only deps (ahash, arcstr) and primitives (std::sync::Arc/atomic, thread_local!)
+# for atomics-free, alloc-based equivalents via the `compat` module. Default (std)
+# builds are unaffected — `compat` is a transparent re-export when this is off.
+# Mutually exclusive with `send-values` (single-threaded target; no Arc/Mutex).
+# See crates/tish_core/src/compat.rs.
+portable = [
+    "dep:hashbrown",
+    "dep:rustc-hash",
+    "dep:portable-atomic",
+    "dep:libm",
+]
 # Make `Value` (and its array / object / regex payloads) `Send + Sync` by
 # switching the interior `Rc<RefCell<T>>` to `Arc<Mutex<T>>` and the native
 # function type from `Rc<dyn Fn>` to `Arc<dyn Fn + Send + Sync>`. Enabled
@@ -19,10 +36,13 @@ regex = ["dep:fancy-regex"]
 send-values = ["dep:parking_lot"]
 
 [dependencies]
-ahash = "0.8.11"
-arcstr = "1"
+# std-only (need atomics); optional so the `portable` build can drop them.
+ahash = { version = "0.8.11", optional = true }
+arcstr = { version = "1", optional = true }
 smallvec = "1"
-indexmap = "2"
+# default-features=false keeps indexmap no_std-capable; the `std` feature re-adds
+# its std integration for hosted builds (indexmap always works on alloc alone).
+indexmap = { version = "2", default-features = false }
 # Fast integer→decimal for the JSON.stringify number fast-path (already in the workspace lock).
 itoa = "1"
 # Fast shortest-float→decimal for the number→string general path (JSON/template/log). ryu writes the
@@ -33,6 +53,21 @@ fancy-regex = { version = "0.17.0", optional = true }
 # Only under `send-values` (the Arc<Mutex> path): parking_lot's uncontended lock is a
 # single atomic with no pthread syscall — profiled as a top cost on object/array access.
 parking_lot = { version = "0.12", optional = true }
+
+# --- `portable` (no_std) deps. All optional; only pulled in for embedded builds. ---
+# Atomics-free hash map (ahash needs std/atomics). FxHasher is what agb_hashmap uses on GBA.
+hashbrown = { version = "0.15", default-features = false, optional = true }
+rustc-hash = { version = "2", default-features = false, optional = true }
+# AtomicU64 for the single symbol-id counter — portable-atomic provides it on no-atomics
+# targets via critical-section (impl supplied at final link by agb).
+# Default features include `fallback`, which provides AtomicU64 on targets lacking
+# native 64-bit atomics. The single-core backend is selected by the
+# `portable_atomic_unsafe_assume_single_core` cfg — supplied by agb in the real GBA
+# build (do NOT also enable the `critical-section` feature; agb forbids both). The
+# standalone core/builtins CI build passes that cfg via RUSTFLAGS.
+portable-atomic = { version = "1", optional = true }
+# f64 transcendentals in no_std (std's f64 methods are unavailable without libm).
+libm = { version = "0.2", optional = true }
 
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

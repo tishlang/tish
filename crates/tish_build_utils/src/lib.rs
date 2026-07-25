@@ -340,7 +340,22 @@ pub fn find_crate_path(crate_name: &str) -> Result<PathBuf, String> {
 
 /// Sanitize a user-chosen output stem for Cargo `[lib]` / `[[bin]]` target names.
 pub fn cargo_target_name(stem: &str) -> String {
-    stem.replace('-', "_")
+    // The result is emitted verbatim into a generated `Cargo.toml` (`name = "<stem>"`) and used as
+    // the crate/target name, so it must be a valid Rust identifier. Map every char that isn't
+    // ASCII-alphanumeric or `_` to `_` — a `-` (cargo normalizes it to `_` anyway), but also a `.`,
+    // space, or `"` from an odd `-o` path, which would otherwise break or inject the manifest.
+    // A leading digit is prefixed with `_`; an empty result falls back to a fixed default.
+    let mut name: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if name.is_empty() {
+        return "tish_output".to_string();
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    name
 }
 
 /// Create a temp build directory with src subdir.
@@ -427,6 +442,17 @@ mod protoc_tests {
     fn cargo_target_name_replaces_hyphens() {
         assert_eq!(cargo_target_name("hello-ios"), "hello_ios");
         assert_eq!(cargo_target_name("tish_out"), "tish_out");
+    }
+
+    #[test]
+    fn cargo_target_name_sanitizes_invalid_chars() {
+        // Quotes / dots / spaces from an odd `-o` stem can't break or inject the manifest.
+        assert_eq!(cargo_target_name("a\"b"), "a_b");
+        assert_eq!(cargo_target_name("my.app"), "my_app");
+        assert_eq!(cargo_target_name("my game"), "my_game");
+        // A leading digit is made identifier-safe; empty falls back.
+        assert_eq!(cargo_target_name("3d"), "_3d");
+        assert_eq!(cargo_target_name(""), "tish_output");
     }
 }
 

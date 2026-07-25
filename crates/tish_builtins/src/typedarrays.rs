@@ -17,7 +17,13 @@
 //! - A typed array is a regular array at runtime, so `Array.isArray(ta)` is `true` and there is no
 //!   `instanceof` distinction.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
+use tishlang_core::Arc;
 use tishlang_core::{ObjectMap, Value, VmRef};
 
 const CONSTRUCT: &str = "__construct";

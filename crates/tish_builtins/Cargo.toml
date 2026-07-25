@@ -8,15 +8,23 @@ description = "Shared builtin implementations for Tish (array, string, object, m
 license-file = { workspace = true }
 repository = { workspace = true }
 [dependencies]
-ahash = "0.8.11"
-indexmap = "2"
-rand = "0.10.1"
-unicode-normalization = "0.1.25"
-tishlang_core = { path = "../tish_core", version = ">=0.1" }
+# std-only deps, optional so the `portable` build drops them (rand needs OS
+# entropy; ahash needs atomics — both replaced by tishlang_core hooks/FxHasher).
+ahash = { version = "0.8.11", optional = true }
+indexmap = { version = "2", default-features = false }
+rand = { version = "0.10.1", optional = true }
+# default-features=false keeps it no_std (it works on core+alloc via tinyvec);
+# tish only uses NFC/NFD/NFKC/NFKD, none of which need std.
+unicode-normalization = { version = "0.1.25", default-features = false }
+tishlang_core = { path = "../tish_core", version = ">=0.1", default-features = false }
 
 [features]
-default = []
+default = ["std"]
+std = ["tishlang_core/std", "dep:ahash", "dep:rand"]
 regex = ["tishlang_core/regex"]
+# no_std + alloc build for GBA. Inherits tishlang_core's portable vocabulary and
+# its clock/RNG hooks; float math routes through tishlang_core::FloatExt (libm).
+portable = ["tishlang_core/portable"]
 # Propagate the `send-values` feature from `tishlang_core` so that closures
 # handed to us via `NativeFn` pick up the `Send + Sync` bound automatically
 # when multi-threaded `Value`s are enabled upstream.

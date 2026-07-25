@@ -1,5 +1,9 @@
 //! Array builtin methods.
 
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
 use crate::helpers::normalize_index;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
@@ -65,10 +69,10 @@ pub fn len(arr: &Value) -> Option<usize> {
 /// can use this deopt helper rather than changing every `if let Value::Array` branch.
 /// Returns the original value unchanged for anything that isn't a `NumberArray`.
 #[inline]
-fn as_boxed_array(arr: &Value) -> std::borrow::Cow<'_, Value> {
+fn as_boxed_array(arr: &Value) -> alloc::borrow::Cow<'_, Value> {
     match arr {
-        Value::NumberArray(na) => std::borrow::Cow::Owned(Value::materialize_number_array(na)),
-        other => std::borrow::Cow::Borrowed(other),
+        Value::NumberArray(na) => alloc::borrow::Cow::Owned(Value::materialize_number_array(na)),
+        other => alloc::borrow::Cow::Borrowed(other),
     }
 }
 
@@ -289,8 +293,20 @@ pub fn shuffle(arr: &Value) -> Value {
     let arr = as_boxed_array(arr); let arr = &*arr;
     if let Value::Array(arr) = arr {
         let mut v = arr.borrow().clone();
-        use rand::seq::SliceRandom;
-        v.shuffle(&mut rand::rng());
+        #[cfg(not(feature = "portable"))]
+        {
+            use rand::seq::SliceRandom;
+            v.shuffle(&mut rand::rng());
+        }
+        // Fisher-Yates with the runtime RNG hook (no `rand` on GBA).
+        #[cfg(feature = "portable")]
+        {
+            let n = v.len();
+            for i in (1..n).rev() {
+                let j = (tishlang_core::next_u64() % (i as u64 + 1)) as usize;
+                v.swap(i, j);
+            }
+        }
         Value::Array(VmRef::new(v))
     } else {
         Value::Null
@@ -891,7 +907,7 @@ pub fn flat_map(arr: &Value, callback: &Value) -> Value {
 
 fn sort_by_impl<F>(arr: &Value, cmp: F) -> Value
 where
-    F: FnMut(&Value, &Value) -> std::cmp::Ordering,
+    F: FnMut(&Value, &Value) -> core::cmp::Ordering,
 {
     if let Value::Array(arr) = arr {
         arr.borrow_mut().sort_by(cmp);
@@ -915,7 +931,7 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
         // Mutex under send-values and self-deadlock the worker (or panic under RefCell) — the exact
         // reentrant-lock class fixed for the captured-cell path in #218/#338. `mem::take` leaves the
         // array empty for the duration of the sort; the final result is written back below.
-        let mut elements: Vec<Value> = std::mem::take(&mut *arr.borrow_mut());
+        let mut elements: Vec<Value> = core::mem::take(&mut *arr.borrow_mut());
         let len = elements.len();
         let mut indices: Vec<usize> = (0..len).collect();
         let mut args_buf: [Value; 2] = [Value::Null, Value::Null];
@@ -924,14 +940,14 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
             // #303: once the comparator has thrown, stop invoking it — return Equal so the sort can
             // unwind. Avoids extra comparator calls (and their side effects) after the throw.
             if tishlang_core::has_pending_throw() {
-                return std::cmp::Ordering::Equal;
+                return core::cmp::Ordering::Equal;
             }
             args_buf[0] = elements[a].clone();
             args_buf[1] = elements[b].clone();
             match cmp_fn.call(&args_buf) {
-                Value::Number(n) if n < 0.0 => std::cmp::Ordering::Less,
-                Value::Number(n) if n > 0.0 => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
+                Value::Number(n) if n < 0.0 => core::cmp::Ordering::Less,
+                Value::Number(n) if n > 0.0 => core::cmp::Ordering::Greater,
+                _ => core::cmp::Ordering::Equal,
             }
         });
 
@@ -943,7 +959,7 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
         } else {
             let sorted: Vec<Value> = indices
                 .into_iter()
-                .map(|i| std::mem::replace(&mut elements[i], Value::Null))
+                .map(|i| core::mem::replace(&mut elements[i], Value::Null))
                 .collect();
             *arr.borrow_mut() = sorted;
         }
@@ -953,12 +969,12 @@ pub fn sort_with_comparator(arr: &Value, comparator: &Value) -> Value {
     }
 }
 
-fn num_cmp(a: &Value, b: &Value, asc: bool) -> std::cmp::Ordering {
+fn num_cmp(a: &Value, b: &Value, asc: bool) -> core::cmp::Ordering {
     let (na, nb) = match (a, b) {
         (Value::Number(a), Value::Number(b)) => (*a, *b),
         _ => (f64::NAN, f64::NAN),
     };
-    let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+    let cmp = na.partial_cmp(&nb).unwrap_or(core::cmp::Ordering::Equal);
     if asc {
         cmp
     } else {
@@ -984,9 +1000,9 @@ fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
         // Fast path only while still packed; a deopted numeric array sorts via the boxed path below.
         if let Some(nums) = a.borrow_mut().as_packed_mut() {
             if asc {
-                nums.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                nums.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal));
             } else {
-                nums.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+                nums.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(core::cmp::Ordering::Equal));
             }
             return Value::NumberArray(a.clone());
         }
@@ -1004,11 +1020,11 @@ fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
                     .collect();
                 if asc {
                     nums.sort_unstable_by(|x, y| {
-                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                        x.partial_cmp(y).unwrap_or(core::cmp::Ordering::Equal)
                     });
                 } else {
                     nums.sort_unstable_by(|x, y| {
-                        y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal)
+                        y.partial_cmp(x).unwrap_or(core::cmp::Ordering::Equal)
                     });
                 }
                 for (slot, n) in g.iter_mut().zip(nums) {
@@ -1026,11 +1042,11 @@ fn sort_numeric_impl(arr: &Value, asc: bool) -> Value {
 
 /// Sort array of objects by numeric property: arr.sort((a,b)=>a.prop-b.prop)
 pub fn sort_by_property_numeric(arr: &Value, prop: &str, asc: bool) -> Value {
-    let prop_arc = std::sync::Arc::from(prop);
+    let prop_arc = tishlang_core::Arc::from(prop);
     sort_by_impl(arr, move |a, b| {
         let na = get_prop_number(a, &prop_arc);
         let nb = get_prop_number(b, &prop_arc);
-        let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+        let cmp = na.partial_cmp(&nb).unwrap_or(core::cmp::Ordering::Equal);
         if asc {
             cmp
         } else {
@@ -1039,7 +1055,7 @@ pub fn sort_by_property_numeric(arr: &Value, prop: &str, asc: bool) -> Value {
     })
 }
 
-fn get_prop_number(v: &Value, prop: &std::sync::Arc<str>) -> f64 {
+fn get_prop_number(v: &Value, prop: &tishlang_core::Arc<str>) -> f64 {
     match v {
         Value::Object(o) => o
             .borrow()
@@ -1119,19 +1135,19 @@ pub fn sort_by_keys(arr: &Value, keys: &[(&[&str], bool)]) -> Value {
             for (col, (_, asc)) in keys.iter().enumerate() {
                 let ord = ka[col]
                     .partial_cmp(&kb[col])
-                    .unwrap_or(std::cmp::Ordering::Equal);
+                    .unwrap_or(core::cmp::Ordering::Equal);
                 let ord = if *asc { ord } else { ord.reverse() };
-                if ord != std::cmp::Ordering::Equal {
+                if ord != core::cmp::Ordering::Equal {
                     return ord;
                 }
             }
-            std::cmp::Ordering::Equal
+            core::cmp::Ordering::Equal
         });
         // Undecorate: apply the permutation in place.
-        let mut elements: Vec<Value> = std::mem::take(&mut *g);
+        let mut elements: Vec<Value> = core::mem::take(&mut *g);
         *g = decorated
             .into_iter()
-            .map(|(i, _)| std::mem::replace(&mut elements[i], Value::Null))
+            .map(|(i, _)| core::mem::replace(&mut elements[i], Value::Null))
             .collect();
         drop(g);
         Value::Array(a.clone())
@@ -1339,7 +1355,7 @@ mod sort_by_keys_tests {
     //! EXACT same order as running the equivalent boxed comparator through
     //! `sort_with_comparator`, since cross-backend parity depends on it.
     use super::*;
-    use std::sync::Arc;
+    use tishlang_core::Arc;
     use tishlang_core::Value;
 
     fn rec(key: f64, idx: f64) -> Value {

@@ -1,7 +1,13 @@
 //! `new` lowering for non-JS targets: `construct(callee, args)` approximates JS `[[Construct]]`.
 //! Browser-exact behavior remains on `tish build --target js`.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
+
+use tishlang_core::Arc;
 use tishlang_core::{ObjectMap, Value, VmRef};
 
 const CONSTRUCT: &str = "__construct";

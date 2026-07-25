@@ -6,11 +6,20 @@
 //! `console.log` prints string arguments without surrounding quotes (like Node); nested
 //! strings inside arrays/objects stay quoted. The REPL still quotes string results for clarity.
 
+#[cfg(not(feature = "portable"))]
 use std::io::IsTerminal;
+#[cfg(not(feature = "portable"))]
 use std::sync::OnceLock;
 
 use crate::Value;
+#[cfg(feature = "portable")]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
+#[cfg(not(feature = "portable"))]
 static CONSOLE_USES_COLORS: OnceLock<bool> = OnceLock::new();
 
 /// ANSI escape codes (standard 4-bit + bright black for dim).
@@ -34,8 +43,16 @@ const SPECIAL: &str = "\x1b[90m";
 ///
 /// Cached for the process lifetime. `is_terminal()` is a syscall; benchmarks and
 /// scripts with many `console.log` calls must not pay it on every line.
+#[cfg(not(feature = "portable"))]
 pub fn use_console_colors() -> bool {
     *CONSOLE_USES_COLORS.get_or_init(|| std::io::stdout().is_terminal())
+}
+
+/// No ANSI colors under `portable`: `console.log` goes to the mGBA debug log
+/// (`agb::println!`), which is plain text.
+#[cfg(feature = "portable")]
+pub fn use_console_colors() -> bool {
+    false
 }
 
 /// Format a single value for console with optional ANSI colors (Node/Bun-style).

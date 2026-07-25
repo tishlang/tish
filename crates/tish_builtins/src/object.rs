@@ -3,7 +3,11 @@
 //! This module will contain shared object method implementations.
 //! Functions will be migrated here from tishlang_runtime and tishlang_eval.
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
+use tishlang_core::Arc;
 use tishlang_core::{ObjectData, PropMap, Value, VmRef};
 
 /// Create a new empty object Value.

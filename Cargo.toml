@@ -36,7 +36,10 @@ members = [
 ]
 # Generated native-build projects (`tish build`) land under `target/` when TMPDIR points there;
 # never enroll anything beneath `target/` as a workspace member.
-exclude = ["target"]
+# GBA-only: depends on `agb`, which builds solely for thumbv4t. Excluded so host
+# `cargo build` doesn't try to cross-compile it; built explicitly with the target
+# (and consumed by path from generated GBA projects, not as a workspace member).
+exclude = ["target", "crates/tish_runtime_gba"]
 resolver = "2"
 
 [workspace.package]

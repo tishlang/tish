@@ -12,7 +12,9 @@
 //! `PropMap` on a cache miss). Phase 1b will attach the ordered key list to each shape so objects can
 //! drop per-object key storage entirely (the butterfly representation).
 
-use std::sync::{Arc, OnceLock, RwLock};
+use crate::compat::{AHashMap, Arc, OnceLock, RwLock};
+#[cfg(feature = "portable")]
+use alloc::{vec, vec::Vec};
 
 /// Identity of an object's ordered key-set.
 pub type ShapeId = u32;
@@ -31,7 +33,7 @@ pub const DICT_SHAPE: ShapeId = u32::MAX;
 /// ahash is ~2–3× faster on short string keys. Random-seeded per process, so no HashDoS regression.
 #[derive(Default)]
 struct ShapeNode {
-    transitions: ahash::AHashMap<Arc<str>, ShapeId>,
+    transitions: AHashMap<Arc<str>, ShapeId>,
 }
 
 struct Registry {

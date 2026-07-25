@@ -3,11 +3,17 @@
 //! All indices use character (Unicode scalar) positions for consistency with
 //! JavaScript, matching .length and .charAt(). Byte offsets are never exposed.
 
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
 use crate::helpers::normalize_index;
-use std::cell::RefCell;
+use core::cell::RefCell;
 use tishlang_core::ArcStr;
 use tishlang_core::Value;
 use tishlang_core::VmRef;
+#[cfg(feature = "portable")]
+use tishlang_core::FloatExt;
 
 // #203: a per-thread cursor cache that makes repeated character indexing (`charCodeAt(i)`, `s[i]`,
 // `charAt(i)`) O(1)/near-O(1) instead of O(i). tish strings are UTF-8, so `chars().nth(i)` scans from
@@ -29,9 +35,14 @@ struct CharCursor {
     byte_off: usize,
 }
 
+#[cfg(not(feature = "portable"))]
 thread_local! {
     static INDEX_CURSOR: RefCell<Option<CharCursor>> = const { RefCell::new(None) };
 }
+// Single-core: one shared cursor cache with the same `.with()` API.
+#[cfg(feature = "portable")]
+static INDEX_CURSOR: tishlang_core::SingleCore<RefCell<Option<CharCursor>>> =
+    tishlang_core::SingleCore::new(RefCell::new(None));
 
 /// Borrow the cursor entry for `s`, reseeding (compute ASCII flag + character count) if it currently
 /// caches a different backing allocation, then run `f` against it. Centralises the pointer-keyed
@@ -40,7 +51,7 @@ fn with_cursor<R>(s: &ArcStr, f: impl FnOnce(&mut CharCursor, &ArcStr) -> R) -> 
     INDEX_CURSOR.with(|cell| {
         let mut slot = cell.borrow_mut();
         let hit = matches!(slot.as_ref(), Some(c)
-            if std::ptr::eq(c.s.as_bytes().as_ptr(), s.as_bytes().as_ptr()) && c.s.len() == s.len());
+            if core::ptr::eq(c.s.as_bytes().as_ptr(), s.as_bytes().as_ptr()) && c.s.len() == s.len());
         if !hit {
             let ascii = s.as_bytes().is_ascii();
             // ASCII → character count equals byte length (free); otherwise count once.

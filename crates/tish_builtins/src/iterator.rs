@@ -12,7 +12,11 @@
 //! array-returning version behaved; mid-iteration mutation of the source is not reflected (a
 //! live iterator is a follow-up).
 
-use std::sync::Arc;
+#[cfg(feature = "portable")]
+#[allow(unused_imports)]
+use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
+
+use tishlang_core::Arc;
 
 use tishlang_core::{ObjectMap, Value, VmRef};
 

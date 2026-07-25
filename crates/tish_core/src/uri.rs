@@ -1,5 +1,12 @@
 //! URI encoding/decoding utilities.
 
+#[cfg(feature = "portable")]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+
 /// Percent-decode a string (for decodeURI).
 /// Does NOT decode reserved URI characters: ; / ? : @ & = + $ , #
 /// These are characters that encodeURI does not encode, so decodeURI won't decode them.
@@ -98,7 +105,7 @@ pub fn percent_decode_component(input: &str) -> Result<String, String> {
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if i + 2 < bytes.len() {
-                if let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                if let Some(b) = core::str::from_utf8(&bytes[i + 1..i + 3])
                     .ok()
                     .and_then(|s| u8::from_str_radix(s, 16).ok())
                 {

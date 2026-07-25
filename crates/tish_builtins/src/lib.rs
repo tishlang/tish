@@ -3,6 +3,9 @@
 //! Used by the compiled runtime (tishlang_runtime) and bytecode VM (tishlang_vm). The
 //! interpreter (tishlang_eval) implements builtins inline due to different Value
 //! and native signatures.
+#![cfg_attr(feature = "portable", no_std)]
+
+extern crate alloc;
 
 pub mod array;
 pub mod collections;

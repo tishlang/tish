@@ -914,9 +914,9 @@ fn build_file(
         .map_err(|e| e.to_string());
     }
 
-    if target != "native" {
+    if target != "native" && target != "gba" {
         return Err(format!(
-            "Unknown target: {}. Use 'native', 'js', 'wasm', 'wasm-gpu', 'wasi', or 'bytecode'.",
+            "Unknown target: {}. Use 'native', 'gba', 'js', 'wasm', 'wasm-gpu', 'wasi', or 'bytecode'.",
             target
         ));
     }
@@ -930,7 +930,12 @@ fn build_file(
     });
     let features: Vec<String> = native_build_features_from_cli(cli_features);
 
-    let build_config = if let Some(triple) = ios_triple {
+    let build_config = if target == "gba" {
+        if is_js {
+            return Err("tish build --target gba requires a .tish entry file.".to_string());
+        }
+        tishlang_native::NativeBuildConfig::gba()
+    } else if let Some(triple) = ios_triple {
         tishlang_native::NativeBuildConfig::ios_staticlib(triple)
     } else if crate_type == "staticlib" {
         tishlang_native::NativeBuildConfig {
