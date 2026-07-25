@@ -199,6 +199,26 @@ pub fn process_spawn(args: &[Value]) -> Value {
             cmd.env(k.as_ref(), v.to_display_string());
         }
     }
+
+    // `detached: true` — fire-and-forget launch (a GUI app, an ssh -L tunnel, the `dune` CLI's own
+    // window op): null stdio + a fresh process group so the child outlives this process and isn't hit
+    // by signals to the parent's group. Returns the child PID (a number) with NO session registered —
+    // there's nothing to read/write/wait/kill.
+    if matches!(obj_field(opts, "detached"), Some(Value::Bool(true))) {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        return match cmd.spawn() {
+            Ok(child) => Value::Number(child.id() as f64),
+            Err(_) => Value::Null,
+        };
+    }
+
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
