@@ -53,6 +53,32 @@ fn next_server_handle() -> u32 {
     NEXT_SERVER_HANDLE.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Install rustls' process-default `CryptoProvider` (once) so `connect_async`'s `wss://` path has a
+/// provider to use. Both aws-lc-rs and ring are in the dep tree (reqwest + transitive), so rustls
+/// 0.23 refuses to auto-select; without this, the first wss connect fails with "Could not determine
+/// the process-level CryptoProvider". reqwest configures its own client explicitly, so it's
+/// unaffected by (and doesn't set) the process default. Idempotent: a second install is a no-op.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// WS diagnostics are OFF by default — the client used to print on every connect/close, which is
+/// production noise for a long-lived transport (remote pty / watch). Set `TISH_WS_DEBUG=1` to
+/// restore the per-connection stderr logging.
+fn ws_debug() -> bool {
+    use std::sync::OnceLock;
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("TISH_WS_DEBUG")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 struct ConnState {
     send_tx: tokio_mpsc::UnboundedSender<String>,
     recv_rx: mpsc::Receiver<String>,
@@ -96,8 +122,17 @@ where
     let (mut write, mut read) = ws_stream.split();
     tokio::spawn(async move {
         while let Some(Ok(msg)) = read.next().await {
-            if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
-                let _ = recv_tx_task.send(t.to_string());
+            match msg {
+                tokio_tungstenite::tungstenite::Message::Text(t) => {
+                    let _ = recv_tx_task.send(t.to_string());
+                }
+                // Binary frames are delivered too (utf8-lossy) — remote pty streams raw bytes and
+                // some servers frame as Binary; dropping them silently loses output. Ping/Pong/Close
+                // are handled by the stream (the loop ends when it yields None on close).
+                tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                    let _ = recv_tx_task.send(String::from_utf8_lossy(&b).into_owned());
+                }
+                _ => {}
             }
         }
         unregister(id);
@@ -349,35 +384,63 @@ fn parse_port(args: &[Value]) -> Option<u16> {
     })
 }
 
-/// WebSocket(url) — JS-like client. Returns object with send, close, readyState, receive.
+/// WebSocket(url, connectTimeoutMs?) — JS-like client. Returns object with send, close, readyState,
+/// receive; `Null` if the connection fails or (with a positive timeout) doesn't complete in time.
+/// `wss://` is supported via rustls (the `rustls-tls-native-roots` feature on tokio-tungstenite).
 pub fn web_socket_client(args: &[Value]) -> Value {
     let mut url = match args.first().map(|v| v.to_display_string()) {
         Some(u) if !u.is_empty() => u,
         _ => return Value::Null,
+    };
+    // Bounded connect so a dead/unreachable host can't hang the caller forever. Default 15s; pass 0
+    // to wait indefinitely (matches the old behavior).
+    let connect_timeout_ms = match args.get(1) {
+        Some(Value::Number(n)) if n.is_finite() && *n >= 0.0 => (*n as u64).min(3_600_000),
+        _ => 15_000,
     };
     // Ensure URL has a path so the client sends "GET / ..." (avoids server responding with 200 instead of 101)
     let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
     if !url[after_scheme..].contains('/') {
         url.push('/');
     }
+    // wss:// needs rustls' process-default crypto provider installed first.
+    ensure_crypto_provider();
     let (send_tx, mut send_rx) = tokio_mpsc::unbounded_channel::<String>();
     let (recv_tx, recv_rx) = mpsc::sync_channel::<String>(64);
     let recv_tx = Arc::new(recv_tx);
 
     let id = with_ws_client_rt(|rt| {
         rt.block_on(async move {
-            let (ws_stream, _) = match tokio_tungstenite::connect_async(&url).await {
+            let connect = tokio_tungstenite::connect_async(&url);
+            let connected = if connect_timeout_ms > 0 {
+                match tokio::time::timeout(Duration::from_millis(connect_timeout_ms), connect).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        if ws_debug() {
+                            eprintln!("[tish ws] connect timed out after {}ms: {}", connect_timeout_ms, url);
+                        }
+                        return None;
+                    }
+                }
+            } else {
+                connect.await
+            };
+            let (ws_stream, _) = match connected {
                 Ok(x) => {
-                    eprintln!("[tish ws] client connected (handshake OK): {}", url);
+                    if ws_debug() {
+                        eprintln!("[tish ws] client connected (handshake OK): {}", url);
+                    }
                     x
                 }
                 Err(e) => {
-                    let hint = if e.to_string().contains("200 OK") {
-                        " Another process may be using the port (not the WebSocket gateway). With gateway running, run: lsof -i :<port>"
-                    } else {
-                        ""
-                    };
-                    eprintln!("[tish ws] connect_async failed: {} (url: {}){}", e, url, hint);
+                    if ws_debug() {
+                        let hint = if e.to_string().contains("200 OK") {
+                            " Another process may be using the port (not the WebSocket gateway). With gateway running, run: lsof -i :<port>"
+                        } else {
+                            ""
+                        };
+                        eprintln!("[tish ws] connect_async failed: {} (url: {}){}", e, url, hint);
+                    }
                     return None;
                 }
             };
@@ -387,11 +450,19 @@ pub fn web_socket_client(args: &[Value]) -> Value {
             let url_closed = url.clone();
             tokio::spawn(async move {
                 while let Some(Ok(msg)) = read.next().await {
-                    if let tokio_tungstenite::tungstenite::Message::Text(t) = msg {
-                        let _ = recv_tx.send(t.to_string());
+                    match msg {
+                        tokio_tungstenite::tungstenite::Message::Text(t) => {
+                            let _ = recv_tx.send(t.to_string());
+                        }
+                        tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                            let _ = recv_tx.send(String::from_utf8_lossy(&b).into_owned());
+                        }
+                        _ => {}
                     }
                 }
-                eprintln!("[tish ws] client connection closed (stream ended): {}", url_closed);
+                if ws_debug() {
+                    eprintln!("[tish ws] client connection closed (stream ended): {}", url_closed);
+                }
                 unregister(id);
             });
             tokio::spawn(async move {
@@ -462,17 +533,21 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
                 }
                 let ws_stream = match tokio_tungstenite::accept_async(stream).await {
                     Ok(ws) => {
-                        eprintln!(
-                            "[tish ws] server accepted connection (handshake OK): port {}",
-                            port
-                        );
+                        if ws_debug() {
+                            eprintln!(
+                                "[tish ws] server accepted connection (handshake OK): port {}",
+                                port
+                            );
+                        }
                         ws
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[tish ws] server accept_async failed: {} (port {})",
-                            e, port
-                        );
+                        if ws_debug() {
+                            eprintln!(
+                                "[tish ws] server accept_async failed: {} (port {})",
+                                e, port
+                            );
+                        }
                         continue;
                     }
                 };
@@ -649,6 +724,89 @@ mod tests {
             other => panic!("expected a conn object, got {:?}", other),
         }
         assert!(matches!(ws_serve_accept(&[Value::Number(0.0)]), Value::Null));
+    }
+
+    /// The client must surface Binary frames too (remote pty streams raw bytes; some servers frame
+    /// output as Binary). A raw tungstenite server sends one Binary frame; the tish client receives
+    /// it (utf8-lossy) via receiveTimeout.
+    #[test]
+    fn ws_client_receives_binary() {
+        let port: u16 = 18_744;
+        let server = thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                    .await
+                    .unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _ = ws
+                    .send(tokio_tungstenite::tungstenite::Message::Binary(
+                        b"binhello".to_vec().into(),
+                    ))
+                    .await;
+                // Hold the connection open briefly so the client can drain the frame.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            });
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        let url = format!("ws://127.0.0.1:{}/", port);
+        let client = web_socket_client(&[Value::String(url.into())]);
+        let Value::Object(co) = client else {
+            panic!("client connect failed");
+        };
+        let Some(Value::Function(recv_f)) = co.borrow().strings.get("receiveTimeout").cloned() else {
+            panic!("no receiveTimeout");
+        };
+        let got = recv_f.call(&[Value::Number(2000.0)]);
+        let Value::Object(ev) = got else {
+            panic!("expected a binary message, got {:?}", got);
+        };
+        let data = ev
+            .borrow()
+            .strings
+            .get("data")
+            .map(|v| v.to_display_string())
+            .unwrap_or_default();
+        assert_eq!(data, "binhello");
+        let _ = server.join();
+    }
+
+    /// Proves `wss://` is wired to a TLS connector (rustls). Before a TLS feature was enabled,
+    /// connect_async rejected wss at the scheme layer (TlsFeatureNotEnabled) WITHOUT dialing. Now it
+    /// dials TCP then attempts a TLS handshake. Against a plain-TCP listener (no TLS server) the
+    /// handshake can't complete, so the client returns Null — but the listener MUST observe an
+    /// inbound connection, which is only possible if the client got past scheme rejection into a real
+    /// dial. (A live wss happy-path smoke needs network egress / a trusted cert — Part 5 interactive.)
+    #[test]
+    fn ws_client_wss_attempts_tls_handshake() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel::<bool>();
+        let server = thread::spawn(move || {
+            if listener.accept().is_ok() {
+                let _ = tx.send(true);
+            }
+        });
+        let client = web_socket_client(&[
+            Value::String(format!("wss://127.0.0.1:{}/", port).into()),
+            Value::Number(3000.0),
+        ]);
+        assert!(
+            matches!(client, Value::Null),
+            "a plain-TCP server can't complete a TLS handshake → expected Null"
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)),
+            Ok(true),
+            "client must dial TCP for a wss URL (proves the TLS connector is wired)"
+        );
+        let _ = server.join();
     }
 
     #[test]
