@@ -1792,6 +1792,11 @@ pub use net::{
     net_accept, net_close, net_connect, net_listen, net_probe, net_read, net_sleep, net_write,
 };
 
+#[cfg(feature = "encoding")]
+pub mod encoding;
+#[cfg(feature = "encoding")]
+pub use encoding::{base64_decode, base64_encode, base64_url_decode, base64_url_encode};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,

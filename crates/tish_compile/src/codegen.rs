@@ -2001,6 +2001,13 @@ impl Codegen {
                     "sleep" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_sleep(args))"),
                     _ => None,
                 },
+            "tish:encoding" if self.has_feature("encoding") => match export_name {
+                    "base64Encode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_encode(args))"),
+                    "base64Decode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_decode(args))"),
+                    "base64UrlEncode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_encode(args))"),
+                    "base64UrlDecode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_decode(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -2011,6 +2018,7 @@ impl Codegen {
             matches!(
                 name,
                 "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
+                    | "encoding"
             )
         } else {
             self.features.contains(name)
