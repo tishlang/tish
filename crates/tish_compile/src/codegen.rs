@@ -1962,7 +1962,10 @@ impl Codegen {
                     "pid" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_pid(args))"),
                     "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
                     "env" => Some("Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args))); m.insert(Arc::from(\"execCapture\"), Value::native(|args: &[Value]| tish_process_exec_capture(args))); m.insert(Arc::from(\"execFileCapture\"), Value::native(|args: &[Value]| tish_process_exec_file_capture(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); Value::object(m) }"),
+                    // Node-style platform string so `process.platform` reads identically on the JS
+                    // target (Node's real global) and native (this): macos->darwin, windows->win32.
+                    "platform" => Some("Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into())"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args))); m.insert(Arc::from(\"execCapture\"), Value::native(|args: &[Value]| tish_process_exec_capture(args))); m.insert(Arc::from(\"execFileCapture\"), Value::native(|args: &[Value]| tish_process_exec_file_capture(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); m.insert(Arc::from(\"platform\"), Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into())); Value::object(m) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
@@ -3055,6 +3058,9 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln("p.insert(Arc::from(\"env\"), Value::object(env_obj));");
+            // Node-style platform string (macos->darwin, windows->win32) so bare `process.platform`
+            // matches the JS target's Node global and the named `tish:process` export.
+            self.writeln("p.insert(Arc::from(\"platform\"), Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into()));");
             self.writeln("p");
             self.indent -= 1;
             self.writeln("});");
