@@ -1949,6 +1949,16 @@ impl Codegen {
                     "pid" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_pid(args))"),
                     _ => None,
                 },
+            "tish:net" if self.has_feature("net") => match export_name {
+                    "connect" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_connect(args))"),
+                    "read" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_read(args))"),
+                    "write" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_write(args))"),
+                    "close" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_close(args))"),
+                    "listen" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_listen(args))"),
+                    "accept" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_accept(args))"),
+                    "probe" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_probe(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -1958,7 +1968,7 @@ impl Codegen {
         if self.features.contains("full") {
             matches!(
                 name,
-                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty"
+                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
             )
         } else {
             self.features.contains(name)
