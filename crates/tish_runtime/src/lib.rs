@@ -1789,7 +1789,7 @@ pub use process_spawn::{
 pub mod net;
 #[cfg(feature = "net")]
 pub use net::{
-    net_accept, net_close, net_connect, net_listen, net_probe, net_read, net_write,
+    net_accept, net_close, net_connect, net_listen, net_probe, net_read, net_sleep, net_write,
 };
 
 #[cfg(feature = "ws")]

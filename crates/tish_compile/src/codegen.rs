@@ -1957,6 +1957,7 @@ impl Codegen {
                     "listen" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_listen(args))"),
                     "accept" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_accept(args))"),
                     "probe" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_probe(args))"),
+                    "sleep" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_sleep(args))"),
                     _ => None,
                 },
             _ => return None,
