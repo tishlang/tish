@@ -427,6 +427,44 @@ pub fn json_stringify(args: &[Value]) -> Value {
     Value::String(tishlang_core::json_stringify(&v).into())
 }
 
+/// `json::{escape_into, write_json_number}` — the helpers codegen-emitted per-struct JSON serialisers
+/// (`__tish_json_TishStruct_*`, #315) call. The std runtime exposes these under `tishlang_runtime::json`;
+/// the GBA facade must mirror them so a game that uses a typed `interface`/`type` compiles. no_std.
+pub mod json {
+    pub use tishlang_core::write_json_number;
+
+    /// Append the JSON-escaped contents of `s` (no surrounding quotes) to `buf`. Same escape rules as
+    /// the std runtime's `json::escape_into`; kept local (uses `core::fmt::Write` for `\uXXXX`).
+    pub fn escape_into(buf: &mut alloc::string::String, s: &str) {
+        use core::fmt::Write;
+        let bytes = s.as_bytes();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b < 0x20 || b == b'"' || b == b'\\' {
+                if start < i {
+                    buf.push_str(&s[start..i]);
+                }
+                match b {
+                    b'"' => buf.push_str("\\\""),
+                    b'\\' => buf.push_str("\\\\"),
+                    b'\n' => buf.push_str("\\n"),
+                    b'\r' => buf.push_str("\\r"),
+                    b'\t' => buf.push_str("\\t"),
+                    b'\x08' => buf.push_str("\\b"),
+                    b'\x0c' => buf.push_str("\\f"),
+                    _ => {
+                        let _ = write!(buf, "\\u{:04x}", b as u32);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            buf.push_str(&s[start..]);
+        }
+    }
+}
+
 /// Build an `ObjectMap` from an array of key/value pairs. Generated object literals
 /// emit `ObjectMap::from([...])`; hashbrown's `From<[_; N]>` isn't available with a
 /// custom hasher, so the Gba post-pass rewrites those calls to this.

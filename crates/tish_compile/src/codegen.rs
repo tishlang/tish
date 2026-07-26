@@ -6463,7 +6463,8 @@ impl Codegen {
                                         matches!(
                                             t,
                                             RustType::F64 | RustType::Bool | RustType::String
-                                        )
+                                                | RustType::Fixed | RustType::I32
+                                        ) || t.is_narrow_int()
                                     })
                             } else {
                                 None
@@ -9456,6 +9457,17 @@ impl Codegen {
         None
     }
 
+    /// The root variable of a member/index chain (`a.b.c` → `a`, `a[i].b` → `a`, `a` → `a`), or
+    /// `None` when the base isn't a plain identifier (e.g. a call result `f().x`).
+    fn root_ident_of(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Ident { name, .. } => Some(name.as_ref()),
+            Expr::Member { object, .. } => Self::root_ident_of(object),
+            Expr::Index { object, .. } => Self::root_ident_of(object),
+            _ => None,
+        }
+    }
+
     fn collect_assigned_idents_in_expr(expr: &Expr, names: &mut HashSet<String>) {
         match expr {
             Expr::Assign { name, value, .. } => {
@@ -9477,6 +9489,12 @@ impl Codegen {
                 names.insert(name.to_string());
             }
             Expr::MemberAssign { object, value, .. } => {
+                // Mutating a field (`x.f = v`, `a.b.c = v`) mutates the ROOT variable — record it so a
+                // captured struct/object is wrapped mutably; otherwise the native field store lands on
+                // an immutable `let` binding (E0594).
+                if let Some(root) = Self::root_ident_of(object) {
+                    names.insert(root.to_string());
+                }
                 Self::collect_assigned_idents_in_expr(object, names);
                 Self::collect_assigned_idents_in_expr(value, names);
             }
@@ -9486,6 +9504,9 @@ impl Codegen {
                 value,
                 ..
             } => {
+                if let Some(root) = Self::root_ident_of(object) {
+                    names.insert(root.to_string());
+                }
                 Self::collect_assigned_idents_in_expr(object, names);
                 Self::collect_assigned_idents_in_expr(index, names);
                 Self::collect_assigned_idents_in_expr(value, names);
@@ -12623,15 +12644,20 @@ impl Codegen {
                     fields,
                 )
             }
-            // `s.field = v` — a struct-typed local/var.
+            // `s.field = v` — a struct-typed local/var. A captured (refcell-wrapped) struct writes
+            // through `(*s.borrow_mut())` so the field store lands natively on the shared cell instead
+            // of falling to the boxed `set_prop(object_from_pairs(..))` path (which also wouldn't
+            // persist — it built a throwaway object).
             Expr::Ident { name, .. } => {
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    return Ok(None);
-                }
                 let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
                     return Ok(None);
                 };
-                (Self::escape_ident(name.as_ref()).into_owned(), fields)
+                let place = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    format!("(*{}.borrow_mut())", Self::escape_ident(name.as_ref()))
+                } else {
+                    Self::escape_ident(name.as_ref()).into_owned()
+                };
+                (place, fields)
             }
             _ => return Ok(None),
         };
@@ -12642,8 +12668,15 @@ impl Codegen {
         let field_ty = field_ty.clone();
         let field = crate::types::field_ident(prop);
         let coerced = self.emit_coerced_native(value, &field_ty)?;
+        // Bind the RHS to a temp first so a `borrow_mut()` place can't alias a `borrow()` in the RHS
+        // (`s.a = s.b + 1`) — evaluate the read before taking the mutable borrow.
+        let via_temp = place.contains(".borrow_mut()");
         if side_effect_only {
-            Ok(Some(format!("{}.{} = {}", place, field, coerced)))
+            if via_temp {
+                Ok(Some(format!("{{ let _v = {}; {}.{} = _v; }}", coerced, place, field)))
+            } else {
+                Ok(Some(format!("{}.{} = {}", place, field, coerced)))
+            }
         } else {
             // Assignment-as-expression yields the assigned value (JS `a.b = c` ⇒ c). Bind once (the
             // RHS may have effects and the place may re-evaluate an index), store, then hand back a
