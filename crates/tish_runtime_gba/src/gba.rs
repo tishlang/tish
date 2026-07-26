@@ -118,6 +118,59 @@ pub fn asset_bg(handle: i32) -> Option<BgAsset> {
     ASSET_BGS.with(|c| c.borrow().get(handle as usize).copied())
 }
 
+/// Registered fonts (`font<N>:` imports) — a compile-time-baked `Font`. All `font<N>:` schemes share
+/// this one arena via an IDENTICAL registration call (no baked-in size — the renderer sizes sprites
+/// from the font's own `line_height`), so their handles number correctly across sizes. tish-agb's
+/// `text_draw` looks them up by handle.
+static ASSET_FONTS: SingleCore<RefCell<Vec<&'static agb::display::font::Font>>> =
+    SingleCore::new(RefCell::new(Vec::new()));
+
+/// Register a baked font, returning its i32 handle.
+pub fn __asset_register_font(font: &'static agb::display::font::Font) -> i32 {
+    ASSET_FONTS.with(|c| {
+        let mut v = c.borrow_mut();
+        let idx = v.len() as i32;
+        v.push(font);
+        idx
+    })
+}
+
+/// Look up a registered font by handle. `None` if out of range.
+pub fn asset_font(handle: i32) -> Option<&'static agb::display::font::Font> {
+    ASSET_FONTS.with(|c| c.borrow().get(handle as usize).copied())
+}
+
+/// The single global emoji fallback atlas (`emoji:` import): the SerenityOS colour sprite frames plus
+/// a codepoint→frame table sorted by codepoint. There is at most one — it is a fallback shared by
+/// every font, so any font lacking a glyph for an emoji codepoint renders the matching colour sprite
+/// instead of a tofu box. tish-agb's text renderer reads it via [`emoji_sprite`].
+type EmojiAtlas = (
+    &'static [agb::display::object::Sprite],
+    &'static [(u32, u16)],
+);
+
+static ASSET_EMOJI: SingleCore<RefCell<Option<EmojiAtlas>>> = SingleCore::new(RefCell::new(None));
+
+/// Register the emoji atlas (frames + codepoint→frame table). Called once by the generated `agb_main`
+/// for the `emoji:` import; the handle is unused (the atlas is a global fallback, not addressed by id).
+pub fn __asset_register_emoji(
+    sprites: &'static [agb::display::object::Sprite],
+    table: &'static [(u32, u16)],
+) -> i32 {
+    ASSET_EMOJI.with(|c| *c.borrow_mut() = Some((sprites, table)));
+    0
+}
+
+/// The colour sprite frame for an emoji codepoint, if an emoji atlas is registered and contains it.
+/// `None` ⇒ no emoji import, or this codepoint wasn't baked ⇒ the caller falls back to the font glyph.
+pub fn emoji_sprite(cp: u32) -> Option<&'static agb::display::object::Sprite> {
+    ASSET_EMOJI.with(|c| {
+        let (sprites, table) = (*c.borrow())?;
+        let i = table.binary_search_by_key(&cp, |&(c, _)| c).ok()?;
+        sprites.get(table[i].1 as usize)
+    })
+}
+
 /// Registered maps (`map:` imports) — the raw ROM bytes of a baked map binary. Kept in ROM
 /// (`include_bytes!`), never copied to the tish heap, so large maps don't blow EWRAM.
 static ASSET_MAPS: SingleCore<RefCell<Vec<&'static [u8]>>> =
