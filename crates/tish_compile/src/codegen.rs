@@ -3262,6 +3262,15 @@ impl Codegen {
                 return Ok(code);
             }
         }
+        // #558: `arr[i].field = v` / `s.field = v` on a typed struct → a native element store, not a
+        // discarded set_prop on a copy. Side-effect position (statement), so no value is produced.
+        if let Expr::MemberAssign { object, prop, value, .. } = expr {
+            if let Some(code) =
+                self.try_emit_native_struct_field_assign(object, prop.as_ref(), value, true)?
+            {
+                return Ok(code);
+            }
+        }
         match expr {
             Expr::Assign { name, value, .. } => {
                 if self.native_numeric_globals.contains_key(name.as_ref()) {
@@ -8561,6 +8570,13 @@ impl Codegen {
                 format!("{{ if {} {{ {} }} else {{ {} }} }}", cond, assign_and_return, else_expr)
             }
             Expr::MemberAssign { object, prop, value, .. } => {
+                // #558: a native struct-element / struct-local field store (yielding the assigned
+                // value) instead of set_prop on a throwaway copy that discards the write.
+                if let Some(code) =
+                    self.try_emit_native_struct_field_assign(object, prop.as_ref(), value, false)?
+                {
+                    return Ok(code);
+                }
                 let obj = self.emit_expr(object)?;
                 let val = self.emit_expr(value)?;
                 format!(
@@ -12259,41 +12275,7 @@ impl Codegen {
         };
         let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
         let in_bounds = self.index_in_bounds(index, name.as_ref());
-        let idx_usize = if let Expr::Ident { name: idx_name, .. } = index {
-            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
-                uv.clone()
-            } else {
-                let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-                    format!("({}) as usize", idx_code)
-                } else {
-                    let iv = if idx_ty.is_native() {
-                        idx_ty.to_value_expr(&idx_code)
-                    } else {
-                        idx_code
-                    };
-                    format!(
-                        "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                        iv
-                    )
-                }
-            }
-        } else {
-            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-            if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-                format!("({}) as usize", idx_code)
-            } else {
-                let iv = if idx_ty.is_native() {
-                    idx_ty.to_value_expr(&idx_code)
-                } else {
-                    idx_code
-                };
-                format!(
-                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                    iv
-                )
-            }
-        };
+        let idx_usize = self.emit_index_usize(index)?;
         let native_val = if *elem_type == RustType::I32 {
             if let Expr::Binary {
                 left,
@@ -12367,6 +12349,104 @@ impl Codegen {
             _ => format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val),
         };
         Ok(Some(assign))
+    }
+
+    /// Emit an array/element index expression as a Rust `usize`. A substituted loop counter reuses
+    /// its `usize` binding; a numeric index casts (`(idx) as usize`); anything else unwraps a
+    /// `Value::Number` at runtime. Shared by the native `Vec` index-assign and struct-field-assign
+    /// lowerings so they agree on index handling.
+    fn emit_index_usize(&mut self, index: &Expr) -> Result<String, CompileError> {
+        if let Expr::Ident { name: idx_name, .. } = index {
+            if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
+                return Ok(uv.clone());
+            }
+        }
+        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
+        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
+            Ok(format!("({}) as usize", idx_code))
+        } else {
+            let iv = if idx_ty.is_native() {
+                idx_ty.to_value_expr(&idx_code)
+            } else {
+                idx_code
+            };
+            Ok(format!(
+                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
+                iv
+            ))
+        }
+    }
+
+    /// tishlang/tish#558 — `place.field = value` where `place` is an addressable STRUCT: an element
+    /// of a typed struct `Vec` (`arr[i].field`) or a struct-typed local (`s.field`). Lowers to a
+    /// NATIVE field store into the real element/local, coercing `value` to the field's type. Without
+    /// this, the generic member-assign path emits `set_prop` on a throwaway `Value::object_from_pairs`
+    /// COPY of the element — mutating the copy and silently discarding the write. Returns `None` for
+    /// anything that isn't a known struct place (the caller falls back to the dynamic `set_prop`).
+    fn try_emit_native_struct_field_assign(
+        &mut self,
+        object: &Expr,
+        prop: &str,
+        value: &Expr,
+        side_effect_only: bool,
+    ) -> Result<Option<String>, CompileError> {
+        let (place, fields) = match object {
+            // `arr[i].field = v` — a typed struct Vec element.
+            Expr::Index { object: io, index, .. } => {
+                let Expr::Ident { name, .. } = io.as_ref() else {
+                    return Ok(None);
+                };
+                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    return Ok(None);
+                }
+                let RustType::Vec(elem) = self.type_context.get_type(name.as_ref()) else {
+                    return Ok(None);
+                };
+                let RustType::Named { fields, .. } = elem.as_ref() else {
+                    return Ok(None);
+                };
+                let fields = fields.clone();
+                let idx_usize = self.emit_index_usize(index)?;
+                (
+                    format!("{}[{}]", Self::escape_ident(name.as_ref()), idx_usize),
+                    fields,
+                )
+            }
+            // `s.field = v` — a struct-typed local/var.
+            Expr::Ident { name, .. } => {
+                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    return Ok(None);
+                }
+                let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
+                    return Ok(None);
+                };
+                (Self::escape_ident(name.as_ref()).into_owned(), fields)
+            }
+            _ => return Ok(None),
+        };
+        // The property must be a real field of the struct; its type drives the RHS coercion.
+        let Some((_, field_ty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
+            return Ok(None);
+        };
+        let field_ty = field_ty.clone();
+        let field = crate::types::field_ident(prop);
+        let coerced = self.emit_coerced_native(value, &field_ty)?;
+        if side_effect_only {
+            Ok(Some(format!("{}.{} = {}", place, field, coerced)))
+        } else {
+            // Assignment-as-expression yields the assigned value (JS `a.b = c` ⇒ c). Bind once (the
+            // RHS may have effects and the place may re-evaluate an index), store, then hand back a
+            // `Value` of it — box a native field, pass a `Value` field through.
+            let ret = if field_ty.is_native() {
+                field_ty.to_value_expr("_v")
+            } else {
+                "_v".to_string()
+            };
+            Ok(Some(format!(
+                "{{ let _v = {}; {}.{} = _v.clone(); {} }}",
+                coerced, place, field, ret
+            )))
+        }
     }
 
     /// Emit `value` as a native expression of type `target_ty`, coercing without a

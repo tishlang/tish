@@ -1,0 +1,22 @@
+// tishlang/tish#558 — typed `Vec<struct>` element field writes must be NATIVE stores into the Vec,
+// not a `set_prop` on a throwaway `Value::object_from_pairs([field.clone()...])` copy (which discards
+// the write). Covers a module-level typed struct array and a local one; both read the field back so a
+// discarded write is observable.
+
+type P = { x: i32, y: i32 }
+
+// (1) module-level typed struct array
+let arr: P[] = []
+arr.push({ x: 10, y: 0 })
+arr[0].x = 200
+
+// (2) local typed struct array inside a function
+function localWrite() {
+  let es: P[] = []
+  es.push({ x: 1, y: 2 })
+  es[0].x = 99
+  console.log(es[0].x)  // 99 if the write took effect, 1 if discarded
+}
+
+console.log(arr[0].x)   // 200 if the write took effect, 10 if discarded
+localWrite()
