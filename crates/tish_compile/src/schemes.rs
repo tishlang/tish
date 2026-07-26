@@ -235,12 +235,14 @@ pub fn is_scheme_import(spec: &str) -> bool {
     with_active(|r| r.matches(spec).is_some())
 }
 
-/// Substitute `{path}` (the file as a Rust string literal) and `{mod}` (the generated module ident)
-/// in a template.
-pub fn render_template(template: &str, abspath: &str, module_ident: &str) -> String {
+/// Substitute `{path}` (the file as a Rust string literal), `{mod}` (the generated module ident), and
+/// `{charset}` (the program's used non-ASCII characters as a Rust string literal — for schemes that
+/// bake only the glyphs a program actually uses, e.g. `font<N>:`) in a template.
+pub fn render_template(template: &str, abspath: &str, module_ident: &str, charset: &str) -> String {
     template
         .replace("{path}", &format!("{:?}", abspath))
         .replace("{mod}", module_ident)
+        .replace("{charset}", &format!("{:?}", charset))
 }
 
 #[cfg(test)]

@@ -539,6 +539,8 @@ pub use tishlang_builtins::collections::{
     map_constructor_value as tish_map_constructor, map_get, map_has, map_set, map_values,
     set_constructor_value as tish_set_constructor,
 };
+// Array mutators (portable) — `.push()` / `.pop()` lower to these `array_*` names.
+pub use tishlang_builtins::array::{pop as array_pop, push as array_push};
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_builtins::typedarrays::{
     float32_array_constructor_value as tish_float32_array_constructor,
