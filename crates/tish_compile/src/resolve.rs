@@ -22,6 +22,11 @@ pub struct ResolvedNativeModule {
     pub export_fn: String,
     /// When false, omit `path = …` in the generated Cargo.toml (crate comes from `tish.rustDependencies` only).
     pub use_path_dependency: bool,
+    /// The crate's own SOURCE directory (where its `Cargo.toml`/`src` live), when known — distinct from
+    /// `crate_path` (the importing project root). Used to find a `tish.d.tish` the crate ships (typed
+    /// externs). For a `cargo:` dep it's the resolved `rustDependencies` path; for a `tish.module`
+    /// package it's the package dir; `None` for registry deps with no local path.
+    pub source_dir: Option<PathBuf>,
 }
 
 /// How codegen links a native import to Rust (`generateNativeWrapper` for `tish:*`; `cargo:*` always generated).
@@ -395,6 +400,17 @@ fn resolve_cargo_native_module(
     let crate_path = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
+    // The crate's own source dir, from a `rustDependencies` `path` (so we can find its `tish.d.tish`).
+    let source_dir = rust_deps
+        .get(&dep_key)
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("path"))
+        .and_then(|p| p.as_str())
+        .map(|raw| {
+            let p = Path::new(raw);
+            let resolved = if p.is_absolute() { p.to_path_buf() } else { project_root.join(p) };
+            resolved.canonicalize().unwrap_or(resolved)
+        });
     Ok(ResolvedNativeModule {
         spec: spec.to_string(),
         package_name: dep_key.clone(),
@@ -402,6 +418,7 @@ fn resolve_cargo_native_module(
         crate_path,
         export_fn,
         use_path_dependency: false,
+        source_dir,
     })
 }
 
@@ -454,9 +471,11 @@ fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNati
         spec: spec.to_string(),
         package_name: raw_crate.clone(),
         crate_name: raw_crate.replace('-', "_"),
-        crate_path,
+        crate_path: crate_path.clone(),
         export_fn,
         use_path_dependency: true,
+        // A tish.module package IS its own source dir — that's where any `tish.d.tish` lives.
+        source_dir: Some(crate_path),
     })
 }
 

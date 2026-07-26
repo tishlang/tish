@@ -603,7 +603,7 @@ pub fn compile_project_full_emit(
         message: e,
         span: None,
     })?;
-    let merged = resolve::merge_modules(modules).map_err(|e| CompileError {
+    let mut merged = resolve::merge_modules(modules).map_err(|e| CompileError {
         message: e,
         span: None,
     })?;
@@ -617,6 +617,24 @@ pub fn compile_project_full_emit(
             message: e,
             span: None,
         })?;
+    }
+    // Typed externs: a native module may ship a `tish.d.tish` beside its crate declaring the typed
+    // signatures of its exports (`declare fn set_body(e: i32, …): void`). Inject those ambient
+    // declarations so codegen can emit direct `crate::name_typed(..)` calls — the game never writes
+    // them. Only `declare fn` statements are taken; anything else in the file is ignored. Missing or
+    // unparseable files are silently skipped (the module simply keeps the boxed call path).
+    for m in &native_modules {
+        let Some(dir) = &m.source_dir else { continue };
+        let dts = dir.join("tish.d.tish");
+        if let Ok(src) = std::fs::read_to_string(&dts) {
+            if let Ok(decls) = tishlang_parser::parse(&src) {
+                for st in decls.statements {
+                    if matches!(st, Statement::DeclareFun { .. }) {
+                        merged.program.statements.push(st);
+                    }
+                }
+            }
+        }
     }
     let mut native_build =
         resolve::compute_native_build_artifacts(&merged.program, root, &native_modules).map_err(
