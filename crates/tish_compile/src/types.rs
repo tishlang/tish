@@ -544,11 +544,19 @@ impl RustType {
                 // e.g. an assignment-as-expression `{ let _v = obj; lhs = <coerce _v>; _v }` reuses
                 // `_v` for its value (tishlang/tish#486). `&(expr)` evaluates the source once and
                 // (for a temporary) lifetime-extends it to this block, so it's still single-eval.
+                //
+                // FAST PATH (GBA/portable): if the source is a BY-REFERENCE boxed struct of exactly this
+                // type (`Value::Struct`, e.g. from a `Value::from_struct` return), `downcast_struct`
+                // clones it out directly — no per-field `get_prop`. Off-portable there is no struct
+                // variant, so `downcast_struct` is a `None` constant the optimiser removes, leaving the
+                // rebuild path byte-identical to before.
+                let struct_ident = named_struct_ident(name);
                 format!(
-                    "{{ let _src = &({}); {} {{ {} }} }}",
-                    value_expr,
-                    named_struct_ident(name),
-                    field_assigns
+                    "{{ let _src = &({}); match _src.downcast_struct::<{}>() {{ \
+                        Some(_s) => _s, \
+                        None => {} {{ {} }} \
+                    }} }}",
+                    value_expr, struct_ident, struct_ident, field_assigns
                 )
             }
             RustType::ShapeUnion { .. } => {
@@ -613,34 +621,21 @@ impl RustType {
                     native_expr, inner_to_value
                 )
             }
-            RustType::Named { fields, .. } => {
-                // Build the boxed Value with an ORDERED PropMap via `object_from_pairs` (no
-                // intermediate `AHashMap`), so key order == field-declaration order == JS
-                // insertion order. The old `ObjectMap::default()` (`AHashMap`) + insert path
-                // scrambled key order NON-DETERMINISTICALLY per run (ahash seed) — a shipped
-                // `JSON.stringify` / `Object.keys` / `for..in` divergence from node whenever a
-                // native struct crosses back into untyped Tish. This boundary is paid only on
-                // that crossing (JSON.stringify, calling a Value::Function, etc.); direct
-                // Rust-to-Rust paths between two Named values stay as plain struct moves.
-                let pairs = fields
-                    .iter()
-                    .map(|(k, ty)| {
-                        let access = format!("{}.{}", native_expr, field_ident(k));
-                        // A `Value`-typed field (e.g. from a generic struct `Box<T>`) accessed
-                        // behind `&self` must be cloned — it isn't `Copy` and `to_value_expr(Value)`
-                        // is identity. Native field types clone/copy inside their own `to_value_expr`.
-                        let v_expr = if matches!(ty, RustType::Value) {
-                            format!("{}.clone()", access)
-                        } else {
-                            ty.to_value_expr(&access)
-                        };
-                        format!("(::std::sync::Arc::from({:?}), {})", k.as_ref(), v_expr)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // `object_from_pairs::<N>` builds the `PropMap` in one ordered pass (N = field
-                // count, a codegen-time constant) — no AHashMap, so key order is preserved.
-                format!("Value::object_from_pairs([{}])", pairs)
+            RustType::Named { .. } => {
+                // Box the struct BY REFERENCE via `Value::from_struct` (portable/GBA keeps it as a
+                // cheap `Value::Struct` — one `Rc`, no per-field string keys / hashmap; every other
+                // native backend falls back to the ordered `object_from_pairs` boundary below, so
+                // behaviour is byte-identical off-GBA). Property access on the boxed struct dispatches
+                // through the generated `impl TishStruct` (small match, no hash). The old eager
+                // `object_from_pairs` now lives in `TishStruct::tish_to_object` (see
+                // [`named_struct_to_object_expr`]) — reached only when the struct genuinely materialises
+                // (JSON.stringify, spread, `Object.keys`) or on the non-portable fallback. `.clone()`
+                // because the struct is accessed behind `&self` / a `borrow()`; codegen already emits a
+                // deref place here (e.g. `(*gs.borrow())`), matching the historical behaviour.
+                format!(
+                    "tishlang_runtime::Value::from_struct(({}).clone())",
+                    native_expr
+                )
             }
             RustType::ShapeUnion { name, variants } => {
                 // union → boxed Value::Object: one match arm per variant, delegating to that
@@ -682,6 +677,30 @@ fn tuple_text(parts: &[String]) -> String {
 
 pub fn named_struct_ident(tish_name: &str) -> String {
     format!("TishStruct_{}", tish_name)
+}
+
+/// Build the `Value::object_from_pairs([...])` that materialises a Named struct at `native_expr` into
+/// an ORDERED boxed object (field-declaration = JS insertion order — deterministic, unlike an AHashMap
+/// insert). This was the body of `to_value_expr`'s `Named` arm; it now backs the generated
+/// `TishStruct::tish_to_object` (the JSON / spread / `Object.keys` materialisation, and the non-portable
+/// `Value::from_struct` fallback), while the live boxing path emits the cheap by-ref `Value::from_struct`.
+pub fn named_struct_to_object_expr(fields: &[(Arc<str>, RustType)], native_expr: &str) -> String {
+    let pairs = fields
+        .iter()
+        .map(|(k, ty)| {
+            let access = format!("{}.{}", native_expr, field_ident(k));
+            // A `Value`-typed field must be cloned (not `Copy`, and `to_value_expr(Value)` is identity);
+            // native field types clone/copy inside their own `to_value_expr`.
+            let v_expr = if matches!(ty, RustType::Value) {
+                format!("{}.clone()", access)
+            } else {
+                ty.to_value_expr(&access)
+            };
+            format!("(::std::sync::Arc::from({:?}), {})", k.as_ref(), v_expr)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Value::object_from_pairs([{}])", pairs)
 }
 
 /// #179 Stage B: map a shape-union alias to the generated Rust enum identifier.

@@ -239,6 +239,14 @@ fn json_stringify_into_guarded(buf: &mut String, value: &Value, ancestors: &mut 
         }
         #[cfg(feature = "regex")]
         Value::RegExp(_) => buf.push_str("null"),
+        // A boxed typed struct serialises like the object it is: materialise once and recurse. (This is
+        // the generic path; codegen also has a direct `__tish_json_TishStruct_*` fast path that never
+        // boxes to a struct-Value in the first place, used when the static type is known.)
+        #[cfg(feature = "portable")]
+        Value::Struct(s) => {
+            let obj = s.borrow().tish_to_object();
+            json_stringify_into_guarded(buf, &obj, ancestors);
+        }
     }
 }
 

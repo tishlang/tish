@@ -16,6 +16,7 @@ pub use tishlang_core::ObjectMap;
 // pass) instead of materializing an intermediate `AHashMap` and rebuilding from it.
 pub use tishlang_core::{ObjectData, PropMap};
 pub use tishlang_core::Value;
+pub use tishlang_core::TishStruct;
 pub use tishlang_core::NumArrayBacking;
 pub use tishlang_core::ArcStr;
 /// Used by native codegen for `f()` / `obj()` dispatch (`Value::Function` or `__call` on objects).

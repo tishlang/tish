@@ -17,8 +17,8 @@ use alloc::vec::Vec;
 // ── Core value vocabulary (single source of truth in tishlang_core) ──────────
 pub use tishlang_core::{
     js_number_to_string_into, to_int32, to_int32_value, to_number_value, to_uint32,
-    to_uint32_value, ArcStr, NumArrayBacking, ObjectData, ObjectMap, PropMap, Value, VmReadGuard,
-    VmRef, VmWriteGuard,
+    to_uint32_value, ArcStr, NumArrayBacking, ObjectData, ObjectMap, PropMap, TishStruct, Value,
+    VmReadGuard, VmRef, VmWriteGuard,
 };
 /// `Arc` on GBA is `Rc` (single-core). Emitted code writes `Arc::from(..)`.
 pub use tishlang_core::Arc;
@@ -175,6 +175,9 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             }
         }
         Value::Opaque(o) => o.get_method(key).map(Value::Function).unwrap_or(Value::Null),
+        // A boxed typed struct: read the field natively (a small match, no hashmap). `size`/method
+        // sugar isn't relevant here — structs are plain field bags.
+        Value::Struct(s) => s.borrow().tish_get(key),
         Value::Null => {
             tishlang_core::set_pending_throw(tishlang_core::cannot_read_property_error(key));
             Value::Null
@@ -222,6 +225,13 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             _ => Value::Null,
         },
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
+        Value::Struct(s) => {
+            let key = match index {
+                Value::String(k) => k.to_string(),
+                other => other.to_js_string(),
+            };
+            s.borrow().tish_get(&key)
+        }
         Value::Null => {
             let key = match index {
                 Value::String(s) => s.to_string(),
@@ -320,6 +330,10 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
             } else {
                 arr_mut.truncate(len);
             }
+            val
+        }
+        Value::Struct(s) => {
+            s.borrow_mut().tish_set(key, val.clone());
             val
         }
         _ => {

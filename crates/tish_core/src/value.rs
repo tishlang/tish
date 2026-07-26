@@ -165,6 +165,31 @@ pub trait TishOpaque {
     fn as_any(&self) -> &dyn core::any::Any;
 }
 
+/// A typed native struct (from an `interface` / typed object literal in native codegen) carried inside
+/// a [`Value::Struct`] WITHOUT serialising to a hashmap object. Each generated `TishStruct_*` implements
+/// it: a boxed function that returns/passes a typed struct keeps it by reference, property access
+/// dispatches here (a small `match` on the field name — no string hash, no allocation), and it
+/// materialises to a real `Value::Object` only when it crosses into genuinely dynamic territory
+/// (`JSON.stringify`, spread, `Object.keys`). No `Send + Sync` bound: the `Value::Struct` variant is
+/// `cfg(portable)` and `portable` excludes `send-values` (they are mutually exclusive), so the ref is
+/// single-threaded `Rc` — mirroring the single-threaded [`TishOpaque`].
+pub trait TishStruct {
+    /// Read a field as a boxed `Value` (`Null` if `key` is not a field). Backs `get_prop`.
+    fn tish_get(&self, key: &str) -> Value;
+    /// Write a field from a boxed `Value` (no-op if `key` is not a field). Backs `set_prop`.
+    fn tish_set(&mut self, key: &str, value: Value);
+    /// Materialise an ordered `Value::Object` copy (field-declaration order, JS insertion order). Used
+    /// for JSON / display / `Object`-interop, and as the non-portable `Value::from_struct` fallback so
+    /// off-GBA backends behave EXACTLY as the historical `object_from_pairs` boundary did.
+    fn tish_to_object(&self) -> Value;
+    /// `typeof` result — always "object".
+    fn tish_type_name(&self) -> &'static str {
+        "object"
+    }
+    /// Downcast hook — recover the concrete `TishStruct_*` (e.g. for a future typed fast path).
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
 /// Trait for Promise-like values that can be awaited (block until settled).
 /// Implemented by the runtime for native compile; interpreter uses its own Promise.
 pub trait TishPromise: Send + Sync {
@@ -467,7 +492,22 @@ pub enum Value {
     Promise(Arc<dyn TishPromise>),
     /// Opaque handle to a native Rust type (e.g. Polars DataFrame).
     Opaque(Arc<dyn TishOpaque>),
+    /// A typed native struct carried BY REFERENCE (portable / GBA native codegen). Lets a boxed
+    /// function return or pass a typed struct without serialising it to a hashmap `Object` —
+    /// property access dispatches through [`TishStruct`] (a small match, no hash lookup / alloc), and
+    /// it materialises to an `Object` only on JSON / spread / `Object.keys`. Built via
+    /// [`Value::from_struct`]. Portable-only: the ref is a single-threaded `Rc<RefCell<dyn …>>` and
+    /// `portable` excludes `send-values`, so this never violates `Send` (which off-portable `Value`
+    /// may need). A fat pointer is 16 B, so the 24 B `Value` size guard still holds.
+    #[cfg(feature = "portable")]
+    Struct(StructRef),
 }
+
+/// Reference to a boxed typed struct: `Rc<RefCell<dyn TishStruct>>`. Portable-only (see [`TishStruct`]
+/// / [`Value::Struct`]). `RefCell` is OUTSIDE the trait object so `set_prop` can borrow it mutably; the
+/// `Rc<RefCell<Concrete>> → Rc<RefCell<dyn TishStruct>>` unsizing is a stable coercion (no nightly).
+#[cfg(feature = "portable")]
+pub type StructRef = alloc::rc::Rc<core::cell::RefCell<dyn TishStruct>>;
 
 // Size guard. `Value` is 24 bytes: `String` is thin (`ArcStr`, 8B), but `Function`/`Promise`/`Opaque`
 // are fat `Arc<dyn …>` (data+vtable, 16B) ⇒ 16B payload + discriminant = 24.
@@ -513,6 +553,8 @@ pub enum ValueTag {
     RegExp,
     Promise,
     Opaque,
+    #[cfg(feature = "portable")]
+    Struct,
 }
 
 /// Borrowed view of a [`Value`]'s payload, mirroring the enum variants. Lets call sites
@@ -533,6 +575,8 @@ pub enum ValueRef<'a> {
     RegExp(&'a VmRef<TishRegExp>),
     Promise(&'a Arc<dyn TishPromise>),
     Opaque(&'a Arc<dyn TishOpaque>),
+    #[cfg(feature = "portable")]
+    Struct(&'a StructRef),
 }
 
 impl Value {
@@ -578,6 +622,8 @@ impl Value {
             Value::RegExp(r) => ValueRef::RegExp(r),
             Value::Promise(p) => ValueRef::Promise(p),
             Value::Opaque(o) => ValueRef::Opaque(o),
+            #[cfg(feature = "portable")]
+            Value::Struct(s) => ValueRef::Struct(s),
         }
     }
 
@@ -598,6 +644,8 @@ impl Value {
             Value::RegExp(_) => ValueTag::RegExp,
             Value::Promise(_) => ValueTag::Promise,
             Value::Opaque(_) => ValueTag::Opaque,
+            #[cfg(feature = "portable")]
+            Value::Struct(_) => ValueTag::Struct,
         }
     }
 
@@ -1256,6 +1304,8 @@ impl core::fmt::Debug for Value {
             ),
             Value::Promise(_) => write!(f, "Promise"),
             Value::Opaque(o) => write!(f, "{}(opaque)", o.type_name()),
+            #[cfg(feature = "portable")]
+            Value::Struct(s) => write!(f, "Struct({})", s.borrow().tish_type_name()),
         }
     }
 }
@@ -1466,6 +1516,9 @@ impl Value {
             Value::Function(_) => "[Function]".to_string(),
             Value::Promise(_) => "[object Promise]".to_string(),
             Value::Opaque(o) => format!("[object {}]", o.type_name()),
+            // Display a boxed struct like the object it is (materialise once, then reuse the Object path).
+            #[cfg(feature = "portable")]
+            Value::Struct(s) => s.borrow().tish_to_object().to_display_string_guarded(ancestors),
             #[cfg(feature = "regex")]
             Value::RegExp(re) => {
                 let re = re.borrow();
@@ -1517,6 +1570,8 @@ impl Value {
                 .collect::<Vec<_>>()
                 .join(","),
             Value::Object(_) => "[object Object]".to_string(),
+            #[cfg(feature = "portable")]
+            Value::Struct(_) => "[object Object]".to_string(),
             // ECMAScript ToString of a number (drops `-0`'s sign), distinct from the inspect form
             // that `to_display_string` would give for `-0`. (#247)
             Value::Number(n) => js_number_to_string(*n),
@@ -1561,6 +1616,10 @@ impl Value {
             (Value::Promise(a), Value::Promise(b)) => Arc::ptr_eq(a, b),
             (Value::Opaque(a), Value::Opaque(b)) => Arc::ptr_eq(a, b),
             (Value::Symbol(a), Value::Symbol(b)) => Arc::ptr_eq(a, b),
+            // Struct-Value identity is `Rc` pointer equality, exactly like `Object` — two distinct
+            // boxings compare unequal, but a struct aliased through one `Value` is `=== ` itself.
+            #[cfg(feature = "portable")]
+            (Value::Struct(a), Value::Struct(b)) => alloc::rc::Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -1611,6 +1670,45 @@ impl Value {
             symbols: None,
             frozen: false,
         }))
+    }
+
+    /// Box a typed native struct (a generated `TishStruct_*`). On portable (GBA) it is kept BY
+    /// REFERENCE as a cheap [`Value::Struct`] — one `Rc` allocation, no per-field string keys / hashmap;
+    /// property access later dispatches through [`TishStruct`]. On every other backend it serialises to
+    /// an ordered `Value::Object` (via [`TishStruct::tish_to_object`]) — byte-identical to the historical
+    /// `object_from_pairs` boundary, so off-GBA behaviour is unchanged. Codegen's struct-to-`Value`
+    /// boxing emits a single `Value::from_struct(..)` call for all native targets.
+    #[cfg(feature = "portable")]
+    #[inline]
+    pub fn from_struct<T: TishStruct + 'static>(v: T) -> Value {
+        Value::Struct(alloc::rc::Rc::new(core::cell::RefCell::new(v)))
+    }
+    /// See the portable variant above — off-GBA this is exactly the old `object_from_pairs` boundary.
+    #[cfg(not(feature = "portable"))]
+    #[inline]
+    pub fn from_struct<T: TishStruct>(v: T) -> Value {
+        v.tish_to_object()
+    }
+
+    /// If this value is a by-reference boxed struct of concrete type `T` (a `Value::Struct`), return a
+    /// CLONE of it — the native fast path for `let x: T = <boxed struct return>`, so subsequent field
+    /// reads are plain Rust loads instead of `get_prop`. Portable only: off-GBA there is no `Value::Struct`
+    /// variant, so this is always `None` and codegen's `from_value_expr` falls back to the field-by-field
+    /// `get_prop` rebuild (which also handles a genuine `Value::Object`). Returns `None` for any non-struct
+    /// value or a struct of a different concrete type.
+    #[cfg(feature = "portable")]
+    #[inline]
+    pub fn downcast_struct<T: TishStruct + Clone + 'static>(&self) -> Option<T> {
+        match self {
+            Value::Struct(s) => s.borrow().as_any().downcast_ref::<T>().cloned(),
+            _ => None,
+        }
+    }
+    /// See the portable variant — off-GBA there is no struct variant, so always `None`.
+    #[cfg(not(feature = "portable"))]
+    #[inline]
+    pub fn downcast_struct<T: TishStruct + Clone + 'static>(&self) -> Option<T> {
+        None
     }
 
     /// Create an empty array Value.
@@ -1700,6 +1798,8 @@ impl Value {
             Value::Promise(_) => "object",
             Value::Opaque(o) => o.type_name(),
             Value::Symbol(_) => "symbol",
+            #[cfg(feature = "portable")]
+            Value::Struct(_) => "object",
         }
     }
 

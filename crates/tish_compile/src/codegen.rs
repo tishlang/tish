@@ -1021,6 +1021,10 @@ pub(crate) struct Codegen {
     /// Typed native imports (`declare fun` + a native import): tish name -> its typed signature.
     /// A matching call emits a DIRECT `<crate>::name_typed(..)` instead of a boxed `value_call`.
     extern_fns: std::collections::HashMap<String, ExternSig>,
+    /// User tish functions whose declared return type is a native STRUCT (`function f(): Iface`).
+    /// A call in a typed context coerces the boxed result to the native struct (a `Value::Struct`
+    /// downcast on GBA), so `f().field` reads are native instead of `get_prop`. Name -> `RustType::Named`.
+    user_fn_returns: std::collections::HashMap<String, crate::types::RustType>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -1289,6 +1293,7 @@ impl Codegen {
             features,
             native_module_init,
             extern_fns: std::collections::HashMap::new(),
+            user_fn_returns: std::collections::HashMap::new(),
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
@@ -1672,6 +1677,11 @@ impl Codegen {
                     ));
                 }
                 self.write("}\n\n");
+                // A `TishStruct` impl so this struct can be boxed BY REFERENCE into a `Value`
+                // (`Value::from_struct` → `Value::Struct` on GBA) instead of serialised to a hashmap
+                // object — property access on the boxed value then dispatches here (a small match,
+                // no hash / alloc). See `types::to_value_expr` `Named` arm.
+                self.emit_struct_tish_impl(&struct_name, fields);
                 // #315: emit a direct JSON serializer for this struct when every field is
                 // JSON-simple. Emitted for each eligible alias (unused ones are covered by
                 // the generated crate's `#![allow(unused)]`); the JSON.stringify intercept
@@ -1695,6 +1705,7 @@ impl Codegen {
                         ));
                     }
                     self.write("}\n\n");
+                    self.emit_struct_tish_impl(&vstruct, vfields);
                 }
                 let enum_ident = crate::types::shape_union_enum_ident(uname);
                 self.write("#[derive(Clone, Debug)]\n");
@@ -1719,6 +1730,68 @@ impl Codegen {
         if emitted_any {
             self.write("\n");
         }
+    }
+
+    /// Emit `impl tishlang_runtime::TishStruct for TishStruct_<name>` so a typed struct can be boxed
+    /// BY REFERENCE into a `Value` (`Value::from_struct`) rather than eagerly serialised to a hashmap
+    /// object. `tish_get`/`tish_set` are the dynamic property path (a `match` on the field name — no
+    /// hash, no alloc); `tish_to_object` is the materialisation used for JSON / spread / `Object.keys`
+    /// and as the non-portable `from_struct` fallback (identical to the historical boundary).
+    fn emit_struct_tish_impl(
+        &mut self,
+        struct_name: &str,
+        fields: &[(std::sync::Arc<str>, crate::types::RustType)],
+    ) {
+        self.write("#[allow(non_snake_case, unused)]\n");
+        self.write(&format!(
+            "impl tishlang_runtime::TishStruct for {} {{\n",
+            struct_name
+        ));
+
+        // tish_get: field name → boxed Value (Null for an unknown key).
+        self.write("    fn tish_get(&self, __k: &str) -> tishlang_runtime::Value {\n");
+        self.write("        match __k {\n");
+        for (k, ty) in fields {
+            let access = format!("self.{}", crate::types::field_ident(k));
+            let v_expr = if matches!(ty, crate::types::RustType::Value) {
+                format!("{}.clone()", access)
+            } else {
+                ty.to_value_expr(&access)
+            };
+            self.write(&format!("            {:?} => {},\n", k.as_ref(), v_expr));
+        }
+        self.write("            _ => tishlang_runtime::Value::Null,\n");
+        self.write("        }\n    }\n");
+
+        // tish_set: field name + boxed Value → coerce into the native field (unknown key = no-op).
+        self.write("    fn tish_set(&mut self, __k: &str, __v: tishlang_runtime::Value) {\n");
+        self.write("        match __k {\n");
+        for (k, ty) in fields {
+            let coerced = if matches!(ty, crate::types::RustType::Value) {
+                "__v".to_string()
+            } else {
+                ty.from_value_expr("__v")
+            };
+            self.write(&format!(
+                "            {:?} => {{ self.{} = {}; }},\n",
+                k.as_ref(),
+                crate::types::field_ident(k),
+                coerced
+            ));
+        }
+        self.write("            _ => {},\n");
+        self.write("        }\n    }\n");
+
+        // tish_to_object: ordered `object_from_pairs` (JS insertion order) — the materialisation path.
+        self.write("    fn tish_to_object(&self) -> tishlang_runtime::Value {\n");
+        self.write(&format!(
+            "        {}\n",
+            crate::types::named_struct_to_object_expr(fields, "self")
+        ));
+        self.write("    }\n");
+
+        self.write("    fn as_any(&self) -> &dyn core::any::Any { self }\n");
+        self.write("}\n\n");
     }
 
     /// #315: JSON-simple = serializable by a direct per-struct writer that is byte-identical
@@ -2628,6 +2701,25 @@ impl Codegen {
         }
     }
 
+    /// Record every top-level `function f(...): Iface` whose return annotation resolves — via the type
+    /// aliases — to a native STRUCT (`RustType::Named`, or a `ShapeUnion`). A later call to `f` in a
+    /// typed position then coerces the boxed result to the native struct (a `Value::Struct` downcast on
+    /// GBA, the `get_prop` rebuild elsewhere), so `f().field` reads are native, not boxed. Runs AFTER
+    /// `collect_type_aliases` so an interface name in the annotation resolves to its `Named` type.
+    fn collect_user_fn_returns(&mut self, program: &Program) {
+        for stmt in &program.statements {
+            if let Statement::FunDecl { name, return_type: Some(ann), .. } = stmt {
+                let ty = RustType::from_annotation_with_aliases(ann, &self.type_aliases);
+                if matches!(
+                    ty,
+                    RustType::Named { .. } | RustType::ShapeUnion { .. }
+                ) {
+                    self.user_fn_returns.insert(name.to_string(), ty);
+                }
+            }
+        }
+    }
+
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         // Only GBA `font<N>:`/`emoji:` schemes consume `{charset}` (and both `render_template`
         // callers that read `string_charset` are Gba-gated), so skip the whole-program string walk
@@ -2711,6 +2803,9 @@ impl Codegen {
         // are stored too, so later annotations like `let x: N = 0` still
         // pick up the right native type.
         self.collect_type_aliases(&program.statements);
+        // Now that the interface/type-alias table is built, record user functions that return a native
+        // struct, so a typed call to one keeps the result native (`f().field` = a Rust field read).
+        self.collect_user_fn_returns(program);
         // Emit a Rust `struct` for every alias whose RHS is an object
         // shape. Subsequent `let x: Foo = ...` literals lower to plain
         // struct moves (no `VmRef::new(ObjectMap::from(..))` allocation),
@@ -22421,6 +22516,23 @@ impl Codegen {
                 let (l, lt) = self.emit_typed_expr(left)?;
                 let (r, rt) = self.emit_typed_expr(right)?;
 
+                // `fixed ⊕ <runtime integer>` (e.g. `t * speed` with `t: i32`, `speed: fixed`): LIFT the
+                // integer operand to `Fixed` via `Num::new` so the whole op stays native `Num<i32,8>`
+                // arithmetic. This runs BEFORE the generic integer→f64 coercion below — otherwise the
+                // integer becomes f64 and `f64 ⊕ fixed` drops to the boxed `ops::*` path (that path is
+                // the deliberate escape hatch for a GENUINE runtime f64, which is lossy against fixed;
+                // a plain integer is exact, so lifting is sound). Integer *literals* are already folded
+                // to a Fixed constant by `fixed_literal_of` further down; this covers runtime integers.
+                // `Fixed<i32,8>` raw = value << 8 (× 256), so an integer `v` lifts to fixed `v.0` as
+                // `Fixed::from_raw(v * 256)` — the same constructor tish emits everywhere for fixed.
+                let (l, lt, r, rt) = if lt == RustType::Fixed && rt.is_integer_scalar() {
+                    (l, lt, format!("tishlang_runtime::Fixed::from_raw((({}) as i32) * 256)", r), RustType::Fixed)
+                } else if rt == RustType::Fixed && lt.is_integer_scalar() {
+                    (format!("tishlang_runtime::Fixed::from_raw((({}) as i32) * 256)", l), RustType::Fixed, r, rt)
+                } else {
+                    (l, lt, r, rt)
+                };
+
                 // An `I32` loop-accumulator (the i32-loop-var lowering) used in a NON-bitwise
                 // expression reads as its signed int32 value coerced to `f64` — every i32 is exact
                 // in f64. Bitwise/shift parents never see this: they recurse into the raw AST via
@@ -22972,6 +23084,19 @@ impl Codegen {
                 // eliminating the per-element `value_call` and all `Value` boxing.
                 if let Some(res) = self.native_vec_hof_for_call(callee, args)? {
                     return Ok(res);
+                }
+                // A call to a user tish function whose declared return type is a native struct
+                // (`function gameState(): GameState`). The function is still a boxed closure, so the call
+                // yields a `Value` — a `Value::Struct` on GBA. Coerce it to the native struct via
+                // `from_value_expr` (a cheap `downcast_struct` on GBA; the `get_prop` rebuild off-GBA), so
+                // the surrounding `gs.score` / `gs.bossHp` reads lower to plain Rust field loads instead of
+                // boxed `get_prop`. A false positive (name shadowed by a non-struct local) is harmless:
+                // `from_value_expr` downcasts if it can and otherwise rebuilds via `get_prop`.
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if let Some(ret) = self.user_fn_returns.get(fname.as_ref()).cloned() {
+                        let boxed = self.emit_expr(expr)?;
+                        return Ok((ret.from_value_expr(&boxed), ret));
+                    }
                 }
                 let result = self.emit_expr(expr)?;
                 Ok((result, RustType::Value))

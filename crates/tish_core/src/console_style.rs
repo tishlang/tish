@@ -90,6 +90,10 @@ fn format_value_styled_inner(value: &Value, colors: bool, quote_strings: bool) -
         }
         Value::Bool(b) => format!("{BOOLEAN}{b}{RESET}"),
         Value::Null => format!("{NULL}null{RESET}"),
+        #[cfg(feature = "portable")]
+        Value::Struct(s) => {
+            format_value_styled_inner(&s.borrow().tish_to_object(), colors, quote_strings)
+        }
         Value::Array(arr) => {
             let inner: Vec<String> = arr
                 .borrow()
