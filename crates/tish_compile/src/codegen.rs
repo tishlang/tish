@@ -2503,7 +2503,12 @@ impl Codegen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
-        self.string_charset = Self::collect_string_charset(&program.statements);
+        // Only GBA `font<N>:`/`emoji:` schemes consume `{charset}` (and both `render_template`
+        // callers that read `string_charset` are Gba-gated), so skip the whole-program string walk
+        // for every other target — its result is never read off-GBA.
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            self.string_charset = Self::collect_string_charset(&program.statements);
+        }
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
