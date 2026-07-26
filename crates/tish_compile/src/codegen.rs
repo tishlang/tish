@@ -1218,6 +1218,10 @@ pub(crate) struct Codegen {
     cse_subst: Vec<(Expr, String)>,
     /// Monotonic counter for unique CSE temp names (`_cse0`, `_cse1`, …).
     cse_temp_counter: usize,
+    /// The program's used NON-ASCII characters (collected from every string literal), as a sorted
+    /// string. Fed to import schemes via `{charset}` so a scheme can bake only the glyphs a program
+    /// actually uses — e.g. `font<N>:` bakes ASCII + these, not all ~24k glyphs of a CJK font.
+    string_charset: String,
 }
 
 /// One `map`/`filter` stage of a fused HOF chain (#317): the single-element-param closure's
@@ -1244,6 +1248,7 @@ impl Codegen {
             indent: 0,
             loop_label_index: 0,
             is_async: false,
+            string_charset: String::new(),
             features,
             native_module_init,
             async_context_stack: Vec::new(),
@@ -1517,6 +1522,41 @@ impl Codegen {
     /// absolute file), and a same-module accessor (which can see the macro's private statics — the
     /// only way a tagless image's sprites escape). Registration into the runtime arena happens in
     /// the entry below.
+    /// Collect every NON-ASCII character appearing in the program's string literals, sorted+unique.
+    /// Fed to schemes via `{charset}` (see `render_template`) so a `font<N>:` import can bake only the
+    /// glyphs actually used. ASCII is always baked by the scheme, so it's excluded here. Runtime-built
+    /// strings (concatenation, numbers) resolve to ASCII, which is covered; a non-ASCII char reachable
+    /// only through a computed string is the rare gap (documented — add it to a literal if needed).
+    fn collect_string_charset(stmts: &[Statement]) -> String {
+        let mut set = std::collections::BTreeSet::new();
+        fn add(s: &str, set: &mut std::collections::BTreeSet<char>) {
+            for c in s.chars() {
+                if (c as u32) >= 0x7F {
+                    set.insert(c);
+                }
+            }
+        }
+        fn walk(stmts: &[Statement], set: &mut std::collections::BTreeSet<char>) {
+            for s in stmts {
+                Codegen::for_each_stmt_expr(s, &mut |e| {
+                    Codegen::nv_for_each_subexpr(e, &mut |x| {
+                        if let Expr::Literal { value: Literal::String(str), .. } = x {
+                            add(str, set);
+                        }
+                        if let Expr::TemplateLiteral { quasis, .. } = x {
+                            for q in quasis {
+                                add(q, set);
+                            }
+                        }
+                    });
+                });
+                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, set));
+            }
+        }
+        walk(stmts, &mut set);
+        set.into_iter().collect()
+    }
+
     fn emit_scheme_modules(&mut self) -> Result<(), CompileError> {
         let files = self.scheme_files.clone();
         for (j, (scheme, path)) in files.iter().enumerate() {
@@ -1531,6 +1571,7 @@ impl Codegen {
                 &emit.module_body,
                 path,
                 &module_ident,
+                &self.string_charset,
             ));
             if !emit.accessor.is_empty() {
                 self.writeln(&emit.accessor);
@@ -2462,6 +2503,7 @@ impl Codegen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
+        self.string_charset = Self::collect_string_charset(&program.statements);
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
@@ -2589,7 +2631,7 @@ impl Codegen {
                 let emit = self.scheme_target_emit(scheme)?;
                 if !emit.register.is_empty() {
                     let module_ident = Self::scheme_mod_ident(scheme, j);
-                    let call = crate::schemes::render_template(&emit.register, "", &module_ident);
+                    let call = crate::schemes::render_template(&emit.register, "", &module_ident, &self.string_charset);
                     self.writeln(&format!("{};", call));
                 }
             }
