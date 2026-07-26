@@ -39,6 +39,18 @@ pub enum NativeModuleInit {
     },
 }
 
+impl NativeModuleInit {
+    /// The Rust crate name whose functions back this module — the path for a direct typed call
+    /// (`<crate_name>::name_typed(..)`). Both variants carry it (Legacy directly, Generated as the
+    /// shim crate the generated namespace forwards to).
+    pub fn crate_name(&self) -> &str {
+        match self {
+            NativeModuleInit::Legacy { crate_name, .. } => crate_name,
+            NativeModuleInit::Generated { shim_crate, .. } => shim_crate,
+        }
+    }
+}
+
 /// Extra native build inputs produced alongside Rust source (Cargo merge + optional wrapper).
 #[derive(Debug, Clone)]
 pub struct NativeBuildArtifacts {

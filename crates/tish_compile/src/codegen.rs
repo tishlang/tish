@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
-    FunParam, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span, Statement,
-    TypeAnnotation, UnaryOp,
+    FunParam, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span,
+    Statement, TypeAnnotation, UnaryOp,
 };
 
 /// Tracks variable usage for move/clone optimization.
@@ -949,6 +949,22 @@ pub(crate) struct NativeVecFnSig {
     ret: VecRetKind,
 }
 
+/// A TYPED native import — the "typed externs" perf lever. Formed by pairing a `declare fun name(a:
+/// i32, …): T` signature with a `cargo:`/native import of the same name (which supplies the crate).
+/// A call `name(x, y)` whose args lower to `params` is then emitted as a DIRECT Rust call
+/// `<crate>::name_typed(x, y)` — no `Value` boxing of the args, no `value_call` dispatch — instead of
+/// the boxed namespace-object path. The crate provides `name_typed(<native params>)` and keeps its
+/// boxed `fn(&[Value])` shim (which now just delegates) for dynamic call sites.
+#[derive(Debug, Clone)]
+pub(crate) struct ExternSig {
+    crate_name: String,
+    /// The exported Rust fn name (the import's original name, not a local alias); the direct call
+    /// targets `<crate_name>::<symbol>_typed(..)`.
+    symbol: String,
+    params: Vec<RustType>,
+    ret: RustType,
+}
+
 /// #173 part 3 — a symbolic upper bound used by the in-bounds index proof. Two forms are matched by
 /// structural equality: an integer constant (`vec![K; 100]`, guard `i < 100`) and a single variable
 /// (`a` filled to length `n`, guard `i < n`). Anything more complex (`2 * n`, `a.length` member,
@@ -984,6 +1000,9 @@ pub(crate) struct Codegen {
     features: std::collections::HashSet<String>,
     /// spec -> native init strategy (legacy adapter object vs generated `generated_native` wrapper)
     native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
+    /// Typed native imports (`declare fun` + a native import): tish name -> its typed signature.
+    /// A matching call emits a DIRECT `<crate>::name_typed(..)` instead of a boxed `value_call`.
+    extern_fns: std::collections::HashMap<String, ExternSig>,
     /// Stack: true = async Rust context (run body), false = sync closure (Tish fn body)
     async_context_stack: Vec<bool>,
     loop_stack: Vec<(String, Option<String>)>, // (break_label, continue_update) for innermost loop
@@ -1251,6 +1270,7 @@ impl Codegen {
             string_charset: String::new(),
             features,
             native_module_init,
+            extern_fns: std::collections::HashMap::new(),
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
@@ -2502,6 +2522,94 @@ impl Codegen {
         out
     }
 
+    /// Typed externs (#perf): pair each top-level `declare fun name(a: i32, …): T` with a native
+    /// import of the same name (which supplies the crate) → an [`ExternSig`] in `extern_fns`. A later
+    /// call to `name` with lowerable args emits a DIRECT `<crate>::name_typed(..)` instead of a boxed
+    /// `value_call`. Only fully-typed simple-param signatures qualify; anything else stays boxed.
+    fn collect_extern_fns(&mut self, program: &Program) {
+        use std::collections::HashMap;
+        // Resolve lowers each `import { x } from 'cargo:…'` to `let x = NativeModuleLoad{spec, export}`,
+        // so pair off THOSE bindings (the `Import` statement itself is gone by codegen): local name ->
+        // (module spec, exported Rust fn name). Only a native module with a known init can back a call.
+        let mut name_info: HashMap<String, (String, String)> = HashMap::new();
+        for stmt in &program.statements {
+            if let Statement::VarDecl {
+                name,
+                init: Some(Expr::NativeModuleLoad { spec, export_name, .. }),
+                ..
+            } = stmt
+            {
+                if self.native_module_init.contains_key(spec.as_ref()) {
+                    name_info.insert(
+                        name.to_string(),
+                        (spec.to_string(), export_name.to_string()),
+                    );
+                }
+            }
+        }
+        if name_info.is_empty() {
+            return;
+        }
+        for stmt in &program.statements {
+            let Statement::DeclareFun {
+                name,
+                params,
+                rest_param: None,
+                return_type,
+                async_: false,
+                ..
+            } = stmt
+            else {
+                continue;
+            };
+            let Some((spec, export_name)) = name_info.get(name.as_ref()) else {
+                continue;
+            };
+            let crate_name = match self.native_module_init.get(spec) {
+                Some(init) => init.crate_name().to_string(),
+                None => continue,
+            };
+            // Every parameter must be a simple, explicitly-typed native scalar; a `Value` param (an
+            // untyped one) means the direct call would gain nothing, so keep the whole fn boxed.
+            let mut ptys = Vec::with_capacity(params.len());
+            let mut ok = true;
+            for p in params {
+                match p {
+                    FunParam::Simple(tp) if tp.default.is_none() => match &tp.type_ann {
+                        Some(ann) => {
+                            let ty = RustType::from_annotation(ann);
+                            if ty.is_native() {
+                                ptys.push(ty);
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    },
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let ret = return_type
+                .as_ref()
+                .map(RustType::from_annotation)
+                .unwrap_or(RustType::Unit);
+            self.extern_fns.insert(
+                name.to_string(),
+                ExternSig { crate_name, symbol: export_name.clone(), params: ptys, ret },
+            );
+        }
+    }
+
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
         // Only GBA `font<N>:`/`emoji:` schemes consume `{charset}` (and both `render_template`
         // callers that read `string_charset` are Gba-gated), so skip the whole-program string walk
@@ -2513,6 +2621,7 @@ impl Codegen {
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
+        self.collect_extern_fns(program);
         if self.emit_mode == crate::NativeEmitMode::Gba {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
@@ -7896,6 +8005,41 @@ impl Codegen {
                     }
                 }
                 
+                // Typed externs (#perf): a call to a native import with a declared typed signature →
+                // a DIRECT `<crate>::name_typed(coerced args)` call. No `Value` boxing of the args, no
+                // `value_call` dispatch through the namespace object. Falls through to the boxed path
+                // when the arg count/kind doesn't match (a dynamic/spread call stays correct).
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if let Some(sig) = self.extern_fns.get(fname.as_ref()).cloned() {
+                        if args.len() == sig.params.len()
+                            && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
+                        {
+                            let mut argc: Vec<String> = Vec::with_capacity(args.len());
+                            for (a, ty) in args.iter().zip(sig.params.iter()) {
+                                if let CallArg::Expr(e) = a {
+                                    argc.push(self.emit_coerced_native(e, ty)?);
+                                }
+                            }
+                            let call = format!(
+                                "{}::{}_typed({})",
+                                sig.crate_name,
+                                sig.symbol,
+                                argc.join(", ")
+                            );
+                            // This is a Value-producing context: a `void` extern yields `Null`; a
+                            // native return is boxed once at the boundary (still far cheaper than the
+                            // boxed-args `value_call`); a `Value`-returning extern passes through.
+                            return Ok(if sig.ret == RustType::Unit {
+                                format!("{{ {}; Value::Null }}", call)
+                            } else if sig.ret.is_native() {
+                                sig.ret.to_value_expr(&call)
+                            } else {
+                                call
+                            });
+                        }
+                    }
+                }
+
                 // M5: boxed-context call to an eligible native fn → `Value::Number(name_native(..))`.
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
                     if self.native_fns.contains(fname.as_ref()) {
