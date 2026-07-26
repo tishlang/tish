@@ -7974,6 +7974,9 @@ impl Codegen {
                                 fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
                             {
                                 let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
+                                // Clone a non-Copy field so reading it doesn't move out of the local
+                                // (E0382 when the struct is used again); a Copy scalar reads by value.
+                                let clone = if field_ty.is_copy() { "" } else { ".clone()" };
                                 let access = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
                                     format!(
                                         "(*{}.borrow()).{}.clone()",
@@ -7982,9 +7985,10 @@ impl Codegen {
                                     )
                                 } else {
                                     format!(
-                                        "{}.{}",
+                                        "{}.{}{}",
                                         var_esc,
-                                        crate::types::field_ident(prop_name.as_ref())
+                                        crate::types::field_ident(prop_name.as_ref()),
+                                        clone
                                     )
                                 };
                                 // Caller expects a `Value`; wrap.
@@ -8004,10 +8008,15 @@ impl Codegen {
                             if let Some((_, field_ty)) =
                                 fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
                             {
+                                // The element `xs[i]` is BORROWED, so a non-Copy field (a `Value`/
+                                // `String`) must be cloned out — otherwise reading it in a value/return
+                                // position moves out of the index (E0507). A Copy scalar reads by value.
+                                let clone = if field_ty.is_copy() { "" } else { ".clone()" };
                                 let access = format!(
-                                    "({}).{}",
+                                    "({}).{}{}",
                                     obj_code,
-                                    crate::types::field_ident(prop_name.as_ref())
+                                    crate::types::field_ident(prop_name.as_ref()),
+                                    clone
                                 );
                                 return Ok(field_ty.to_value_expr(&access));
                             }

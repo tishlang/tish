@@ -255,6 +255,17 @@ impl RustType {
         !matches!(self, RustType::Value)
     }
 
+    /// Whether the generated Rust type is `Copy` — the native numeric scalars, `Fixed`, and `Unit`.
+    /// A `Copy` field can be read out of a borrowed place (`arr[i].field`, `(*cell.borrow()).field`)
+    /// by value; a non-`Copy` one (`Value`/`String`/an aggregate) must be `.clone()`d there or it
+    /// moves out of the borrow — a use-after-move / cannot-move-out-of-index error (E0382 / E0507).
+    pub fn is_copy(&self) -> bool {
+        matches!(
+            self,
+            RustType::F64 | RustType::I32 | RustType::Bool | RustType::Fixed | RustType::Unit
+        ) || self.is_narrow_int()
+    }
+
     /// Check if this type is numeric (f64).
     pub fn is_numeric(&self) -> bool {
         matches!(self, RustType::F64)
