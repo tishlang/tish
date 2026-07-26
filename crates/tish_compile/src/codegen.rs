@@ -3496,6 +3496,11 @@ impl Codegen {
                     let (val_code, val_ty) = self.emit_typed_expr(value)?;
                     let native_val = if val_ty == RustType::Value {
                         rust_type.from_value_expr(&val_code)
+                    } else if rust_type == RustType::Fixed && val_ty == RustType::F64 {
+                        // an f64 (an int/float literal like `nx = 0`, or a promoted int) assigned to a
+                        // `fixed` local must be lifted to `Fixed` — the RHS emitter reports numeric
+                        // literals as F64, so without this a `fixed` reassignment mistypes (E0308).
+                        format!("tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)", val_code)
                     } else {
                         val_code
                     };
@@ -11148,6 +11153,17 @@ impl Codegen {
             // `f64` target from an integer-scalar source: widen directly.
             if *target_type == RustType::F64 && typed_ty.is_integer_scalar() {
                 return Ok(format!("({}) as f64", typed_code));
+            }
+            // `fixed` target from a native integer / f64 source: lift to `Fixed` directly, no
+            // Value round-trip. Lets `let dx: fixed = input_x()` (i32→fixed) or `let v: fixed = n`
+            // stay native so downstream `dx * spd` is `Fixed*Fixed` instead of boxing.
+            if *target_type == RustType::Fixed {
+                if typed_ty.is_integer_scalar() {
+                    return Ok(format!("tishlang_runtime::Fixed::from_raw((({}) as i32) * 256)", typed_code));
+                }
+                if typed_ty == RustType::F64 {
+                    return Ok(format!("tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)", typed_code));
+                }
             }
         }
 
@@ -22776,6 +22792,35 @@ impl Codegen {
                         }
                     }
                 }
+                // Typed extern (a `cargo:` import with a declared native signature) used INSIDE a
+                // native/typed expression: `entity_x(e) + 16`, `cvar(e, k) + 1`. Emit the direct
+                // `crate::name_typed(<coerced args>)` and report its NATIVE return type, so the
+                // surrounding arithmetic/comparison stays native instead of boxing the result and
+                // dropping to `ops::*`. Only a native-returning extern is taken here; a `void`/`Value`
+                // one falls through to the boxed path (this is a value-position expression).
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if let Some(sig) = self.extern_fns.get(fname.as_ref()).cloned() {
+                        if sig.ret.is_native()
+                            && args.len() == sig.params.len()
+                            && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
+                        {
+                            let mut argc: Vec<String> = Vec::with_capacity(args.len());
+                            for (a, ty) in args.iter().zip(sig.params.iter()) {
+                                if let CallArg::Expr(e) = a {
+                                    argc.push(self.emit_coerced_native(e, ty)?);
+                                }
+                            }
+                            let call = format!(
+                                "{}::{}_typed({})",
+                                sig.crate_name,
+                                sig.symbol,
+                                argc.join(", ")
+                            );
+                            return Ok((call, sig.ret));
+                        }
+                    }
+                }
+
                 // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
                     if self.native_fns.contains(fname.as_ref()) {
