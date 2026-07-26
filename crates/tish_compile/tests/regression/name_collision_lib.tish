@@ -1,0 +1,6 @@
+// An exported helper whose PARAMETER name (`scene`) collides with a top-level mutable var in the
+// importer. The reference to the parameter inside the body must resolve to the parameter, not the
+// importer's VmRef cell of the same name (tishlang/tish#556).
+export function loadScene(scene) {
+  return scene(1)
+}

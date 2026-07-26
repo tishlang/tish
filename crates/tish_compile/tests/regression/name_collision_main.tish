@@ -1,0 +1,13 @@
+import { loadScene } from './name_collision_lib'
+
+// A top-level var named `scene`, CAPTURED + mutated by a closure ⇒ it becomes a shared `VmRef` cell.
+// This is the shape the real game hit: mutable module state whose name matches an imported helper's
+// parameter (tishlang/tish#556).
+let scene = 0
+function bump() { scene = scene + 1 }
+bump()
+
+function build(n) { return n + 100 }
+
+console.log(loadScene(build))   // expect 101 — the param `scene` inside loadScene, not the cell
+console.log(scene)              // expect 1

@@ -6439,6 +6439,21 @@ impl Codegen {
                     for v in &read_only_outer_vars {
                         self.refcell_wrapped_vars.remove(v);
                     }
+                    // tishlang/tish#556: a PARAMETER (or the rest param) SHADOWS any outer var of the
+                    // same name — inside the body it is a plain `let`-bound `Value`/native, never the
+                    // outer `VmRef` cell. Drop such names from the wrapped set for the body, so a
+                    // reference to the param isn't emitted as `vm_read(&param)` (which won't compile —
+                    // the param is a `Value`, not a `VmRef`). `saved_refcell` restores the outer view
+                    // after the body; a body-local `let` that a nested closure captures is re-added by
+                    // the `body_cell_vars` prepass below, so its cell handling is unaffected.
+                    for p in params {
+                        for bn in p.bound_names() {
+                            self.refcell_wrapped_vars.remove(bn.as_ref());
+                        }
+                    }
+                    if let Some(rest) = rest_param {
+                        self.refcell_wrapped_vars.remove(rest.name.as_ref());
+                    }
 
                     // Pre-scan body for nested functions (handles function body as Block)
                     if let Statement::Block { statements, .. } = body.as_ref() {
@@ -10634,6 +10649,15 @@ impl Codegen {
         }
         for v in &implicit_env_captures {
             self.refcell_wrapped_vars.remove(v);
+        }
+        // tishlang/tish#556: an arrow PARAMETER shadows any outer var of the same name — inside the
+        // body it is a plain `Value`/native binding, not the outer `VmRef` cell, so drop such names
+        // from the wrapped set for the body (restored via `saved_refcell_vars`). Without this, a
+        // reference to the param compiles as `vm_read(&param)` — a `&Value` where a `&VmRef` is wanted.
+        for p in params {
+            for bn in p.bound_names() {
+                self.refcell_wrapped_vars.remove(bn.as_ref());
+            }
         }
 
         self.type_context.push_fun_param_scope(params, None);
