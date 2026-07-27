@@ -581,6 +581,58 @@ pub use tishlang_builtins::globals::{
 };
 pub use tishlang_builtins::string::escape_html as string_escape_html_impl;
 
+// ── String methods (codegen lowers `.slice()`/`.indexOf()`/`.toLowerCase()`/… to these prelude
+// names). Mirrors the std `tish_runtime` wrappers; the portable subset (no regex / unicode-normalize).
+pub use tishlang_builtins::string::{
+    at as string_at_impl, char_at as string_char_at_impl,
+    char_code_at as string_char_code_at_impl, ends_with as string_ends_with_impl,
+    includes as string_includes_impl, index_of as string_index_of_impl,
+    slice as string_slice_impl, starts_with as string_starts_with_impl,
+    substr as string_substr_impl, substring as string_substring_impl,
+    to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
+    trim as string_trim, trim_end as string_trim_end, trim_start as string_trim_start,
+};
+#[inline]
+pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
+    string_index_of_impl(s, search, Some(from))
+}
+#[inline]
+pub fn string_includes(s: &Value, search: &Value, from: &Value) -> Value {
+    string_includes_impl(s, search, Some(from))
+}
+#[inline]
+pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
+    string_slice_impl(s, start, end)
+}
+#[inline]
+pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
+    string_substring_impl(s, start, end)
+}
+#[inline]
+pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
+    string_substr_impl(s, start, length)
+}
+#[inline]
+pub fn string_starts_with(s: &Value, search: &Value, position: Option<&Value>) -> Value {
+    string_starts_with_impl(s, search, position)
+}
+#[inline]
+pub fn string_ends_with(s: &Value, search: &Value, end_position: Option<&Value>) -> Value {
+    string_ends_with_impl(s, search, end_position)
+}
+#[inline]
+pub fn string_char_at(s: &Value, idx: &Value) -> Value {
+    string_char_at_impl(s, idx)
+}
+#[inline]
+pub fn string_at(s: &Value, idx: &Value) -> Value {
+    string_at_impl(s, idx)
+}
+#[inline]
+pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
+    string_char_code_at_impl(s, idx)
+}
+
 // ── Constructors, collections, typed arrays, symbol (re-export as prelude names) ──
 pub use tishlang_builtins::construct::{
     array_construct, audio_context_constructor_value as tish_audio_context_constructor,
@@ -591,8 +643,66 @@ pub use tishlang_builtins::collections::{
     map_constructor_value as tish_map_constructor, map_get, map_has, map_set, map_values,
     set_constructor_value as tish_set_constructor,
 };
-// Array mutators (portable) — `.push()` / `.pop()` lower to these `array_*` names.
-pub use tishlang_builtins::array::{pop as array_pop, push as array_push};
+// Array methods — codegen lowers `.push()`/`.slice()`/`.map()`/… to these `array_*` names. Mirrors
+// the std `tish_runtime` block (minus RNG-dependent `shuffle`). Portable: all operate on Vec<Value>.
+pub use tishlang_builtins::array::{
+    at as array_at, concat as array_concat_impl, every as array_every, filter as array_filter,
+    find as array_find, find_index as array_find_index, find_last as array_find_last,
+    find_last_index as array_find_last_index, flat as array_flat_impl, flat_map as array_flat_map,
+    for_each as array_for_each, includes as array_includes_impl, index_of as array_index_of_impl,
+    join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
+    fill as array_fill, last_index_of as array_last_index_of, copy_within as array_copy_within,
+    reduce as array_reduce, reduce_right as array_reduce_right, reverse as array_reverse,
+    keys as array_keys, values as array_values, entries as array_entries, shift as array_shift,
+    slice as array_slice_impl, snapshot_values as array_snapshot_values,
+    as_f64_snapshot as array_as_f64_snapshot, some as array_some,
+    sort_by_keys as array_sort_by_keys, sort_default as array_sort_default,
+    sort_numeric_asc as array_sort_numeric_asc, sort_numeric_desc as array_sort_numeric_desc,
+    sort_with_comparator as array_sort_with_comparator, splice as array_splice_impl,
+    to_reversed as array_to_reversed, to_sorted as array_to_sorted,
+    to_spliced as array_to_spliced, with as array_with, unshift as array_unshift_impl,
+};
+#[inline]
+pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
+#[inline]
+pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
+#[inline]
+pub fn array_index_of(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
+    array_index_of_impl(arr, search, from)
+}
+#[inline]
+pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
+    array_includes_impl(arr, search, Some(from))
+}
+#[inline]
+pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
+#[inline]
+pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+    array_splice_impl(arr, start, delete_count, items)
+}
+#[inline]
+pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value {
+    array_slice_impl(arr, start, end)
+}
+#[inline]
+pub fn array_concat(arr: &Value, args: &[Value]) -> Value { array_concat_impl(arr, args) }
+#[inline]
+pub fn array_flat(arr: &Value, depth: &Value) -> Value { array_flat_impl(arr, depth) }
+#[inline]
+pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
+    match comparator {
+        Some(cmp) => array_sort_with_comparator(arr, cmp),
+        None => array_sort_default(arr),
+    }
+}
+/// `.at(i)` dispatched on the runtime value — exists on both String and Array (#247).
+#[inline]
+pub fn value_at(recv: &Value, idx: &Value) -> Value {
+    match recv {
+        Value::String(_) => string_at_impl(recv, idx),
+        _ => array_at(recv, idx),
+    }
+}
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_builtins::typedarrays::{
     float32_array_constructor_value as tish_float32_array_constructor,
