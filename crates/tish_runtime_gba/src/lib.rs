@@ -112,7 +112,29 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => Value::Bool(array_in(key, arr.borrow().len())),
         Value::NumberArray(arr) => Value::Bool(array_in(key, arr.borrow().len())),
+        // A by-reference boxed typed struct: `"field" in s` materialises to the struct's object and
+        // asks it, so a boxed struct answers `in` like the object it stands for (was always `false`).
+        Value::Struct(s) => {
+            Value::Bool(tishlang_core::object_has(&s.borrow().tish_to_object(), key))
+        }
         _ => Value::Bool(false),
+    }
+}
+
+/// Spread source for `{ ...v }` (GBA emit only — codegen calls this from the Gba object-spread
+/// lowering). Returns the source's own string-keyed props as an owned `PropMap`: a boxed typed struct
+/// is materialised to its ordered object first, so `{ ...s }` carries the struct's fields instead of
+/// dropping them; a non-object yields `None` (spread of `null`/a number contributes nothing, per JS).
+/// Desktop emit keeps its inline `if let Value::Object` path, so this GBA-only helper adds no
+/// non-GBA cost.
+pub fn object_spread_props(v: &Value) -> Option<PropMap> {
+    match v {
+        Value::Object(o) => Some(o.borrow().strings.clone()),
+        Value::Struct(s) => match s.borrow().tish_to_object() {
+            Value::Object(o) => Some(o.borrow().strings.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

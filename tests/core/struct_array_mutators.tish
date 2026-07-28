@@ -1,0 +1,82 @@
+// #558: in-place mutators on a native struct `Vec` must mutate the REAL array — both a plain local
+// and a closure-captured (refcell-wrapped) one — instead of the boxed fallback that mutates a throwaway
+// copy and silently discards the write. Covers push / pop / shift / unshift / reverse / sort and a
+// captured-element field write. Output is backend-identical (interp == vm == native).
+
+type P = { x: number, y: number }
+
+// ── plain local (not captured) ──
+let a: P[] = []
+a.push({ x: 1, y: 10 })
+a.push({ x: 2, y: 20 })
+a.push({ x: 3, y: 30 })
+let popped = a.pop()          // removes {3,30}; a = [{1},{2}]
+console.log(a.length + " " + popped.x)
+let shifted = a.shift()       // removes {1,10}; a = [{2}]
+console.log(a.length + " " + shifted.x + " " + a[0].x)
+a.unshift({ x: 9, y: 90 })    // a = [{9},{2}]
+console.log(a[0].x + " " + a.length)
+a.reverse()                   // a = [{2},{9}]
+console.log(a[0].x)
+a.push({ x: 5, y: 50 })       // a = [{2},{9},{5}]
+a.sort((p, q) => p.x - q.x)   // a = [{2},{5},{9}]
+console.log(a[0].x + "" + a[1].x + a[2].x)
+
+// ── closure-captured (refcell-wrapped) array: every mutator goes through the shared cell ──
+let b: P[] = []
+b.push({ x: 4, y: 0 })
+b.push({ x: 1, y: 0 })
+function mutate() {
+  b.push({ x: 7, y: 0 })   // [4,1,7]
+  b.sort((p, q) => p.x - q.x) // [1,4,7]
+  b.reverse()              // [7,4,1]
+  b.unshift({ x: 9, y: 0 })  // [9,7,4,1]
+  b.shift()                // [7,4,1]
+  b.pop()                  // [7,4]
+  b[0].x = 8               // [8,4]
+}
+mutate()
+let out = ""
+for (let i = 0; i < b.length; i++) { out = out + b[i].x }
+console.log(out + " len=" + b.length)
+
+// ── splice / fill / copyWithin (plain) ──
+let c: P[] = []
+c.push({ x: 1, y: 0 }); c.push({ x: 2, y: 0 }); c.push({ x: 3, y: 0 }); c.push({ x: 4, y: 0 })
+let removed = c.splice(1, 2, { x: 8, y: 0 }, { x: 9, y: 0 }) // c=[1,8,9,4], removed=[2,3]
+console.log(c.length + " r=" + removed.length + " " + removed[0].x + removed[1].x)
+console.log(c[0].x + "" + c[1].x + c[2].x + c[3].x)          // 1894
+c.splice(-1, 1)                                              // remove last -> [1,8,9]
+console.log(c.length + " " + c[2].x)
+
+let d: number[] = [1, 2, 3, 4, 5]
+d.fill(0, 1, 3)                                              // [1,0,0,4,5]
+console.log(d[0] + "" + d[1] + d[2] + d[3] + d[4])
+d.copyWithin(0, 3)                                          // [4,5,0,4,5]
+console.log(d[0] + "" + d[1] + d[2] + d[3] + d[4])
+
+// ── splice on a closure-captured (wrapped) struct array ──
+let e: P[] = []
+e.push({ x: 1, y: 0 }); e.push({ x: 2, y: 0 }); e.push({ x: 3, y: 0 })
+function splicer() { e.splice(1, 1, { x: 7, y: 0 }) }        // [1,7,3]
+splicer()
+console.log(e[0].x + "" + e[1].x + e[2].x + " len=" + e.length)
+
+// ── mutator RETURN values (match tish interp / JS): push/unshift → new length; pop/shift → element;
+//    reverse/fill/copyWithin/sort → the array ──
+let g: P[] = []
+console.log(g.push({ x: 1, y: 0 }))                          // 1
+console.log(g.push({ x: 2, y: 0 }))                          // 2
+console.log(g.unshift({ x: 0, y: 0 }))                       // 3
+console.log(g.pop().x)                                       // 2
+let h: number[] = [3, 1, 2]
+console.log(h.reverse()[0])                                  // 2
+console.log(h.fill(9, 0, 1)[0])                              // 9
+console.log(h.sort((p, q) => p - q)[2])                      // 9
+console.log(h.copyWithin(0, 2)[0])                           // 9  ([9,9,9] -> copy [9] to 0)
+
+// ── wrapped array element READ must be native, not a whole-array box (tish#558 read side) ──
+let w: P[] = []
+w.push({ x: 10, y: 0 })
+function readBack() { w[0].x = 42; return w[0].x }
+console.log(readBack())                                      // 42

@@ -629,7 +629,8 @@ impl RustType {
                 // through the generated `impl TishStruct` (small match, no hash). The old eager
                 // `object_from_pairs` now lives in `TishStruct::tish_to_object` (see
                 // [`named_struct_to_object_expr`]) — reached only when the struct genuinely materialises
-                // (JSON.stringify, spread, `Object.keys`) or on the non-portable fallback. `.clone()`
+                // (JSON.stringify, display, `Object.keys`-family, `for..in`, `in`, `Object.assign`,
+                // `{...s}` spread) or on the non-portable fallback. `.clone()`
                 // because the struct is accessed behind `&self` / a `borrow()`; codegen already emits a
                 // deref place here (e.g. `(*gs.borrow())`), matching the historical behaviour.
                 format!(
@@ -682,7 +683,8 @@ pub fn named_struct_ident(tish_name: &str) -> String {
 /// Build the `Value::object_from_pairs([...])` that materialises a Named struct at `native_expr` into
 /// an ORDERED boxed object (field-declaration = JS insertion order — deterministic, unlike an AHashMap
 /// insert). This was the body of `to_value_expr`'s `Named` arm; it now backs the generated
-/// `TishStruct::tish_to_object` (the JSON / spread / `Object.keys` materialisation, and the non-portable
+/// `TishStruct::tish_to_object` (the JSON / display / `Object.keys`-family / `for..in` / `in` /
+/// `Object.assign` / `{...s}` spread materialisation, and the non-portable
 /// `Value::from_struct` fallback), while the live boxing path emits the cheap by-ref `Value::from_struct`.
 pub fn named_struct_to_object_expr(fields: &[(Arc<str>, RustType)], native_expr: &str) -> String {
     let pairs = fields

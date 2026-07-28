@@ -1735,7 +1735,7 @@ impl Codegen {
     /// Emit `impl tishlang_runtime::TishStruct for TishStruct_<name>` so a typed struct can be boxed
     /// BY REFERENCE into a `Value` (`Value::from_struct`) rather than eagerly serialised to a hashmap
     /// object. `tish_get`/`tish_set` are the dynamic property path (a `match` on the field name — no
-    /// hash, no alloc); `tish_to_object` is the materialisation used for JSON / spread / `Object.keys`
+    /// hash, no alloc); `tish_to_object` is the materialisation used for JSON / `Object.keys`-family
     /// and as the non-portable `from_struct` fallback (identical to the historical boundary).
     fn emit_struct_tish_impl(
         &mut self,
@@ -1905,6 +1905,100 @@ impl Codegen {
 
     /// #315: direct JSON serializer for `JSON.stringify(arg)` when `arg`'s static type is a
     /// simple struct (or Vec of one). Returns None → fall through to the generic Value path.
+    /// A boxed `Value` of a struct field: a `Value`-typed field is cloned out of the borrow; a native
+    /// field boxes through its own `to_value_expr` (which copies/clones internally). `place` is the
+    /// borrowed struct expression (e.g. `_s`), so the access is `place.field`.
+    fn struct_field_to_value(place: &str, k: &std::sync::Arc<str>, fty: &crate::types::RustType) -> String {
+        let access = format!("{}.{}", place, crate::types::field_ident(k));
+        if matches!(fty, crate::types::RustType::Value) {
+            format!("{}.clone()", access)
+        } else {
+            fty.to_value_expr(&access)
+        }
+    }
+
+    /// Static-type-aware reflection: `Object.keys(s)` / `Object.values(s)` / `Object.entries(s)` where
+    /// `s`'s static type is a known struct (`RustType::Named`). Reads the struct's fields NATIVELY, so
+    /// the struct is never boxed to a `Value::Struct` (GBA) / hashmap object (elsewhere) and no
+    /// intermediate object is built — only the RESULT array is a `Value` (that is the op's output, and
+    /// unavoidable). Keys come from the compile-time field list; values are native field reads. Returns
+    /// `None` (→ the generic boxed `Object.*` path) for a non-struct arg, a spread/multi arg, or a
+    /// dynamic key. This is target-agnostic: the `TishStruct_*` Rust struct exists on every native
+    /// backend, so the same native reads apply on GBA and desktop alike.
+    fn try_emit_native_object_reflection(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<Option<String>, CompileError> {
+        use crate::types::RustType;
+        // GBA only. Desktop keeps reflection on the existing boxed path — it's already correct there
+        // (a struct materialises to a real `Value::Object`), and gating avoids any churn to desktop
+        // benches / codegen-string tests. GBA is where avoiding the `Value::Struct` box + hashmap
+        // actually matters. The native reads are target-agnostic, so this path was validated by
+        // running it on desktop before the gate went in.
+        if self.emit_mode != crate::NativeEmitMode::Gba {
+            return Ok(None);
+        }
+        let Expr::Member {
+            object,
+            prop: MemberProp::Name { name: m, .. },
+            optional: false,
+            ..
+        } = callee
+        else {
+            return Ok(None);
+        };
+        if !matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Object") {
+            return Ok(None);
+        }
+        let kind = m.as_ref();
+        if !matches!(kind, "keys" | "values" | "entries") || args.len() != 1 {
+            return Ok(None);
+        }
+        let CallArg::Expr(arg0) = &args[0] else {
+            return Ok(None);
+        };
+        let (code, ty) = self.emit_typed_expr(arg0)?;
+        let RustType::Named { fields, .. } = &ty else {
+            return Ok(None);
+        };
+        let out = match kind {
+            // Keys are the compile-time field names; the struct is evaluated only for side effects.
+            "keys" => {
+                let keys = fields
+                    .iter()
+                    .map(|(k, _)| format!("Value::String({:?}.into())", k.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ let _ = &({}); Value::Array(VmRef::new(vec![{}])) }}", code, keys)
+            }
+            "values" => {
+                let vals = fields
+                    .iter()
+                    .map(|(k, fty)| Self::struct_field_to_value("_s", k, fty))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ let _s = &({}); Value::Array(VmRef::new(vec![{}])) }}", code, vals)
+            }
+            "entries" => {
+                let pairs = fields
+                    .iter()
+                    .map(|(k, fty)| {
+                        format!(
+                            "Value::Array(VmRef::new(vec![Value::String({:?}.into()), {}]))",
+                            k.as_ref(),
+                            Self::struct_field_to_value("_s", k, fty)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ let _s = &({}); Value::Array(VmRef::new(vec![{}])) }}", code, pairs)
+            }
+            _ => unreachable!("kind checked above"),
+        };
+        Ok(Some(out))
+    }
+
     fn try_emit_direct_json_stringify(
         &mut self,
         arg: &Expr,
@@ -7405,6 +7499,12 @@ impl Codegen {
                         }
                     }
                 }
+                // Static-type-aware reflection: `Object.keys/values/entries(s)` on a statically-known
+                // struct → native field reads, never boxing the struct or building an intermediate
+                // object. Falls through to the generic boxed `Object.*` path for a non-struct arg.
+                if let Some(code) = self.try_emit_native_object_reflection(callee, args)? {
+                    return Ok(code);
+                }
                 // #178: route a boxed-context call to a recursive-struct consumer
                 // (`sum(build(n))` / `sum(node)`) → `Value::Number(sum_rec(&..))`.
                 if self.rec_struct_plan.is_some() {
@@ -7436,29 +7536,273 @@ impl Codegen {
                     // ── native Vec<T> push fast path ──────────────────────────────
                     if method_name.as_ref() == "push" {
                         if let Expr::Ident { name, .. } = object.as_ref() {
-                            if !self.refcell_wrapped_vars.contains(name.as_ref()) {
-                                let obj_type = self.type_context.get_type(name.as_ref());
-                                if let RustType::Vec(elem_type) = obj_type {
-                                    let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
-                                    // Collect push arguments as native values.
-                                    let mut push_stmts: Vec<String> = Vec::new();
-                                    for a in args {
-                                        if let CallArg::Expr(e) = a {
-                                            // Emit the element AGAINST the Vec's element type so an object
-                                            // literal hits the struct-literal fast path (direct `Struct { … }`
-                                            // with each field value emitted natively — zero allocations)
-                                            // instead of building a boxed `object_from_pairs` and then
-                                            // `get_prop`-ing every field back out. emit_native_expr falls
-                                            // back to the typed/value path for non-literal args.
-                                            let native_val = self.emit_native_expr(e, elem_type.as_ref())?;
-                                            push_stmts.push(format!("{}.push({});", esc_obj, native_val));
-                                        }
+                            let obj_type = self.type_context.get_type(name.as_ref());
+                            if let RustType::Vec(elem_type) = obj_type {
+                                let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                // A captured (refcell-wrapped) native Vec pushes through
+                                // `(*a.borrow_mut())` — WITHOUT this it fell to the boxed `array_push`,
+                                // which boxed the WHOLE Vec into a throwaway `Value::Array` (discarding
+                                // the push, O(n), and — for a `Vec<struct>` — E0282 on the `from_struct`
+                                // boxing closure since the native push never ran to pin the element type).
+                                let base = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                    format!("(*{}.borrow_mut())", esc_obj)
+                                } else {
+                                    esc_obj
+                                };
+                                // Collect push arguments as native values.
+                                let mut push_stmts: Vec<String> = Vec::new();
+                                for a in args {
+                                    if let CallArg::Expr(e) = a {
+                                        // Emit the element AGAINST the Vec's element type so an object
+                                        // literal hits the struct-literal fast path (direct `Struct { … }`
+                                        // with each field value emitted natively — zero allocations)
+                                        // instead of building a boxed `object_from_pairs` and then
+                                        // `get_prop`-ing every field back out. emit_native_expr falls
+                                        // back to the typed/value path for non-literal args.
+                                        let native_val = self.emit_native_expr(e, elem_type.as_ref())?;
+                                        push_stmts.push(format!("{}.push({});", base, native_val));
                                     }
-                                    return Ok(format!(
-                                        "{{ {} Value::Null }}",
-                                        push_stmts.join(" ")
-                                    ));
                                 }
+                                // `push` returns the new length (JS / tish interp) — a plain read, no
+                                // O(n) boxing. A captured Vec reads its length through `(*a.borrow())`.
+                                let base_read = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                    format!("(*{}.borrow())", Self::escape_ident(name.as_ref()))
+                                } else {
+                                    Self::escape_ident(name.as_ref()).into_owned()
+                                };
+                                return Ok(format!(
+                                    "{{ {} Value::Number({}.len() as f64) }}",
+                                    push_stmts.join(" "),
+                                    base_read
+                                ));
+                            }
+                        }
+                    }
+
+                    // Native in-place mutators on a native `Vec` (`pop`/`shift`/`unshift`/`reverse`).
+                    // The boxed `array_*` fallback operates on a THROWAWAY boxed copy of the Vec, so the
+                    // mutation is DISCARDED (O(n), and — for a `Vec<struct>` — an E0282 on the boxing
+                    // closure); these mutate the real Vec. A captured Vec goes through `(*a.borrow_mut())`.
+                    // Return values match JS / tish interp: pop/shift yield the removed element (boxed) or
+                    // Null; unshift yields the new length; reverse yields THE array (boxed copy — a native
+                    // `Vec` has no O(1) by-ref boxing like interp's Rc-array, so the contents match but it
+                    // is not aliased; reverse is O(n) anyway so the copy is asymptotically free).
+                    if matches!(method_name.as_ref(), "pop" | "shift" | "unshift" | "reverse") {
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if let RustType::Vec(elem_type) =
+                                self.type_context.get_type(name.as_ref())
+                            {
+                                let esc = Self::escape_ident(name.as_ref()).into_owned();
+                                let wrapped_v = self.refcell_wrapped_vars.contains(name.as_ref());
+                                let base = if wrapped_v {
+                                    format!("(*{}.borrow_mut())", esc)
+                                } else {
+                                    esc.clone()
+                                };
+                                // Shared-borrow read (for `reverse`'s result boxing / length reads).
+                                let base_read = if wrapped_v {
+                                    format!("(*{}.borrow())", esc)
+                                } else {
+                                    esc.clone()
+                                };
+                                // Box a removed element back to a `Value` (`Value` elements pass through).
+                                let box_elem = |v: &str| -> String {
+                                    if matches!(elem_type.as_ref(), RustType::Value) {
+                                        v.to_string()
+                                    } else {
+                                        elem_type.to_value_expr(v)
+                                    }
+                                };
+                                let code = match method_name.as_ref() {
+                                    "pop" => format!(
+                                        "{{ match {b}.pop() {{ Some(__e) => {v}, None => Value::Null }} }}",
+                                        b = base,
+                                        v = box_elem("__e")
+                                    ),
+                                    "shift" => format!(
+                                        "{{ if {b}.is_empty() {{ Value::Null }} else {{ let __e = {b}.remove(0); {v} }} }}",
+                                        b = base,
+                                        v = box_elem("__e")
+                                    ),
+                                    "unshift" => {
+                                        // Bind items to temps BEFORE any `borrow_mut` insert (an item may
+                                        // read the same array), then insert at the front in REVERSE so the
+                                        // argument order is preserved. Returns the new length.
+                                        let mut binds = String::new();
+                                        let mut names: Vec<String> = Vec::new();
+                                        for (i, a) in args.iter().enumerate() {
+                                            if let CallArg::Expr(e) = a {
+                                                let it = self.emit_native_expr(e, elem_type.as_ref())?;
+                                                binds.push_str(&format!("let __u{} = {}; ", i, it));
+                                                names.push(format!("__u{}", i));
+                                            }
+                                        }
+                                        let mut ins = String::new();
+                                        for n in names.iter().rev() {
+                                            ins.push_str(&format!("{}.insert(0, {}); ", base, n));
+                                        }
+                                        format!(
+                                            "{{ {}{}Value::Number({}.len() as f64) }}",
+                                            binds, ins, base
+                                        )
+                                    }
+                                    // reverse in place, then return a boxed copy of the array (contents
+                                    // match interp; see the note above).
+                                    "reverse" => format!(
+                                        "{{ {}.reverse(); Value::Array(VmRef::new({}.iter().cloned().map(|__e| {}).collect())) }}",
+                                        base,
+                                        base_read,
+                                        box_elem("__e")
+                                    ),
+                                    _ => unreachable!("method checked above"),
+                                };
+                                return Ok(code);
+                            }
+                        }
+                    }
+
+                    // Native `splice`/`fill`/`copyWithin` on a native `Vec`. Like the mutators above,
+                    // the boxed fallback would run on a THROWAWAY copy (mutation discarded). These need
+                    // several accesses (len + index math + a range op), so a captured Vec binds ONE
+                    // `borrow_mut` guard `__g` for the whole body; every argument is evaluated BEFORE the
+                    // guard (an arg may read the same array, which would double-borrow the cell). JS index
+                    // clamping (negative → from end, out-of-range → clamped) is emitted inline so the
+                    // result matches the interpreter.
+                    if matches!(method_name.as_ref(), "splice" | "fill" | "copyWithin") {
+                        if let Expr::Ident { name, .. } = object.as_ref() {
+                            if let RustType::Vec(elem_type) =
+                                self.type_context.get_type(name.as_ref())
+                            {
+                                let esc = Self::escape_ident(name.as_ref()).into_owned();
+                                let wrapped = self.refcell_wrapped_vars.contains(name.as_ref());
+                                // `p` is the Vec place inside the body: a `borrow_mut` guard when wrapped.
+                                let (guard, p) = if wrapped {
+                                    (format!("let mut __g = {}.borrow_mut(); ", esc), "__g".to_string())
+                                } else {
+                                    (String::new(), esc.clone())
+                                };
+                                let elem_rust = elem_type.to_rust_type_str();
+                                let box_elem = |v: &str| -> String {
+                                    if matches!(elem_type.as_ref(), RustType::Value) {
+                                        v.to_string()
+                                    } else {
+                                        elem_type.to_value_expr(v)
+                                    }
+                                };
+                                // `fill`/`copyWithin` return THE array (JS / tish interp) — a boxed copy
+                                // built from the (still-borrowed) place `p` after the mutation. Contents
+                                // match interp; not aliased (a native `Vec` has no O(1) by-ref boxing).
+                                let arr_box = format!(
+                                    "Value::Array(VmRef::new({}.iter().cloned().map(|__be| {}).collect()))",
+                                    p,
+                                    box_elem("__be")
+                                );
+                                // f64 arg (bound before the guard) → a clamped `usize` index.
+                                let clamp = |v: &str| -> String {
+                                    format!(
+                                        "(if {v} < 0.0 {{ (__lenf + {v}).max(0.0) }} else {{ {v}.min(__lenf) }}) as usize"
+                                    )
+                                };
+                                let argf = |cg: &mut Self, i: usize| -> Result<Option<String>, CompileError> {
+                                    match args.get(i) {
+                                        Some(CallArg::Expr(e)) => {
+                                            Ok(Some(cg.emit_native_expr(e, &RustType::F64)?))
+                                        }
+                                        _ => Ok(None),
+                                    }
+                                };
+                                let code = match method_name.as_ref() {
+                                    "splice" => {
+                                        let start = argf(self, 0)?.unwrap_or_else(|| "0.0".into());
+                                        let dc = argf(self, 1)?;
+                                        // Items to insert (args[2..]) — bound before the guard.
+                                        let mut item_binds = String::new();
+                                        let mut item_names: Vec<String> = Vec::new();
+                                        for (i, a) in args.iter().enumerate().skip(2) {
+                                            if let CallArg::Expr(e) = a {
+                                                let it = self.emit_native_expr(e, elem_type.as_ref())?;
+                                                item_binds.push_str(&format!("let __it{} = {}; ", i, it));
+                                                item_names.push(format!("__it{}", i));
+                                            }
+                                        }
+                                        let dc_bind = dc
+                                            .as_ref()
+                                            .map(|d| format!("let __dc = {}; ", d))
+                                            .unwrap_or_default();
+                                        let del_calc = if dc.is_some() {
+                                            "let __del = if __dc < 0.0 { 0usize } else { (__dc as usize).min(__len - __start) };"
+                                        } else {
+                                            "let __del = __len - __start;"
+                                        };
+                                        format!(
+                                            "{{ let __s0 = {start}; {dc_bind}{item_binds}{guard}\
+                                             let __len = {p}.len(); let __lenf = __len as f64; \
+                                             let __start = {start_clamp}; {del_calc} \
+                                             let __items: Vec<{elem_rust}> = vec![{items}]; \
+                                             let __removed: Vec<{elem_rust}> = {p}.splice(__start..__start + __del, __items).collect(); \
+                                             Value::Array(VmRef::new(__removed.into_iter().map(|__e| {boxed}).collect())) }}",
+                                            start_clamp = clamp("__s0"),
+                                            items = item_names.join(", "),
+                                            boxed = box_elem("__e"),
+                                        )
+                                    }
+                                    "fill" => {
+                                        // fill(value, start=0, end=len)
+                                        let val = match args.first() {
+                                            Some(CallArg::Expr(e)) => {
+                                                self.emit_native_expr(e, elem_type.as_ref())?
+                                            }
+                                            _ => elem_type.default_value(),
+                                        };
+                                        let start = argf(self, 1)?.unwrap_or_else(|| "0.0".into());
+                                        let end = argf(self, 2)?;
+                                        format!(
+                                            "{{ let __v = {val}; let __s0 = {start}; {end}{guard}\
+                                             let __len = {p}.len(); let __lenf = __len as f64; \
+                                             let __start = {start_clamp}; {end_clamp}\
+                                             let mut __i = __start; while __i < __end {{ {p}[__i] = __v.clone(); __i += 1; }} \
+                                             {arr_box} }}",
+                                            end = end
+                                                .as_ref()
+                                                .map(|e| format!("let __e0 = {}; ", e))
+                                                .unwrap_or_default(),
+                                            start_clamp = clamp("__s0"),
+                                            end_clamp = end
+                                                .as_ref()
+                                                .map(|_| format!("let __end = {}; ", clamp("__e0")))
+                                                .unwrap_or_else(|| "let __end = __len; ".into()),
+                                            arr_box = arr_box,
+                                        )
+                                    }
+                                    "copyWithin" => {
+                                        // copyWithin(target, start=0, end=len) — overlap-safe via a temp.
+                                        let target = argf(self, 0)?.unwrap_or_else(|| "0.0".into());
+                                        let start = argf(self, 1)?.unwrap_or_else(|| "0.0".into());
+                                        let end = argf(self, 2)?;
+                                        format!(
+                                            "{{ let __t0 = {target}; let __s0 = {start}; {end_bind}{guard}\
+                                             let __len = {p}.len(); let __lenf = __len as f64; \
+                                             let __target = {target_clamp}; let __start = {start_clamp}; {end_clamp}\
+                                             let __count = if __end > __start {{ (__end - __start).min(__len - __target) }} else {{ 0 }}; \
+                                             let __tmp: Vec<{elem_rust}> = {p}[__start..__start + __count].to_vec(); \
+                                             let mut __k = 0usize; for __val in __tmp {{ {p}[__target + __k] = __val; __k += 1; }} \
+                                             {arr_box} }}",
+                                            end_bind = end
+                                                .as_ref()
+                                                .map(|e| format!("let __e0 = {}; ", e))
+                                                .unwrap_or_default(),
+                                            target_clamp = clamp("__t0"),
+                                            start_clamp = clamp("__s0"),
+                                            end_clamp = end
+                                                .as_ref()
+                                                .map(|_| format!("let __end = {}; ", clamp("__e0")))
+                                                .unwrap_or_else(|| "let __end = __len; ".into()),
+                                            arr_box = arr_box,
+                                        )
+                                    }
+                                    _ => unreachable!("method checked above"),
+                                };
+                                return Ok(code);
                             }
                         }
                     }
@@ -7471,34 +7815,59 @@ impl Codegen {
                     // sorts via the runtime, and writes the result back into the Vec (correct).
                     if method_name.as_ref() == "sort" {
                         if let Expr::Ident { name, .. } = object.as_ref() {
-                            if !self.refcell_wrapped_vars.contains(name.as_ref()) {
-                                if let RustType::Vec(elem_type) =
-                                    self.type_context.get_type(name.as_ref())
-                                {
-                                    if matches!(elem_type.as_ref(), RustType::Named { .. }) {
-                                        let esc = Self::escape_ident(name.as_ref()).into_owned();
-                                        if let Some(CallArg::Expr(cmp)) = args.first() {
-                                            if let Some(keys) =
-                                                Self::detect_lexicographic_key_comparator(cmp)
-                                            {
-                                                if keys.iter().all(|(p, _)| p.len() == 1) {
-                                                    let chain = Self::render_struct_sort_chain(&keys);
-                                                    return Ok(format!(
-                                                        "{{ {esc}.sort_by(|a, b| {chain}); Value::Null }}"
-                                                    ));
-                                                }
+                            if let RustType::Vec(elem_type) =
+                                self.type_context.get_type(name.as_ref())
+                            {
+                                if matches!(elem_type.as_ref(), RustType::Named { .. }) {
+                                    let esc = Self::escape_ident(name.as_ref()).into_owned();
+                                    // A captured (refcell-wrapped) Vec sorts through the shared cell:
+                                    // `base_mut` for the in-place `sort_by`, `base_read` for the boxing
+                                    // scan, `assign` for the general-comparator write-back.
+                                    let wrapped = self.refcell_wrapped_vars.contains(name.as_ref());
+                                    let base_mut = if wrapped {
+                                        format!("(*{}.borrow_mut())", esc)
+                                    } else {
+                                        esc.clone()
+                                    };
+                                    let base_read = if wrapped {
+                                        format!("(*{}.borrow())", esc)
+                                    } else {
+                                        esc.clone()
+                                    };
+                                    let assign = if wrapped {
+                                        format!("*{}.borrow_mut()", esc)
+                                    } else {
+                                        esc.clone()
+                                    };
+                                    // `sort` returns THE array (JS / tish interp) — a boxed copy of the
+                                    // now-sorted Vec (contents match interp; not aliased). `sort` is
+                                    // O(n log n), so the O(n) box is asymptotically free.
+                                    let sort_box = format!(
+                                        "Value::Array(VmRef::new({}.iter().cloned().map(|__se| {}).collect()))",
+                                        base_read,
+                                        elem_type.to_value_expr("__se")
+                                    );
+                                    if let Some(CallArg::Expr(cmp)) = args.first() {
+                                        if let Some(keys) =
+                                            Self::detect_lexicographic_key_comparator(cmp)
+                                        {
+                                            if keys.iter().all(|(p, _)| p.len() == 1) {
+                                                let chain = Self::render_struct_sort_chain(&keys);
+                                                return Ok(format!(
+                                                    "{{ {base_mut}.sort_by(|a, b| {chain}); {sort_box} }}"
+                                                ));
                                             }
-                                            // General comparator: box → sort → write back (correct).
-                                            let cmp_code = self.emit_expr(cmp)?;
-                                            let to_v = elem_type.to_value_expr("__e");
-                                            let from_v = elem_type.from_value_expr("__v");
-                                            return Ok(format!(
-                                                "{{ let __sv: Vec<Value> = {esc}.iter().map(|__e| {to_v}).collect(); \
-                                                 let __sorted = tishlang_runtime::array_sort(&Value::Array(VmRef::new(__sv)), Some(&({cmp_code}))); \
-                                                 if let Value::Array(__a) = __sorted {{ {esc} = __a.borrow().iter().map(|__v| {from_v}).collect(); }} \
-                                                 Value::Null }}"
-                                            ));
                                         }
+                                        // General comparator: box → sort → write back (correct).
+                                        let cmp_code = self.emit_expr(cmp)?;
+                                        let to_v = elem_type.to_value_expr("__e");
+                                        let from_v = elem_type.from_value_expr("__v");
+                                        return Ok(format!(
+                                            "{{ let __sv: Vec<Value> = {base_read}.iter().map(|__e| {to_v}).collect(); \
+                                             let __sorted = tishlang_runtime::array_sort(&Value::Array(VmRef::new(__sv)), Some(&({cmp_code}))); \
+                                             if let Value::Array(__a) = __sorted {{ {assign} = __a.borrow().iter().map(|__v| {from_v}).collect(); }} \
+                                             {sort_box} }}"
+                                        ));
                                     }
                                 }
                             }
@@ -8263,9 +8632,42 @@ impl Codegen {
                 // Generalize the typed struct-field fast path to `xs[i].field` (array-of-structs):
                 // when `object` indexes a `Vec<Named>`, do native struct field access.
                 if !optional {
-                    if let (Expr::Index { .. }, MemberProp::Name { name: prop_name, .. }) =
-                        (object.as_ref(), prop)
+                    if let (
+                        Expr::Index { object: io, index: ii, .. },
+                        MemberProp::Name { name: prop_name, .. },
+                    ) = (object.as_ref(), prop)
                     {
+                        // A captured (refcell-wrapped) `Vec<Named>` element field read: emit the field
+                        // access DIRECTLY on the borrowed element (`(*arr.borrow())[i].field`) — no whole
+                        // struct clone, and no whole-Vec boxing. This is the hot-loop `states[id].timer`
+                        // case (tish#558 read side). A non-Copy field is still cloned out of the borrow.
+                        if let Expr::Ident { name: arr_name, .. } = io.as_ref() {
+                            if self.refcell_wrapped_vars.contains(arr_name.as_ref()) {
+                                if let RustType::Vec(elem) =
+                                    self.type_context.get_type(arr_name.as_ref())
+                                {
+                                    if let RustType::Named { fields, .. } = elem.as_ref() {
+                                        if let Some((_, field_ty)) = fields
+                                            .iter()
+                                            .find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                        {
+                                            let field_ty = field_ty.clone();
+                                            let idx = self.emit_index_usize(ii)?;
+                                            let esc = Self::escape_ident(arr_name.as_ref());
+                                            let clone = if field_ty.is_copy() { "" } else { ".clone()" };
+                                            let access = format!(
+                                                "(*{}.borrow())[{}].{}{}",
+                                                esc,
+                                                idx,
+                                                crate::types::field_ident(prop_name.as_ref()),
+                                                clone
+                                            );
+                                            return Ok(field_ty.to_value_expr(&access));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let (obj_code, obj_ty) = self.emit_typed_expr(object)?;
                         if let RustType::Named { fields, .. } = &obj_ty {
                             if let Some((_, field_ty)) =
@@ -8282,6 +8684,26 @@ impl Codegen {
                                     clone
                                 );
                                 return Ok(field_ty.to_value_expr(&access));
+                            }
+                        }
+                    }
+                }
+                // `arr.length` on a native `Vec` (wrapped or not) → a cheap native `len()` boxed to a
+                // `Number`, instead of boxing the WHOLE Vec to a `Value::Array` just to `get_prop`
+                // its length (O(n) per read — the hot `states.length`-per-frame footgun, tish#562).
+                if !*optional {
+                    if let MemberProp::Name { name: p, .. } = prop {
+                        if p.as_ref() == "length" {
+                            if let Expr::Ident { name, .. } = object.as_ref() {
+                                if let RustType::Vec(_) = self.type_context.get_type(name.as_ref()) {
+                                    let esc = Self::escape_ident(name.as_ref());
+                                    let len = if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                                        format!("{}.borrow().len()", esc)
+                                    } else {
+                                        format!("{}.len()", esc)
+                                    };
+                                    return Ok(format!("Value::Number({} as f64)", len));
+                                }
                             }
                         }
                     }
@@ -8444,9 +8866,58 @@ impl Codegen {
                                 }
                             }
                             ObjectProp::Spread(e) => {
-                                let val = self.emit_expr(e)?;
+                                // Peek the source's static type ONCE. On GBA a statically-known struct
+                                // spreads NATIVELY (fields read straight off the Rust struct → the source
+                                // is never boxed to a `Value::Struct` / hashmap). `to_value_expr` re-boxes
+                                // a native scalar source so the boxed arms still receive a `Value`
+                                // (`{ ...5 }` stays sound). Desktop is deliberately untouched — a struct
+                                // source there boxes exactly as before (byte-identical emit, so the hot
+                                // object_spread bench keeps its clone-shape path).
+                                let gba = self.emit_mode == crate::NativeEmitMode::Gba;
+                                let (typed_code, typed_ty) = self.emit_typed_expr(e)?;
+                                if gba {
+                                    if let crate::types::RustType::Named { fields, .. } = &typed_ty {
+                                        let mut ins = String::new();
+                                        for (k, fty) in fields {
+                                            let key = self.cached_object_key(k.as_ref());
+                                            ins.push_str(&format!(
+                                                "_obj.insert({}, {}); ",
+                                                key,
+                                                Self::struct_field_to_value("_s", k, fty)
+                                            ));
+                                        }
+                                        let block = format!("{{ let _s = &({}); {}}}", typed_code, ins);
+                                        if i == 0 {
+                                            init = format!(
+                                                "let mut _obj: PropMap = PropMap::with_capacity({}); {}",
+                                                literal_keys + fields.len(),
+                                                block
+                                            );
+                                        } else {
+                                            // Later struct fields override earlier keys (JS order).
+                                            parts.push(block);
+                                        }
+                                        continue;
+                                    }
+                                }
+                                let val = if typed_ty.is_native() {
+                                    typed_ty.to_value_expr(&typed_code)
+                                } else {
+                                    typed_code
+                                };
+                                // GBA (non-struct source, e.g. a struct behind a `Value` param): route
+                                // through the facade's `object_spread_props`, which materialises a
+                                // `Value::Struct` to its object first. Desktop keeps the inline `if let
+                                // Value::Object` fast path untouched (no struct variant exists there, and
+                                // it's the hot object_spread bench).
                                 if i == 0 {
-                                    init = format!("let mut _obj: PropMap = if let Value::Object(ref _spread) = {} {{ _spread.borrow().strings.clone() }} else {{ PropMap::with_capacity({}) }};", val, literal_keys);
+                                    init = if gba {
+                                        format!("let mut _obj: PropMap = tishlang_runtime::object_spread_props(&({})).unwrap_or_else(|| PropMap::with_capacity({}));", val, literal_keys)
+                                    } else {
+                                        format!("let mut _obj: PropMap = if let Value::Object(ref _spread) = {} {{ _spread.borrow().strings.clone() }} else {{ PropMap::with_capacity({}) }};", val, literal_keys)
+                                    };
+                                } else if gba {
+                                    parts.push(format!("if let Some(_spread) = tishlang_runtime::object_spread_props(&({})) {{ _obj.merge_from(&_spread); }}", val));
                                 } else {
                                     // `merge_from` reserves for the source's len, then inserts in one
                                     // pass (later props still override earlier keys, matching JS order).
@@ -9613,6 +10084,29 @@ impl Codegen {
             Expr::Unary { operand, .. } => Self::collect_assigned_idents_in_expr(operand, names),
             Expr::Delete { target, .. } => Self::collect_assigned_idents_in_expr(target, names),
             Expr::Call { callee, args, .. } => {
+                // An in-place mutating array method (`a.push(x)`, `a.pop()`, `a.reverse()`, …) mutates
+                // the ROOT variable — record it so a captured native Vec is wrapped for shared mutation.
+                // WITHOUT this, the mutation inside a closure lands on a by-value / immutable-`let`
+                // captured Vec (E0596), and the boxed fallback would DISCARD it (and E0282 on a
+                // `Vec<struct>`, whose element type the skipped native op never pinned). Every listed
+                // method has a native fast path that handles the wrapped receiver (a `(*a.borrow_mut())`
+                // access, or a `borrow_mut` guard for the multi-access `splice`/`fill`/`copyWithin`).
+                if let Expr::Member {
+                    object,
+                    prop: MemberProp::Name { name: m, .. },
+                    ..
+                } = callee.as_ref()
+                {
+                    if matches!(
+                        m.as_ref(),
+                        "push" | "pop" | "shift" | "unshift" | "reverse" | "sort" | "splice"
+                            | "fill" | "copyWithin"
+                    ) {
+                        if let Some(root) = Self::root_ident_of(object) {
+                            names.insert(root.to_string());
+                        }
+                    }
+                }
                 Self::collect_assigned_idents_in_expr(callee, names);
                 for arg in args {
                     match arg {
@@ -11041,11 +11535,15 @@ impl Codegen {
         {
             if p.as_ref() == "length" {
                 if let Expr::Ident { name: arr, .. } = object.as_ref() {
-                    if matches!(self.type_context.get_type(arr.as_ref()), RustType::Vec(_))
-                        && !self.refcell_wrapped_vars.contains(arr.as_ref())
-                    {
+                    if matches!(self.type_context.get_type(arr.as_ref()), RustType::Vec(_)) {
                         let esc = Self::escape_ident(arr.as_ref());
-                        return Ok(format!("({}.len() as f64)", esc));
+                        // A captured Vec reads its length through the cell (`(*a.borrow()).len()`).
+                        let code = if self.refcell_wrapped_vars.contains(arr.as_ref()) {
+                            format!("(*{}.borrow()).len() as f64", esc)
+                        } else {
+                            format!("{}.len() as f64", esc)
+                        };
+                        return Ok(format!("({})", code));
                     }
                 }
             }
@@ -12717,15 +13215,19 @@ impl Codegen {
         value: &Expr,
         side_effect_only: bool,
     ) -> Result<Option<String>, CompileError> {
-        let (place, fields) = match object {
-            // `arr[i].field = v` — a typed struct Vec element.
+        // `prelude` binds any index temp BEFORE a `borrow_mut()` place is taken (so the index may
+        // itself read the array — `arr[arr.length-1]` — without a RefCell double-borrow); it is empty
+        // for the non-wrapped cases. `place` is the addressable struct expression the field stores into.
+        let (prelude, place, fields) = match object {
+            // `arr[i].field = v` — a typed struct Vec element. A captured (refcell-wrapped) array
+            // writes through `(*arr.borrow_mut())[i]` so the store lands natively on the shared cell;
+            // WITHOUT this it fell to the generic member-assign, which boxed the WHOLE Vec into a
+            // throwaway `Value::Array` (cloning + `from_struct`-boxing every element) and `set_prop`'d
+            // the discarded copy — O(n) per write, the write lost, and an E0282 on the boxing closure.
             Expr::Index { object: io, index, .. } => {
                 let Expr::Ident { name, .. } = io.as_ref() else {
                     return Ok(None);
                 };
-                if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                    return Ok(None);
-                }
                 let RustType::Vec(elem) = self.type_context.get_type(name.as_ref()) else {
                     return Ok(None);
                 };
@@ -12734,10 +13236,16 @@ impl Codegen {
                 };
                 let fields = fields.clone();
                 let idx_usize = self.emit_index_usize(index)?;
-                (
-                    format!("{}[{}]", Self::escape_ident(name.as_ref()), idx_usize),
-                    fields,
-                )
+                let esc = Self::escape_ident(name.as_ref());
+                if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    (
+                        format!("let _i = {}; ", idx_usize),
+                        format!("(*{}.borrow_mut())[_i]", esc),
+                        fields,
+                    )
+                } else {
+                    (String::new(), format!("{}[{}]", esc, idx_usize), fields)
+                }
             }
             // `s.field = v` — a struct-typed local/var. A captured (refcell-wrapped) struct writes
             // through `(*s.borrow_mut())` so the field store lands natively on the shared cell instead
@@ -12752,7 +13260,7 @@ impl Codegen {
                 } else {
                     Self::escape_ident(name.as_ref()).into_owned()
                 };
-                (place, fields)
+                (String::new(), place, fields)
             }
             _ => return Ok(None),
         };
@@ -12764,11 +13272,15 @@ impl Codegen {
         let field = crate::types::field_ident(prop);
         let coerced = self.emit_coerced_native(value, &field_ty)?;
         // Bind the RHS to a temp first so a `borrow_mut()` place can't alias a `borrow()` in the RHS
-        // (`s.a = s.b + 1`) — evaluate the read before taking the mutable borrow.
-        let via_temp = place.contains(".borrow_mut()");
+        // (`s.a = s.b + 1`) — evaluate the read before taking the mutable borrow. Any index prelude
+        // runs first, so its evaluation also predates the borrow.
+        let via_temp = !prelude.is_empty() || place.contains(".borrow_mut()");
         if side_effect_only {
             if via_temp {
-                Ok(Some(format!("{{ let _v = {}; {}.{} = _v; }}", coerced, place, field)))
+                Ok(Some(format!(
+                    "{{ {}let _v = {}; {}.{} = _v; }}",
+                    prelude, coerced, place, field
+                )))
             } else {
                 Ok(Some(format!("{}.{} = {}", place, field, coerced)))
             }
@@ -12782,8 +13294,8 @@ impl Codegen {
                 "_v".to_string()
             };
             Ok(Some(format!(
-                "{{ let _v = {}; {}.{} = _v.clone(); {} }}",
-                coerced, place, field, ret
+                "{{ {}let _v = {}; {}.{} = _v.clone(); {} }}",
+                prelude, coerced, place, field, ret
             )))
         }
     }
@@ -22699,6 +23211,41 @@ impl Codegen {
                     }
                 }
 
+                // GBA: `key in s` on a statically-known struct → answer NATIVELY against the field
+                // names (no boxing of `s`, no hashmap). A string-literal key folds to a compile-time
+                // bool; a string-typed key becomes a `matches!` over the field names (zero alloc). The
+                // struct is still evaluated (bound to `_`) for its side effects. Any other key kind
+                // falls through to the boxed runtime `in` below. Desktop is untouched.
+                if *op == BinOp::In
+                    && self.emit_mode == crate::NativeEmitMode::Gba
+                {
+                    if let RustType::Named { fields, .. } = &rt {
+                        if let Expr::Literal { value: Literal::String(s), .. } = left.as_ref() {
+                            let present = fields.iter().any(|(k, _)| k.as_ref() == s.as_ref());
+                            return Ok((
+                                format!("{{ let _ = &({}); Value::Bool({}) }}", r, present),
+                                RustType::Value,
+                            ));
+                        }
+                        if lt == RustType::String {
+                            let arms = fields
+                                .iter()
+                                .map(|(k, _)| format!("{:?}", k.as_ref()))
+                                .collect::<Vec<_>>()
+                                .join(" | ");
+                            // Bind the key BEFORE evaluating the struct — `key in obj` evaluates
+                            // left-to-right, so the key's side effects must run first.
+                            return Ok((
+                                format!(
+                                    "{{ let _k = ({}); let _ = &({}); Value::Bool(matches!(_k.as_str(), {})) }}",
+                                    l, r, arms
+                                ),
+                                RustType::Value,
+                            ));
+                        }
+                    }
+                }
+
                 // Fall back: convert both sides to Value and use the runtime.
                 let lv = Self::box_operand_for_runtime(left, &l, &lt);
                 let rv = Self::box_operand_for_runtime(right, &r, &rt);
@@ -22785,10 +23332,20 @@ impl Codegen {
                 // Native fast path: `vec[i]` where vec is Vec<T> and i is numeric.
                 if !optional {
                     if let Expr::Ident { name, .. } = object.as_ref() {
-                        if !self.refcell_wrapped_vars.contains(name.as_ref()) {
+                        {
+                            let idx_wrapped = self.refcell_wrapped_vars.contains(name.as_ref());
                             let obj_type = self.type_context.get_type(name.as_ref());
                             if let RustType::Vec(elem_type) = &obj_type {
-                                let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
+                                // A captured (refcell-wrapped) Vec reads through `(*a.borrow())` — WITHOUT
+                                // this it fell to the boxed `get_index`, which cloned + `from_struct`-boxed
+                                // the WHOLE Vec into a `Value::Array` just to read one element (O(n) per
+                                // read — the hot-loop `states[id].timer` footgun, tish#558 read side).
+                                let esc_raw = Self::escape_ident(name.as_ref()).into_owned();
+                                let esc_obj = if idx_wrapped {
+                                    format!("(*{}.borrow())", esc_raw)
+                                } else {
+                                    esc_raw
+                                };
                                 // #173 part 3: prove the index in-bounds BEFORE emitting it.
                                 let in_bounds = self.index_in_bounds(index, name.as_ref());
                                 let idx_usize = if let Expr::Ident { name: idx_name, .. } =
@@ -22852,14 +23409,18 @@ impl Codegen {
                                     RustType::Bool => {
                                         format!("{}.get({}).copied().unwrap_or(false)", esc_obj, idx_usize)
                                     }
-                                    // Other element types keep the direct index (unchanged).
+                                    // Other element types (struct/Value/String). From behind a
+                                    // `borrow()` guard a non-Copy element must be cloned OUT (it can't be
+                                    // moved from the borrow); a plain local keeps the direct place.
+                                    _ if idx_wrapped => format!("{}[{}].clone()", esc_obj, idx_usize),
                                     _ => format!("{}[{}]", esc_obj, idx_usize),
                                 };
                                 return Ok((access, elem_ty));
                             }
                             // Native tuple access: `tuple[const]` -> `tuple.const` (Rust tuples
                             // require a literal index; a variable index falls through to boxed).
-                            if let RustType::Tuple(elems) = &obj_type {
+                            // (Plain local only — a wrapped tuple keeps the boxed path.)
+                            if let (false, RustType::Tuple(elems)) = (idx_wrapped, &obj_type) {
                                 if let Expr::Literal {
                                     value: Literal::Number(n),
                                     ..

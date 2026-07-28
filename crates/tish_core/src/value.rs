@@ -169,8 +169,12 @@ pub trait TishOpaque {
 /// a [`Value::Struct`] WITHOUT serialising to a hashmap object. Each generated `TishStruct_*` implements
 /// it: a boxed function that returns/passes a typed struct keeps it by reference, property access
 /// dispatches here (a small `match` on the field name — no string hash, no allocation), and it
-/// materialises to a real `Value::Object` only when it crosses into genuinely dynamic territory
-/// (`JSON.stringify`, spread, `Object.keys`). No `Send + Sync` bound: the `Value::Struct` variant is
+/// materialises to a real `Value::Object` only when a boxed `Value::Struct` (a struct whose static
+/// type was erased) crosses into genuinely dynamic territory (`JSON.stringify`, display,
+/// `Object.keys`/`values`/`entries`, `for..in`, `in`, `Object.assign`, object-literal spread `{...s}`).
+/// This is the RUNTIME fallback: when the struct's static type IS known at a reflection site, GBA
+/// codegen lowers `Object.keys`/`values`/`entries`/`in`/`{...s}` to native field reads instead — the
+/// struct is never boxed and this materialisation never runs. No `Send + Sync` bound: the `Value::Struct` variant is
 /// `cfg(portable)` and `portable` excludes `send-values` (they are mutually exclusive), so the ref is
 /// single-threaded `Rc` — mirroring the single-threaded [`TishOpaque`].
 pub trait TishStruct {
@@ -495,7 +499,8 @@ pub enum Value {
     /// A typed native struct carried BY REFERENCE (portable / GBA native codegen). Lets a boxed
     /// function return or pass a typed struct without serialising it to a hashmap `Object` —
     /// property access dispatches through [`TishStruct`] (a small match, no hash lookup / alloc), and
-    /// it materialises to an `Object` only on JSON / spread / `Object.keys`. Built via
+    /// it materialises to an `Object` only on JSON / display / `Object.keys`-family / `for..in` /
+    /// `in` / `Object.assign` / `{...s}` spread. Built via
     /// [`Value::from_struct`]. Portable-only: the ref is a single-threaded `Rc<RefCell<dyn …>>` and
     /// `portable` excludes `send-values`, so this never violates `Send` (which off-portable `Value`
     /// may need). A fat pointer is 16 B, so the 24 B `Value` size guard still holds.
