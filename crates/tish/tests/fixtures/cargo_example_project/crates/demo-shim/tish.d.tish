@@ -1,0 +1,4 @@
+// Typed externs shipped by the `demo_shim` crate (auto-loaded from beside its source by codegen).
+// Declares the native signatures of exports so a call lowers to a DIRECT `demo_shim::<name>_typed(..)`
+// instead of the boxed `value_call` path — the consuming program never writes these declarations.
+declare fn add(a: number, b: number): number
