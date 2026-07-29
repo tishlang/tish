@@ -1157,11 +1157,14 @@ pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> O
 /// directory (`from_dir`) to an absolute path that must exist — a missing file is a compile-time
 /// error, not a device panic — and the spec becomes `prefix:/abs/path` (the codegen feeds that
 /// absolute path to the scheme's include macro; agb's `resolve_path` takes absolute paths as-is, so
-/// no asset-copy step is needed). A non-`resolve_file` scheme passes through unchanged.
+/// no asset-copy step is needed). A trailing `@N` on the path (e.g. `font:face.ttf@7`) is stripped
+/// before canonicalize and reattached on the canonical spec so `{size}` is available at emit. A
+/// bare `font:path` (no `@N`) defaults to [`crate::schemes::FONT_DEFAULT_SIZE`]. A non-`resolve_file`
+/// scheme passes through unchanged.
 fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
-    let (prefix, resolve_file) = crate::schemes::with_active(|reg| {
+    let (scheme_name, prefix, resolve_file) = crate::schemes::with_active(|reg| {
         reg.matches(spec)
-            .map(|s| (s.prefix(), s.resolve_file))
+            .map(|s| (s.name.clone(), s.prefix(), s.resolve_file))
     })
     .ok_or_else(|| format!("import '{}' is not a registered scheme", spec))?;
     let rest = spec.strip_prefix(&prefix).unwrap_or(spec);
@@ -1175,7 +1178,8 @@ fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
             prefix
         ));
     }
-    let path = Path::new(rest);
+    let (file_rest, size_opt) = crate::schemes::split_path_size(rest);
+    let path = Path::new(file_rest);
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1186,12 +1190,23 @@ fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
             "{} import '{}': cannot find '{}' (resolved from {}): {}",
             prefix.trim_end_matches(':'),
             spec,
-            rest,
+            file_rest,
             from_dir.display(),
             e
         )
     })?;
-    Ok(format!("{}{}", prefix, abs.to_string_lossy()))
+    let mut out = format!("{}{}", prefix, abs.to_string_lossy());
+    // `font:` always carries an explicit size in the canonical spec (explicit @N, or default 16).
+    if scheme_name == "font" {
+        let size = size_opt.unwrap_or(crate::schemes::FONT_DEFAULT_SIZE);
+        out.push('@');
+        out.push_str(&size.to_string());
+    } else if let Some(size) = size_opt {
+        // Other schemes may use `@N` + `{size}` later; preserve when present.
+        out.push('@');
+        out.push_str(&size.to_string());
+    }
+    Ok(out)
 }
 
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils", "lattish") to an absolute path.

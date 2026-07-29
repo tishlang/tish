@@ -1261,7 +1261,7 @@ pub(crate) struct Codegen {
     cse_temp_counter: usize,
     /// The program's used NON-ASCII characters (collected from every string literal), as a sorted
     /// string. Fed to import schemes via `{charset}` so a scheme can bake only the glyphs a program
-    /// actually uses — e.g. `font<N>:` bakes ASCII + these, not all ~24k glyphs of a CJK font.
+    /// actually uses — e.g. `font:` bakes ASCII + these, not all ~24k glyphs of a CJK font.
     string_charset: String,
 }
 
@@ -1566,7 +1566,7 @@ impl Codegen {
     /// only way a tagless image's sprites escape). Registration into the runtime arena happens in
     /// the entry below.
     /// Collect every NON-ASCII character appearing in the program's string literals, sorted+unique.
-    /// Fed to schemes via `{charset}` (see `render_template`) so a `font<N>:` import can bake only the
+    /// Fed to schemes via `{charset}` (see `render_template`) so a `font:` import can bake only the
     /// glyphs actually used. ASCII is always baked by the scheme, so it's excluded here. Runtime-built
     /// strings (concatenation, numbers) resolve to ASCII, which is covered; a non-ASCII char reachable
     /// only through a computed string is the rare gap (documented — add it to a literal if needed).
@@ -2815,7 +2815,7 @@ impl Codegen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<(), CompileError> {
-        // Only GBA `font<N>:`/`emoji:` schemes consume `{charset}` (and both `render_template`
+        // Only GBA `font:`/`emoji:` schemes consume `{charset}` (and both `render_template`
         // callers that read `string_charset` are Gba-gated), so skip the whole-program string walk
         // for every other target — its result is never read off-GBA.
         if self.emit_mode == crate::NativeEmitMode::Gba {
