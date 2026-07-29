@@ -7869,6 +7869,68 @@ impl Codegen {
                                              {sort_box} }}"
                                         ));
                                     }
+                                } else {
+                                    // #568: a scalar / `Value` native `Vec` (`number[]`, `string[]`,
+                                    // …) sorts IN PLACE like interp/vm/JS. Box a copy, sort it via the
+                                    // SAME runtime fn the boxed path uses (so order is byte-identical),
+                                    // then WRITE the ordered elements BACK into the native Vec — the
+                                    // generic boxed dispatch below sorted a throwaway copy and dropped
+                                    // the write (a silent no-op; only `arr = arr.sort()` worked).
+                                    // Returns the sorted array (JS / interp). `sort` marks the receiver
+                                    // assigned (see `collect_assigned_idents_in_expr`), so the Vec is
+                                    // `mut` and the write-back compiles.
+                                    let esc = Self::escape_ident(name.as_ref()).into_owned();
+                                    let wrapped =
+                                        self.refcell_wrapped_vars.contains(name.as_ref());
+                                    let base_read = if wrapped {
+                                        format!("(*{}.borrow())", esc)
+                                    } else {
+                                        esc.clone()
+                                    };
+                                    let assign = if wrapped {
+                                        format!("*{}.borrow_mut()", esc)
+                                    } else {
+                                        esc.clone()
+                                    };
+                                    let to_v = elem_type.to_value_expr("__e");
+                                    let from_v = elem_type.from_value_expr("__v");
+                                    // Mirror the boxed path's comparator detection EXACTLY (numeric
+                                    // fast path → lexicographic keys → general callback → default),
+                                    // so the sorted order matches the generic path and interp/vm.
+                                    let sort_call = if let Some(CallArg::Expr(cmp)) = args.first() {
+                                        if let Some(ascending) =
+                                            Self::detect_numeric_sort_comparator(cmp)
+                                        {
+                                            if ascending {
+                                                "tishlang_runtime::array_sort_numeric_asc(&__boxed)"
+                                                    .to_string()
+                                            } else {
+                                                "tishlang_runtime::array_sort_numeric_desc(&__boxed)"
+                                                    .to_string()
+                                            }
+                                        } else if let Some(keys) =
+                                            Self::detect_lexicographic_key_comparator(cmp)
+                                        {
+                                            format!(
+                                                "tishlang_runtime::array_sort_by_keys(&__boxed, {})",
+                                                Self::render_sort_keys(&keys)
+                                            )
+                                        } else {
+                                            let cmp_code = self.emit_expr(cmp)?;
+                                            format!(
+                                                "tishlang_runtime::array_sort(&__boxed, Some(&({})))",
+                                                cmp_code
+                                            )
+                                        }
+                                    } else {
+                                        "tishlang_runtime::array_sort(&__boxed, None)".to_string()
+                                    };
+                                    return Ok(format!(
+                                        "{{ let __boxed = Value::Array(VmRef::new({base_read}.iter().cloned().map(|__e| {to_v}).collect())); \
+                                         let __sorted = {sort_call}; \
+                                         if let Value::Array(__a) = &__sorted {{ {assign} = __a.borrow().iter().map(|__v| {from_v}).collect(); }} \
+                                         __sorted }}"
+                                    ));
                                 }
                             }
                         }
