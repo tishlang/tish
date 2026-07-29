@@ -4,21 +4,21 @@
 class TishBindgen < Formula
   desc "CLI to generate Rust glue for Tish cargo: imports (tishlang-cargo-bindgen)"
   homepage "https://github.com/tishlang/tish"
-  version "2.39.0"
+  version "2.43.8"
   license "PIF"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v2.39.0/tish-bindgen-darwin-arm64"
-      sha256 "913817f1849d36bd78748ecf6a18b156e362ceaad9c61afbfaf15a637f75d80a"
+      url "https://github.com/tishlang/tish/releases/download/v2.43.8/tish-bindgen-darwin-arm64"
+      sha256 "3ef5d4dbc4e41ca329854438c72ebddb8a5afe3450f356b8ad22e16922eb5e0e"
 
       def install
         bin.install "tish-bindgen-darwin-arm64" => "tish-bindgen"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v2.39.0/tish-bindgen-darwin-x64"
-      sha256 "4b28f3bc46fd47c62a8264c2ebf05d155e800e71c9da6ebdfe0fb37071232adf"
+      url "https://github.com/tishlang/tish/releases/download/v2.43.8/tish-bindgen-darwin-x64"
+      sha256 "32b3c92b7bb65b6ecf5c8821e66d5b2f0f37269ddf00dbbfce8015d2c658e6e3"
 
       def install
         bin.install "tish-bindgen-darwin-x64" => "tish-bindgen"
@@ -28,16 +28,16 @@ class TishBindgen < Formula
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v2.39.0/tish-bindgen-linux-arm64"
-      sha256 "8687c2cf5241f7ac8fdfdcef170706d46425fded0ddfec9d35b3aaddfe796920"
+      url "https://github.com/tishlang/tish/releases/download/v2.43.8/tish-bindgen-linux-arm64"
+      sha256 "59e29c6b2ab930f37469a2324f89f68c660e5dc9e7a66186339b4df9f067533d"
 
       def install
         bin.install "tish-bindgen-linux-arm64" => "tish-bindgen"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v2.39.0/tish-bindgen-linux-x64"
-      sha256 "2053f9ad4a2b4a8efa986add75b952428f18a0ce5bf921d49dbc91a472ef47fa"
+      url "https://github.com/tishlang/tish/releases/download/v2.43.8/tish-bindgen-linux-x64"
+      sha256 "54430289d514d1004e1c79c3125ef504b8dcf1d9b2da5f4a37dbd1a03b17c9e2"
 
       def install
         bin.install "tish-bindgen-linux-x64" => "tish-bindgen"
