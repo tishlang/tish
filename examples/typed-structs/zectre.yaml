@@ -1,0 +1,4 @@
+name: typed-structs
+
+deploy:
+  replicas: 1

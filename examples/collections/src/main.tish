@@ -1,0 +1,46 @@
+// Collections & immutability tour — Set, Map, Object.freeze, and the modern (ES2023) array surface.
+// One program that runs identically on the interpreter, the VM, the native backend, and transpiled JS.
+
+// ── Set: de-duplicate and test membership ──
+let tags = new Set(["rust", "tish", "rust", "wasm", "tish"])
+tags.add("gba")
+console.log("unique tags: " + tags.size)
+console.log("has wasm: " + tags.has("wasm"))
+let tagList = []
+for (let t of tags) { tagList.push(t) }
+console.log("tags: " + tagList.join(", "))
+
+// ── Map: keyed frequency count, then iterate entries ──
+let counts = new Map()
+let words = ["a", "b", "a", "c", "b", "a"]
+for (let w of words) {
+  counts.set(w, (counts.get(w) || 0) + 1)
+}
+console.log("distinct words: " + counts.size)
+console.log("a count: " + counts.get("a"))
+let pairs = []
+for (let entry of counts) { pairs.push(entry[0] + "=" + entry[1]) }
+console.log("counts: " + pairs.join(", "))
+
+// ── Object.freeze: an immutable config that rejects writes ──
+let config = Object.freeze({ host: "localhost", port: 8080 })
+console.log("frozen: " + Object.isFrozen(config))
+let blocked = false
+try {
+  config.port = 9090
+} catch (e) {
+  blocked = true
+}
+console.log("port still " + config.port + " (write blocked: " + blocked + ")")
+
+// ── Modern array surface (non-mutating), Array.from, structuredClone ──
+let nums = [5, 3, 8, 1]
+let sorted = nums.toSorted((a, b) => a - b)
+console.log("sorted: " + sorted.join(",") + " | original unchanged: " + nums.join(","))
+let doubled = Array.from(nums, (n) => n * 2)
+console.log("doubled: " + doubled.join(","))
+let patched = nums.with(0, 99)
+console.log("with[0]=99: " + patched.join(","))
+let clone = structuredClone(nums)
+clone.push(42)
+console.log("clone isolated: original len " + nums.length + " vs clone len " + clone.length)

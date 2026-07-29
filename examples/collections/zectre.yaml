@@ -1,0 +1,4 @@
+name: collections
+
+deploy:
+  replicas: 1
