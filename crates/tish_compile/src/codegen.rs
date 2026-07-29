@@ -2804,10 +2804,12 @@ impl Codegen {
         for stmt in &program.statements {
             if let Statement::FunDecl { name, return_type: Some(ann), .. } = stmt {
                 let ty = RustType::from_annotation_with_aliases(ann, &self.type_aliases);
-                if matches!(
-                    ty,
-                    RustType::Named { .. } | RustType::ShapeUnion { .. }
-                ) {
+                // Only a concrete `Named` struct return is coerced. `ShapeUnion` is deliberately
+                // excluded: its `from_value_expr` is a forbidden boundary (`unreachable!()`), so
+                // admitting it here would compile a runtime panic into the coercion site. (A shape
+                // union only ever arises as an array element type, never a bare fn return, so this
+                // is a defensive guard against a violated invariant, not a live path.)
+                if matches!(ty, RustType::Named { .. }) {
                     self.user_fn_returns.insert(name.to_string(), ty);
                 }
             }
@@ -13165,13 +13167,16 @@ impl Codegen {
         let Expr::Ident { name, .. } = object else {
             return Ok(None);
         };
-        if self.refcell_wrapped_vars.contains(name.as_ref()) {
-            return Ok(None);
-        }
         let obj_type = self.type_context.get_type(name.as_ref());
         let RustType::Vec(elem_type) = obj_type else {
             return Ok(None);
         };
+        // #564: a closure-captured (refcell-wrapped) native Vec is handled below via a `borrow_mut`
+        // store. WITHOUT this it fell to the generic boxed `set_index` fallback, which mutates a
+        // THROWAWAY boxed copy of the Vec (write silently DISCARDED) — and for a compound `a[i] += x`
+        // (desugared to `a[i] = a[i] + x`) the fallback's `get_index(&a) … set_index(&a …)` takes two
+        // overlapping locks on the non-reentrant `Arc<Mutex>` VmRef and DEADLOCKS the binary.
+        let wrapped = self.refcell_wrapped_vars.contains(name.as_ref());
         let esc_obj = Self::escape_ident(name.as_ref()).into_owned();
         let in_bounds = self.index_in_bounds(index, name.as_ref());
         let idx_usize = self.emit_index_usize(index)?;
@@ -13223,6 +13228,34 @@ impl Codegen {
                 val_code
             }
         };
+        // #564: wrapped receiver — bind the index and RHS to temps BEFORE taking the `borrow_mut`,
+        // so a RHS that reads the same cell (`a[i] += x`, `a[i] = a[j]`) releases its shared borrow
+        // first (no overlapping lock → no deadlock), then store into the real element through the cell.
+        if wrapped {
+            let needs_resize =
+                matches!(elem_type.as_ref(), RustType::F64 | RustType::Bool) && !in_bounds;
+            let store = if needs_resize {
+                let pad = if matches!(elem_type.as_ref(), RustType::F64) {
+                    "f64::NAN"
+                } else {
+                    "false"
+                };
+                format!(
+                    "let __i = {idx}; let __v = {val}; let mut __g = {esc}.borrow_mut(); if __i >= __g.len() {{ __g.resize(__i + 1, {pad}); }} __g[__i] = __v;",
+                    idx = idx_usize, val = native_val, esc = esc_obj, pad = pad
+                )
+            } else {
+                format!(
+                    "let __i = {idx}; let __v = {val}; (*{esc}.borrow_mut())[__i] = __v;",
+                    idx = idx_usize, val = native_val, esc = esc_obj
+                )
+            };
+            return Ok(Some(if side_effect_only {
+                format!("{{ {} }}", store)
+            } else {
+                format!("{{ {} Value::Null }}", store)
+            }));
+        }
         let assign = match elem_type.as_ref() {
             RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
                 if side_effect_only {
