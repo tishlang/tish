@@ -8610,8 +8610,12 @@ impl Codegen {
                                 // (E0382 when the struct is used again); a Copy scalar reads by value.
                                 let clone = if field_ty.is_copy() { "" } else { ".clone()" };
                                 let access = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
+                                    // #567: scope the borrow to its own block so the lock drops
+                                    // immediately — a `send-values` `Arc<Mutex>` VmRef is NOT
+                                    // reentrant, so two `.borrow()`s of the same cell alive at once
+                                    // (e.g. `s.a + s.b` in one expression) would deadlock.
                                     format!(
-                                        "(*{}.borrow()).{}.clone()",
+                                        "{{ let __bg = {}.borrow(); (*__bg).{}.clone() }}",
                                         var_esc,
                                         crate::types::field_ident(prop_name.as_ref())
                                     )
@@ -8655,10 +8659,16 @@ impl Codegen {
                                             let idx = self.emit_index_usize(ii)?;
                                             let esc = Self::escape_ident(arr_name.as_ref());
                                             let clone = if field_ty.is_copy() { "" } else { ".clone()" };
+                                            // #567: bind the index (it may read the same cell, e.g.
+                                            // `arr[arr.length-1]`) BEFORE taking the borrow, and scope
+                                            // the borrow to its own block so the non-reentrant
+                                            // `Arc<Mutex>` lock drops before any sibling read of `arr`
+                                            // (`arr[i].a + arr[j].b`) — otherwise overlapping borrows
+                                            // deadlock.
                                             let access = format!(
-                                                "(*{}.borrow())[{}].{}{}",
-                                                esc,
+                                                "{{ let __bi = {}; let __bg = {}.borrow(); (*__bg)[__bi].{}{} }}",
                                                 idx,
+                                                esc,
                                                 crate::types::field_ident(prop_name.as_ref()),
                                                 clone
                                             );
@@ -8697,8 +8707,10 @@ impl Codegen {
                             if let Expr::Ident { name, .. } = object.as_ref() {
                                 if let RustType::Vec(_) = self.type_context.get_type(name.as_ref()) {
                                     let esc = Self::escape_ident(name.as_ref());
+                                    // #567: scope the borrow (non-reentrant `Arc<Mutex>` VmRef) so it
+                                    // can't overlap a sibling read of the same cell in one expression.
                                     let len = if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                                        format!("{}.borrow().len()", esc)
+                                        format!("{{ let __bg = {}.borrow(); __bg.len() }}", esc)
                                     } else {
                                         format!("{}.len()", esc)
                                     };
@@ -11539,7 +11551,7 @@ impl Codegen {
                         let esc = Self::escape_ident(arr.as_ref());
                         // A captured Vec reads its length through the cell (`(*a.borrow()).len()`).
                         let code = if self.refcell_wrapped_vars.contains(arr.as_ref()) {
-                            format!("(*{}.borrow()).len() as f64", esc)
+                            format!("{{ let __bg = {}.borrow(); __bg.len() as f64 }}", esc)
                         } else {
                             format!("{}.len() as f64", esc)
                         };
@@ -23341,10 +23353,14 @@ impl Codegen {
                                 // the WHOLE Vec into a `Value::Array` just to read one element (O(n) per
                                 // read — the hot-loop `states[id].timer` footgun, tish#558 read side).
                                 let esc_raw = Self::escape_ident(name.as_ref()).into_owned();
+                                // #567: for a wrapped Vec the place is the block-local guard `__bg`
+                                // (bound below), so the non-reentrant `Arc<Mutex>` borrow is scoped to
+                                // this single read and can't overlap a sibling read of the same cell
+                                // (`a[i] + a[j]` in one expression), which would deadlock.
                                 let esc_obj = if idx_wrapped {
-                                    format!("(*{}.borrow())", esc_raw)
+                                    "(*__bg)".to_string()
                                 } else {
-                                    esc_raw
+                                    esc_raw.clone()
                                 };
                                 // #173 part 3: prove the index in-bounds BEFORE emitting it.
                                 let in_bounds = self.index_in_bounds(index, name.as_ref());
@@ -23387,6 +23403,14 @@ impl Codegen {
                                         )
                                     }
                                 };
+                                // #567: inside the wrapped block the index is pre-bound to `__bi`
+                                // (evaluated BEFORE the borrow, so an index that itself reads this cell
+                                // — `arr[arr.length-1]` — doesn't double-lock the non-reentrant cell).
+                                let idx_ref = if idx_wrapped {
+                                    "__bi".to_string()
+                                } else {
+                                    idx_usize.clone()
+                                };
                                 let elem_ty = *elem_type.clone();
                                 // OOB-safe read for numeric/bool Vecs: JS `arr[oob]` is `undefined`
                                 // (→ NaN / false in those contexts), NOT a panic. In-bounds is the
@@ -23396,24 +23420,35 @@ impl Codegen {
                                     // #173 part 3: a proven in-bounds read skips the `.get().unwrap_or`
                                     // branch — a direct `a[i]` (the `idx < len` proof guarantees it).
                                     RustType::F64 | RustType::Bool | RustType::I32 if in_bounds => {
-                                        format!("{}[{}]", esc_obj, idx_usize)
+                                        format!("{}[{}]", esc_obj, idx_ref)
                                     }
                                     RustType::F64 => format!(
                                         "{}.get({}).copied().unwrap_or(f64::NAN)",
-                                        esc_obj, idx_usize
+                                        esc_obj, idx_ref
                                     ),
                                     RustType::I32 => format!(
                                         "{}.get({}).copied().unwrap_or(0)",
-                                        esc_obj, idx_usize
+                                        esc_obj, idx_ref
                                     ),
                                     RustType::Bool => {
-                                        format!("{}.get({}).copied().unwrap_or(false)", esc_obj, idx_usize)
+                                        format!("{}.get({}).copied().unwrap_or(false)", esc_obj, idx_ref)
                                     }
                                     // Other element types (struct/Value/String). From behind a
                                     // `borrow()` guard a non-Copy element must be cloned OUT (it can't be
                                     // moved from the borrow); a plain local keeps the direct place.
-                                    _ if idx_wrapped => format!("{}[{}].clone()", esc_obj, idx_usize),
-                                    _ => format!("{}[{}]", esc_obj, idx_usize),
+                                    _ if idx_wrapped => format!("{}[{}].clone()", esc_obj, idx_ref),
+                                    _ => format!("{}[{}]", esc_obj, idx_ref),
+                                };
+                                // #567: wrap the wrapped-Vec read in a block that pre-binds the index
+                                // and scopes the borrow guard `__bg`, so the lock is released before
+                                // any sibling read of the same cell in the enclosing expression.
+                                let access = if idx_wrapped {
+                                    format!(
+                                        "{{ let __bi = {}; let __bg = {}.borrow(); {} }}",
+                                        idx_usize, esc_raw, access
+                                    )
+                                } else {
+                                    access
                                 };
                                 return Ok((access, elem_ty));
                             }
@@ -23683,7 +23718,7 @@ impl Codegen {
                         if prop_name.as_ref() == "length" {
                             let var_esc = Self::escape_ident(var_name.as_ref()).into_owned();
                             let code = if self.refcell_wrapped_vars.contains(var_name.as_ref()) {
-                                format!("({}.borrow().len() as f64)", var_esc)
+                                format!("({{ let __bg = {}.borrow(); __bg.len() as f64 }})", var_esc)
                             } else {
                                 format!("({}.len() as f64)", var_esc)
                             };
@@ -23698,7 +23733,7 @@ impl Codegen {
                             let field = crate::types::field_ident(prop_name.as_ref());
                             let access = if self.refcell_wrapped_vars.contains(var_name.as_ref())
                             {
-                                format!("(*{}.borrow()).{}.clone()", var_esc, field)
+                                format!("{{ let __bg = {}.borrow(); (*__bg).{}.clone() }}", var_esc, field)
                             } else {
                                 format!("{}.{}", var_esc, field)
                             };

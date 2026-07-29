@@ -136,8 +136,8 @@ fn wrapped_element_field_read_is_native_not_whole_array_box() {
     std::fs::write(&path, format!("interface E {{ x: number; y: number }}\n{src}")).unwrap();
     let r = compile_project_full(&path, path.parent(), &[], true).unwrap().0;
     assert!(
-        r.contains("(*arr.borrow())["),
-        "wrapped `arr[i].field` read must index the borrowed Vec natively\n{r}"
+        r.contains("let __bg = arr.borrow();") && r.contains("(*__bg)["),
+        "wrapped `arr[i].field` read must index the borrowed Vec natively via a scoped guard (#567)\n{r}"
     );
     assert!(
         !r.contains("iter().cloned().map(|v| tishlang_runtime::Value::from_struct"),

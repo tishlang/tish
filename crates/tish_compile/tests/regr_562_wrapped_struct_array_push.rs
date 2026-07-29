@@ -44,7 +44,7 @@ fn wrapped_struct_push_and_length_do_not_box_the_whole_vec() {
         "#562: push must be native `(*enemyStates.borrow_mut()).push(..)`\n{rust}"
     );
     assert!(
-        rust.contains(".borrow().len() as f64"),
-        "#562: `.length` must be a native `(*enemyStates.borrow()).len()`, not a whole-Vec box\n{rust}"
+        rust.contains("enemyStates.borrow(); __bg.len()"),
+        "#562: `.length` must be a native scoped `{{ let __bg = enemyStates.borrow(); __bg.len() }}` (#567), not a whole-Vec box\n{rust}"
     );
 }
