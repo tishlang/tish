@@ -4093,6 +4093,54 @@ fn get_member(obj: &Value, key: &Arc<str>) -> Result<Value, String> {
                         Value::NumberArray(a2.clone())
                     })
                 }
+                // #560: `copyWithin` MUTATES in place, but — unlike fill/reverse/splice — it had no
+                // packed arm, so it fell to the `_ =>` materialise-to-boxed fallback below and copied
+                // within a THROWAWAY boxed copy, leaving the packed array untouched (a silent no-op
+                // that diverged from interp). copyWithin only relocates existing elements, so the
+                // array stays packed: block-copy straight on the Vec<f64> (deopt only if already
+                // boxed). Index clamping mirrors `arr_builtins::copy_within` (`normalize_index`).
+                "copyWithin" => {
+                    let a2 = a_clone.clone();
+                    make_native_fn(move |args: &[Value]| {
+                        let len = a2.borrow().len() as i64;
+                        let norm = |v: Option<&Value>, dflt: i64| -> i64 {
+                            match v {
+                                Some(Value::Number(n)) => {
+                                    let i = *n as i64;
+                                    if i < 0 { (len + i).max(0) } else { i.min(len) }
+                                }
+                                _ => dflt,
+                            }
+                        };
+                        let target = norm(args.first(), 0) as usize;
+                        let start = norm(args.get(1), 0) as usize;
+                        let end = norm(args.get(2), len) as usize;
+                        let mut b = a2.borrow_mut();
+                        match b.as_packed_mut() {
+                            Some(nums) => {
+                                if start < end && target < nums.len() {
+                                    let count = (end - start).min(nums.len() - target);
+                                    let block: Vec<f64> = nums[start..start + count].to_vec();
+                                    for (k, val) in block.into_iter().enumerate() {
+                                        nums[target + k] = val;
+                                    }
+                                }
+                            }
+                            None => {
+                                let boxed = b.deopt();
+                                if start < end && target < boxed.len() {
+                                    let count = (end - start).min(boxed.len() - target);
+                                    let block: Vec<Value> = boxed[start..start + count].to_vec();
+                                    for (k, val) in block.into_iter().enumerate() {
+                                        boxed[target + k] = val;
+                                    }
+                                }
+                            }
+                        }
+                        drop(b);
+                        Value::NumberArray(a2.clone())
+                    })
+                }
                 "reverse" => make_native_fn(move |_: &[Value]| {
                     let mut b = a_clone.borrow_mut();
                     match b.as_packed_mut() {
