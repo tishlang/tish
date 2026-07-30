@@ -64,3 +64,5 @@ mdx-docs	examples/mdx-docs	src/build.tish	run	fs	-	Built	prebuild	pass
 # raw mode and has no deterministic stdout to assert without a PTY — there is no run/serve/lattish
 # kind that fits it here. Excluded on purpose. If a PTY-driven harness is added later, add the row
 # with a `native` tag so the default run stays deterministic.
+typed-structs	examples/typed-structs	src/main.tish	run	-	-	farthest: Mars at x=228	-	pass
+collections	examples/collections	src/main.tish	run	-	-	clone isolated: original len 4 vs clone len 5	-	pass

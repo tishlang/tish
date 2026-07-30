@@ -1,3 +1,7 @@
-import { greet } from 'cargo:demo_shim'
+import { greet, add } from 'cargo:demo_shim'
 
 console.log(greet('from cargo'))
+
+// `add` has a typed signature shipped in the crate's `tish.d.tish` (auto-loaded) — this call lowers
+// to a direct `demo_shim::add_typed(2, 3)`, not the boxed namespace-object dispatch.
+console.log(add(2, 3))

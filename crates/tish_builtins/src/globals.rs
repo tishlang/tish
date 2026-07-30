@@ -354,12 +354,23 @@ pub fn object_keys(args: &[Value]) -> Value {
                 .collect();
             Value::Array(VmRef::new(keys))
         }
+        // A by-reference boxed typed struct (GBA/portable): materialise it to its ordered object and
+        // enumerate that, so `Object.keys(s)` / `for (k in s)` (lowered to `for-of Object.keys`) see
+        // the field names instead of nothing. (JSON/display already materialise; this closes the
+        // reflection paths so the boxed struct is enumerable exactly like the object it stands for.)
+        #[cfg(feature = "portable")]
+        Some(Value::Struct(s)) => object_keys(&[s.borrow().tish_to_object()]),
         _ => Value::Array(VmRef::new(Vec::new())),
     }
 }
 
 /// Object.values(obj)
 pub fn object_values(args: &[Value]) -> Value {
+    // A boxed typed struct materialises to its ordered object first (see `object_keys`).
+    #[cfg(feature = "portable")]
+    if let Some(Value::Struct(s)) = args.first() {
+        return object_values(&[s.borrow().tish_to_object()]);
+    }
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let values: Vec<Value> = obj_borrow.strings.values().cloned().collect();
@@ -371,6 +382,11 @@ pub fn object_values(args: &[Value]) -> Value {
 
 /// Object.entries(obj)
 pub fn object_entries(args: &[Value]) -> Value {
+    // A boxed typed struct materialises to its ordered object first (see `object_keys`).
+    #[cfg(feature = "portable")]
+    if let Some(Value::Struct(s)) = args.first() {
+        return object_entries(&[s.borrow().tish_to_object()]);
+    }
     if let Some(Value::Object(obj)) = args.first() {
         let obj_borrow = obj.borrow();
         let entries: Vec<Value> = obj_borrow
@@ -407,6 +423,17 @@ pub fn object_assign(args: &[Value]) -> Value {
     target_mut.strings.reserve(additional_capacity);
 
     for source in args.iter().skip(1) {
+        // A boxed typed struct source materialises to its ordered object first (GBA/portable), so
+        // `Object.assign(t, s)` copies its fields instead of silently skipping it (see `object_keys`).
+        #[cfg(feature = "portable")]
+        let struct_obj;
+        #[cfg(feature = "portable")]
+        let source: &Value = if let Value::Struct(s) = source {
+            struct_obj = s.borrow().tish_to_object();
+            &struct_obj
+        } else {
+            source
+        };
         if let Value::Object(src) = source {
             let src_borrow = src.borrow();
             for (k, v) in src_borrow.strings.iter() {

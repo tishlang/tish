@@ -1,0 +1,10 @@
+// tishlang/tish#558 residual — reading a struct field from a Vec element in a value/return position
+// must CLONE a non-Copy field, not move it out of the borrowed element (E0507). (A Copy field like an
+// on-GBA `i32` reads by value fine; off-GBA a `: i32` field is a boxed `Value`, which is non-Copy.)
+type P = { x: i32 }
+function firstX(): i32 {
+  let es: P[] = []
+  es.push({ x: 7 })
+  return es[0].x
+}
+console.log(firstX())

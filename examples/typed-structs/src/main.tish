@@ -1,0 +1,48 @@
+// Typed structs — model data with `interface` types and process a typed array of structs.
+//
+// On the native (tish→Rust) backend these `interface` types lower to real Rust structs and the
+// array to a `Vec<struct>`, so field reads/writes and arithmetic are plain machine ops with no
+// boxing. On the interpreter / VM the exact same source runs as ordinary objects. One program,
+// every backend — the annotations are a performance lever, not a different language.
+
+interface Vec2 { x: number; y: number }
+interface Body { name: string; pos: Vec2; mass: number; vel: number }
+
+// Typed parameter + return — a native call with no argument boxing.
+function momentum(b: Body): number {
+  return b.mass * b.vel
+}
+
+function sumMass(list: Body[]): number {
+  let total = 0
+  for (let b of list) { total = total + b.mass }
+  return total
+}
+
+// A typed array of structs (Body[]).
+let bodies: Body[] = [
+  { name: "Sun",   pos: { x: 0,   y: 0 }, mass: 1000, vel: 0 },
+  { name: "Earth", pos: { x: 150, y: 0 }, mass: 3,    vel: 30 },
+  { name: "Mars",  pos: { x: 228, y: 0 }, mass: 1,    vel: 24 }
+]
+
+console.log("bodies: " + bodies.length + ", total mass: " + sumMass(bodies))
+
+// Field write into a struct element, in place.
+bodies[1].vel = bodies[1].vel + 5
+console.log("Earth vel after boost: " + bodies[1].vel)
+
+let totalMomentum = 0
+for (let b of bodies) { totalMomentum = totalMomentum + momentum(b) }
+console.log("total momentum: " + totalMomentum)
+
+// Sort the typed struct array by a field (mass, descending).
+bodies.sort((a, b) => b.mass - a.mass)
+console.log("heaviest: " + bodies[0].name)
+
+// Nested struct-field access — find the farthest body by tracking its index.
+let farIdx = 0
+for (let i = 0; i < bodies.length; i++) {
+  if (bodies[i].pos.x > bodies[farIdx].pos.x) { farIdx = i }
+}
+console.log("farthest: " + bodies[farIdx].name + " at x=" + bodies[farIdx].pos.x)

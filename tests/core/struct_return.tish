@@ -1,0 +1,32 @@
+// Coverage for a function whose declared return type is a struct/interface (`function f(): Iface`).
+// On the native backend the boxed call result is coerced to the native struct so `f().field` reads
+// are plain loads; on interp/vm it's a plain object. Output is backend-identical.
+
+interface Point { x: number; y: number }
+interface Rect { w: number; h: number; origin: Point }
+
+function makePoint(a: number, b: number): Point {
+  return { x: a, y: b }
+}
+function makeRect(w: number, h: number): Rect {
+  return { w: w, h: h, origin: { x: 0, y: 0 } }
+}
+function area(r: Rect): number {
+  return r.w * r.h
+}
+
+// bind the struct-returning call to a local, then read fields
+let p = makePoint(3, 4)
+console.log(p.x + "," + p.y)
+
+// direct field access on the call result
+console.log(makePoint(5, 6).y)
+
+// nested struct field on a returned struct
+let r = makeRect(10, 20)
+console.log("area: " + area(r))
+console.log("origin: " + r.origin.x + "," + r.origin.y)
+
+// call result used inside a larger expression
+let total = area(makeRect(2, 3)) + area(makeRect(4, 5))
+console.log("total: " + total)

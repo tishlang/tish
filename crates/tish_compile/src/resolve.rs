@@ -22,6 +22,11 @@ pub struct ResolvedNativeModule {
     pub export_fn: String,
     /// When false, omit `path = …` in the generated Cargo.toml (crate comes from `tish.rustDependencies` only).
     pub use_path_dependency: bool,
+    /// The crate's own SOURCE directory (where its `Cargo.toml`/`src` live), when known — distinct from
+    /// `crate_path` (the importing project root). Used to find a `tish.d.tish` the crate ships (typed
+    /// externs). For a `cargo:` dep it's the resolved `rustDependencies` path; for a `tish.module`
+    /// package it's the package dir; `None` for registry deps with no local path.
+    pub source_dir: Option<PathBuf>,
 }
 
 /// How codegen links a native import to Rust (`generateNativeWrapper` for `tish:*`; `cargo:*` always generated).
@@ -37,6 +42,18 @@ pub enum NativeModuleInit {
         shim_crate: String,
         export_fn: String,
     },
+}
+
+impl NativeModuleInit {
+    /// The Rust crate name whose functions back this module — the path for a direct typed call
+    /// (`<crate_name>::name_typed(..)`). Both variants carry it (Legacy directly, Generated as the
+    /// shim crate the generated namespace forwards to).
+    pub fn crate_name(&self) -> &str {
+        match self {
+            NativeModuleInit::Legacy { crate_name, .. } => crate_name,
+            NativeModuleInit::Generated { shim_crate, .. } => shim_crate,
+        }
+    }
 }
 
 /// Extra native build inputs produced alongside Rust source (Cargo merge + optional wrapper).
@@ -383,6 +400,17 @@ fn resolve_cargo_native_module(
     let crate_path = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
+    // The crate's own source dir, from a `rustDependencies` `path` (so we can find its `tish.d.tish`).
+    let source_dir = rust_deps
+        .get(&dep_key)
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("path"))
+        .and_then(|p| p.as_str())
+        .map(|raw| {
+            let p = Path::new(raw);
+            let resolved = if p.is_absolute() { p.to_path_buf() } else { project_root.join(p) };
+            resolved.canonicalize().unwrap_or(resolved)
+        });
     Ok(ResolvedNativeModule {
         spec: spec.to_string(),
         package_name: dep_key.clone(),
@@ -390,6 +418,7 @@ fn resolve_cargo_native_module(
         crate_path,
         export_fn,
         use_path_dependency: false,
+        source_dir,
     })
 }
 
@@ -442,9 +471,11 @@ fn resolve_native_module(spec: &str, project_root: &Path) -> Result<ResolvedNati
         spec: spec.to_string(),
         package_name: raw_crate.clone(),
         crate_name: raw_crate.replace('-', "_"),
-        crate_path,
+        crate_path: crate_path.clone(),
         export_fn,
         use_path_dependency: true,
+        // A tish.module package IS its own source dir — that's where any `tish.d.tish` lives.
+        source_dir: Some(crate_path),
     })
 }
 
@@ -1126,11 +1157,14 @@ pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> O
 /// directory (`from_dir`) to an absolute path that must exist — a missing file is a compile-time
 /// error, not a device panic — and the spec becomes `prefix:/abs/path` (the codegen feeds that
 /// absolute path to the scheme's include macro; agb's `resolve_path` takes absolute paths as-is, so
-/// no asset-copy step is needed). A non-`resolve_file` scheme passes through unchanged.
+/// no asset-copy step is needed). A trailing `@N` on the path (e.g. `font:face.ttf@7`) is stripped
+/// before canonicalize and reattached on the canonical spec so `{size}` is available at emit. A
+/// bare `font:path` (no `@N`) defaults to [`crate::schemes::FONT_DEFAULT_SIZE`]. A non-`resolve_file`
+/// scheme passes through unchanged.
 fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
-    let (prefix, resolve_file) = crate::schemes::with_active(|reg| {
+    let (scheme_name, prefix, resolve_file) = crate::schemes::with_active(|reg| {
         reg.matches(spec)
-            .map(|s| (s.prefix(), s.resolve_file))
+            .map(|s| (s.name.clone(), s.prefix(), s.resolve_file))
     })
     .ok_or_else(|| format!("import '{}' is not a registered scheme", spec))?;
     let rest = spec.strip_prefix(&prefix).unwrap_or(spec);
@@ -1144,7 +1178,8 @@ fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
             prefix
         ));
     }
-    let path = Path::new(rest);
+    let (file_rest, size_opt) = crate::schemes::split_path_size(rest);
+    let path = Path::new(file_rest);
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1155,12 +1190,23 @@ fn resolve_scheme_spec(spec: &str, from_dir: &Path) -> Result<String, String> {
             "{} import '{}': cannot find '{}' (resolved from {}): {}",
             prefix.trim_end_matches(':'),
             spec,
-            rest,
+            file_rest,
             from_dir.display(),
             e
         )
     })?;
-    Ok(format!("{}{}", prefix, abs.to_string_lossy()))
+    let mut out = format!("{}{}", prefix, abs.to_string_lossy());
+    // `font:` always carries an explicit size in the canonical spec (explicit @N, or default 16).
+    if scheme_name == "font" {
+        let size = size_opt.unwrap_or(crate::schemes::FONT_DEFAULT_SIZE);
+        out.push('@');
+        out.push_str(&size.to_string());
+    } else if let Some(size) = size_opt {
+        // Other schemes may use `@N` + `{size}` later; preserve when present.
+        out.push('@');
+        out.push_str(&size.to_string());
+    }
+    Ok(out)
 }
 
 /// Resolve an import specifier (e.g. "./foo.tish", "../lib/utils", "lattish") to an absolute path.

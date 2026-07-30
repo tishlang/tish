@@ -13,7 +13,8 @@
 //! * `resolve_file` — resolve the rest as a project-relative file and validate it exists.
 //! * `targets` — per emit-target ("gba", …) code templates: the `use`s + body of a generated
 //!   `mod`, an accessor, and a registration call. Templates substitute `{path}` (the resolved
-//!   absolute path, as a Rust string literal) and `{mod}` (the generated module's identifier).
+//!   absolute path, as a Rust string literal), `{mod}` (the generated module's identifier),
+//!   `{charset}` (used non-ASCII chars), and optionally `{size}` (from a trailing `@N` on the path).
 //!
 //! Only *file-baking* schemes are expressible this way today — the family `asset:` belongs to
 //! (resolve a file → emit a macro + a registration + bind an i32 handle). Schemes needing
@@ -235,14 +236,38 @@ pub fn is_scheme_import(spec: &str) -> bool {
     with_active(|r| r.matches(spec).is_some())
 }
 
-/// Substitute `{path}` (the file as a Rust string literal), `{mod}` (the generated module ident), and
-/// `{charset}` (the program's used non-ASCII characters as a Rust string literal — for schemes that
-/// bake only the glyphs a program actually uses, e.g. `font<N>:`) in a template.
+/// Default bake size when `font:path` omits `@N` (most common native grid: monogram/alagard/m3x6).
+pub const FONT_DEFAULT_SIZE: u32 = 16;
+
+/// Split a scheme path rest into `(file_path, size)` when it ends with `@` + digits
+/// (`face.ttf@7` → `("face.ttf", Some(7))`). Non-digit suffixes after `@` are left intact
+/// (`foo@2x.png` is not a size).
+pub fn split_path_size(rest: &str) -> (&str, Option<u32>) {
+    let Some((path, size_str)) = rest.rsplit_once('@') else {
+        return (rest, None);
+    };
+    if path.is_empty() || size_str.is_empty() || !size_str.bytes().all(|b| b.is_ascii_digit()) {
+        return (rest, None);
+    }
+    match size_str.parse::<u32>() {
+        Ok(n) if n > 0 => (path, Some(n)),
+        _ => (rest, None),
+    }
+}
+
+/// Substitute `{path}` (the file as a Rust string literal), `{mod}` (the generated module ident),
+/// `{charset}` (used non-ASCII chars as a Rust string literal), and `{size}` (plain integer from a
+/// trailing `@N` on the path, e.g. `font:face.ttf@7`) in a template. `{path}` never includes `@N`.
 pub fn render_template(template: &str, abspath: &str, module_ident: &str, charset: &str) -> String {
+    let (path, size) = split_path_size(abspath);
+    let size_str = size
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| FONT_DEFAULT_SIZE.to_string());
     template
-        .replace("{path}", &format!("{:?}", abspath))
+        .replace("{path}", &format!("{:?}", path))
         .replace("{mod}", module_ident)
         .replace("{charset}", &format!("{:?}", charset))
+        .replace("{size}", &size_str)
 }
 
 #[cfg(test)]
@@ -274,5 +299,35 @@ mod tests {
         assert!(parse_scheme_def("sprite-sheet", &def).is_none());
         // The same def under a valid name parses.
         assert!(parse_scheme_def("sheet", &def).is_some());
+    }
+
+    #[test]
+    fn split_path_size_parses_trailing_at_digits() {
+        assert_eq!(split_path_size("face.ttf@7"), ("face.ttf", Some(7)));
+        assert_eq!(split_path_size("/abs/face.ttf@16"), ("/abs/face.ttf", Some(16)));
+        assert_eq!(split_path_size("face.ttf"), ("face.ttf", None));
+        // Not a size — non-digit suffix after @.
+        assert_eq!(split_path_size("foo@2x.png"), ("foo@2x.png", None));
+        assert_eq!(split_path_size("@7"), ("@7", None));
+        assert_eq!(split_path_size("face.ttf@0"), ("face.ttf@0", None));
+    }
+
+    #[test]
+    fn render_template_substitutes_size_and_strips_at_from_path() {
+        let out = render_template(
+            "pack!({path}, {size}, {charset}); //{mod}",
+            "/abs/face.ttf@7",
+            "__scheme_font_0",
+            "你好",
+        );
+        assert!(out.contains("pack!(\"/abs/face.ttf\", 7, \"你好\")"), "got: {out}");
+        assert!(out.contains("//__scheme_font_0"));
+        assert!(!out.contains("face.ttf@7"));
+    }
+
+    #[test]
+    fn render_template_defaults_size_when_missing() {
+        let out = render_template("x({size})", "/abs/face.ttf", "m", "");
+        assert_eq!(out, format!("x({})", FONT_DEFAULT_SIZE));
     }
 }

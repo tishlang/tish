@@ -1,0 +1,10 @@
+{
+  "name": "typed-structs",
+  "version": "0.1.0",
+  "tish": {
+    "source": "./src/main.tish"
+  },
+  "scripts": {
+    "start": "tish run src/main.tish"
+  }
+}

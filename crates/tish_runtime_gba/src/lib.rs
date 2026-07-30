@@ -17,8 +17,8 @@ use alloc::vec::Vec;
 // ── Core value vocabulary (single source of truth in tishlang_core) ──────────
 pub use tishlang_core::{
     js_number_to_string_into, to_int32, to_int32_value, to_number_value, to_uint32,
-    to_uint32_value, ArcStr, NumArrayBacking, ObjectData, ObjectMap, PropMap, Value, VmReadGuard,
-    VmRef, VmWriteGuard,
+    to_uint32_value, ArcStr, NumArrayBacking, ObjectData, ObjectMap, PropMap, TishStruct, Value,
+    VmReadGuard, VmRef, VmWriteGuard,
 };
 /// `Arc` on GBA is `Rc` (single-core). Emitted code writes `Arc::from(..)`.
 pub use tishlang_core::Arc;
@@ -112,7 +112,29 @@ pub fn in_operator(key: &Value, obj: &Value) -> Value {
         Value::Object(_) => Value::Bool(tishlang_core::object_has(obj, key)),
         Value::Array(arr) => Value::Bool(array_in(key, arr.borrow().len())),
         Value::NumberArray(arr) => Value::Bool(array_in(key, arr.borrow().len())),
+        // A by-reference boxed typed struct: `"field" in s` materialises to the struct's object and
+        // asks it, so a boxed struct answers `in` like the object it stands for (was always `false`).
+        Value::Struct(s) => {
+            Value::Bool(tishlang_core::object_has(&s.borrow().tish_to_object(), key))
+        }
         _ => Value::Bool(false),
+    }
+}
+
+/// Spread source for `{ ...v }` (GBA emit only — codegen calls this from the Gba object-spread
+/// lowering). Returns the source's own string-keyed props as an owned `PropMap`: a boxed typed struct
+/// is materialised to its ordered object first, so `{ ...s }` carries the struct's fields instead of
+/// dropping them; a non-object yields `None` (spread of `null`/a number contributes nothing, per JS).
+/// Desktop emit keeps its inline `if let Value::Object` path, so this GBA-only helper adds no
+/// non-GBA cost.
+pub fn object_spread_props(v: &Value) -> Option<PropMap> {
+    match v {
+        Value::Object(o) => Some(o.borrow().strings.clone()),
+        Value::Struct(s) => match s.borrow().tish_to_object() {
+            Value::Object(o) => Some(o.borrow().strings.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -175,6 +197,9 @@ pub fn get_prop(obj: &Value, key: impl AsRef<str>) -> Value {
             }
         }
         Value::Opaque(o) => o.get_method(key).map(Value::Function).unwrap_or(Value::Null),
+        // A boxed typed struct: read the field natively (a small match, no hashmap). `size`/method
+        // sugar isn't relevant here — structs are plain field bags.
+        Value::Struct(s) => s.borrow().tish_get(key),
         Value::Null => {
             tishlang_core::set_pending_throw(tishlang_core::cannot_read_property_error(key));
             Value::Null
@@ -222,6 +247,13 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
             _ => Value::Null,
         },
         Value::Object(_) => tishlang_core::object_get(obj, index).unwrap_or(Value::Null),
+        Value::Struct(s) => {
+            let key = match index {
+                Value::String(k) => k.to_string(),
+                other => other.to_js_string(),
+            };
+            s.borrow().tish_get(&key)
+        }
         Value::Null => {
             let key = match index {
                 Value::String(s) => s.to_string(),
@@ -320,6 +352,10 @@ pub fn set_prop(obj: &Value, key: &str, val: Value) -> Value {
             } else {
                 arr_mut.truncate(len);
             }
+            val
+        }
+        Value::Struct(s) => {
+            s.borrow_mut().tish_set(key, val.clone());
             val
         }
         _ => {
@@ -427,6 +463,44 @@ pub fn json_stringify(args: &[Value]) -> Value {
     Value::String(tishlang_core::json_stringify(&v).into())
 }
 
+/// `json::{escape_into, write_json_number}` — the helpers codegen-emitted per-struct JSON serialisers
+/// (`__tish_json_TishStruct_*`, #315) call. The std runtime exposes these under `tishlang_runtime::json`;
+/// the GBA facade must mirror them so a game that uses a typed `interface`/`type` compiles. no_std.
+pub mod json {
+    pub use tishlang_core::write_json_number;
+
+    /// Append the JSON-escaped contents of `s` (no surrounding quotes) to `buf`. Same escape rules as
+    /// the std runtime's `json::escape_into`; kept local (uses `core::fmt::Write` for `\uXXXX`).
+    pub fn escape_into(buf: &mut alloc::string::String, s: &str) {
+        use core::fmt::Write;
+        let bytes = s.as_bytes();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b < 0x20 || b == b'"' || b == b'\\' {
+                if start < i {
+                    buf.push_str(&s[start..i]);
+                }
+                match b {
+                    b'"' => buf.push_str("\\\""),
+                    b'\\' => buf.push_str("\\\\"),
+                    b'\n' => buf.push_str("\\n"),
+                    b'\r' => buf.push_str("\\r"),
+                    b'\t' => buf.push_str("\\t"),
+                    b'\x08' => buf.push_str("\\b"),
+                    b'\x0c' => buf.push_str("\\f"),
+                    _ => {
+                        let _ = write!(buf, "\\u{:04x}", b as u32);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            buf.push_str(&s[start..]);
+        }
+    }
+}
+
 /// Build an `ObjectMap` from an array of key/value pairs. Generated object literals
 /// emit `ObjectMap::from([...])`; hashbrown's `From<[_; N]>` isn't available with a
 /// custom hasher, so the Gba post-pass rewrites those calls to this.
@@ -529,6 +603,58 @@ pub use tishlang_builtins::globals::{
 };
 pub use tishlang_builtins::string::escape_html as string_escape_html_impl;
 
+// ── String methods (codegen lowers `.slice()`/`.indexOf()`/`.toLowerCase()`/… to these prelude
+// names). Mirrors the std `tish_runtime` wrappers; the portable subset (no regex / unicode-normalize).
+pub use tishlang_builtins::string::{
+    at as string_at_impl, char_at as string_char_at_impl,
+    char_code_at as string_char_code_at_impl, ends_with as string_ends_with_impl,
+    includes as string_includes_impl, index_of as string_index_of_impl,
+    slice as string_slice_impl, starts_with as string_starts_with_impl,
+    substr as string_substr_impl, substring as string_substring_impl,
+    to_lower_case as string_to_lower_case, to_upper_case as string_to_upper_case,
+    trim as string_trim, trim_end as string_trim_end, trim_start as string_trim_start,
+};
+#[inline]
+pub fn string_index_of(s: &Value, search: &Value, from: &Value) -> Value {
+    string_index_of_impl(s, search, Some(from))
+}
+#[inline]
+pub fn string_includes(s: &Value, search: &Value, from: &Value) -> Value {
+    string_includes_impl(s, search, Some(from))
+}
+#[inline]
+pub fn string_slice(s: &Value, start: &Value, end: &Value) -> Value {
+    string_slice_impl(s, start, end)
+}
+#[inline]
+pub fn string_substring(s: &Value, start: &Value, end: &Value) -> Value {
+    string_substring_impl(s, start, end)
+}
+#[inline]
+pub fn string_substr(s: &Value, start: &Value, length: &Value) -> Value {
+    string_substr_impl(s, start, length)
+}
+#[inline]
+pub fn string_starts_with(s: &Value, search: &Value, position: Option<&Value>) -> Value {
+    string_starts_with_impl(s, search, position)
+}
+#[inline]
+pub fn string_ends_with(s: &Value, search: &Value, end_position: Option<&Value>) -> Value {
+    string_ends_with_impl(s, search, end_position)
+}
+#[inline]
+pub fn string_char_at(s: &Value, idx: &Value) -> Value {
+    string_char_at_impl(s, idx)
+}
+#[inline]
+pub fn string_at(s: &Value, idx: &Value) -> Value {
+    string_at_impl(s, idx)
+}
+#[inline]
+pub fn string_char_code_at(s: &Value, idx: &Value) -> Value {
+    string_char_code_at_impl(s, idx)
+}
+
 // ── Constructors, collections, typed arrays, symbol (re-export as prelude names) ──
 pub use tishlang_builtins::construct::{
     array_construct, audio_context_constructor_value as tish_audio_context_constructor,
@@ -539,8 +665,66 @@ pub use tishlang_builtins::collections::{
     map_constructor_value as tish_map_constructor, map_get, map_has, map_set, map_values,
     set_constructor_value as tish_set_constructor,
 };
-// Array mutators (portable) — `.push()` / `.pop()` lower to these `array_*` names.
-pub use tishlang_builtins::array::{pop as array_pop, push as array_push};
+// Array methods — codegen lowers `.push()`/`.slice()`/`.map()`/… to these `array_*` names. Mirrors
+// the std `tish_runtime` block (minus RNG-dependent `shuffle`). Portable: all operate on Vec<Value>.
+pub use tishlang_builtins::array::{
+    at as array_at, concat as array_concat_impl, every as array_every, filter as array_filter,
+    find as array_find, find_index as array_find_index, find_last as array_find_last,
+    find_last_index as array_find_last_index, flat as array_flat_impl, flat_map as array_flat_map,
+    for_each as array_for_each, includes as array_includes_impl, index_of as array_index_of_impl,
+    join as array_join_impl, map as array_map, pop as array_pop, push as array_push_impl,
+    fill as array_fill, last_index_of as array_last_index_of, copy_within as array_copy_within,
+    reduce as array_reduce, reduce_right as array_reduce_right, reverse as array_reverse,
+    keys as array_keys, values as array_values, entries as array_entries, shift as array_shift,
+    slice as array_slice_impl, snapshot_values as array_snapshot_values,
+    as_f64_snapshot as array_as_f64_snapshot, some as array_some,
+    sort_by_keys as array_sort_by_keys, sort_default as array_sort_default,
+    sort_numeric_asc as array_sort_numeric_asc, sort_numeric_desc as array_sort_numeric_desc,
+    sort_with_comparator as array_sort_with_comparator, splice as array_splice_impl,
+    to_reversed as array_to_reversed, to_sorted as array_to_sorted,
+    to_spliced as array_to_spliced, with as array_with, unshift as array_unshift_impl,
+};
+#[inline]
+pub fn array_push(arr: &Value, args: &[Value]) -> Value { array_push_impl(arr, args) }
+#[inline]
+pub fn array_unshift(arr: &Value, args: &[Value]) -> Value { array_unshift_impl(arr, args) }
+#[inline]
+pub fn array_index_of(arr: &Value, search: &Value, from: Option<&Value>) -> Value {
+    array_index_of_impl(arr, search, from)
+}
+#[inline]
+pub fn array_includes(arr: &Value, search: &Value, from: &Value) -> Value {
+    array_includes_impl(arr, search, Some(from))
+}
+#[inline]
+pub fn array_join(arr: &Value, sep: &Value) -> Value { array_join_impl(arr, sep) }
+#[inline]
+pub fn array_splice(arr: &Value, start: &Value, delete_count: Option<&Value>, items: &[Value]) -> Value {
+    array_splice_impl(arr, start, delete_count, items)
+}
+#[inline]
+pub fn array_slice(arr: &Value, start: &Value, end: &Value) -> Value {
+    array_slice_impl(arr, start, end)
+}
+#[inline]
+pub fn array_concat(arr: &Value, args: &[Value]) -> Value { array_concat_impl(arr, args) }
+#[inline]
+pub fn array_flat(arr: &Value, depth: &Value) -> Value { array_flat_impl(arr, depth) }
+#[inline]
+pub fn array_sort(arr: &Value, comparator: Option<&Value>) -> Value {
+    match comparator {
+        Some(cmp) => array_sort_with_comparator(arr, cmp),
+        None => array_sort_default(arr),
+    }
+}
+/// `.at(i)` dispatched on the runtime value — exists on both String and Array (#247).
+#[inline]
+pub fn value_at(recv: &Value, idx: &Value) -> Value {
+    match recv {
+        Value::String(_) => string_at_impl(recv, idx),
+        _ => array_at(recv, idx),
+    }
+}
 pub use tishlang_builtins::symbol::symbol_object;
 pub use tishlang_builtins::typedarrays::{
     float32_array_constructor_value as tish_float32_array_constructor,
