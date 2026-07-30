@@ -1695,6 +1695,24 @@ impl Value {
         v.tish_to_object()
     }
 
+    /// Box a typed native struct BY SHARED REFERENCE — the boxing path codegen actually emits, so the
+    /// whole-struct clone is paid ONLY where it's genuinely needed. On portable (GBA) the struct must
+    /// be OWNED by the `Rc`, so it clones (identical to `from_struct((v).clone())`). Off-GBA it
+    /// serialises the borrow directly via [`TishStruct::tish_to_object`] with NO whole-struct clone —
+    /// byte-identical to the historical `object_from_pairs` boundary that read fields straight off the
+    /// place (#565: the old `from_struct((v).clone())` cloned the entire struct just to serialise it).
+    #[cfg(feature = "portable")]
+    #[inline]
+    pub fn from_struct_ref<T: TishStruct + Clone + 'static>(v: &T) -> Value {
+        Value::Struct(alloc::rc::Rc::new(core::cell::RefCell::new(v.clone())))
+    }
+    /// See the portable variant — off-GBA this serialises the borrow with no whole-struct clone.
+    #[cfg(not(feature = "portable"))]
+    #[inline]
+    pub fn from_struct_ref<T: TishStruct>(v: &T) -> Value {
+        v.tish_to_object()
+    }
+
     /// If this value is a by-reference boxed struct of concrete type `T` (a `Value::Struct`), return a
     /// CLONE of it — the native fast path for `let x: T = <boxed struct return>`, so subsequent field
     /// reads are plain Rust loads instead of `get_prop`. Portable only: off-GBA there is no `Value::Struct`

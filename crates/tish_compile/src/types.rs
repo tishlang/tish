@@ -622,19 +622,19 @@ impl RustType {
                 )
             }
             RustType::Named { .. } => {
-                // Box the struct BY REFERENCE via `Value::from_struct` (portable/GBA keeps it as a
-                // cheap `Value::Struct` — one `Rc`, no per-field string keys / hashmap; every other
-                // native backend falls back to the ordered `object_from_pairs` boundary below, so
-                // behaviour is byte-identical off-GBA). Property access on the boxed struct dispatches
-                // through the generated `impl TishStruct` (small match, no hash). The old eager
-                // `object_from_pairs` now lives in `TishStruct::tish_to_object` (see
-                // [`named_struct_to_object_expr`]) — reached only when the struct genuinely materialises
-                // (JSON.stringify, display, `Object.keys`-family, `for..in`, `in`, `Object.assign`,
-                // `{...s}` spread) or on the non-portable fallback. `.clone()`
-                // because the struct is accessed behind `&self` / a `borrow()`; codegen already emits a
-                // deref place here (e.g. `(*gs.borrow())`), matching the historical behaviour.
+                // Box the struct BY SHARED REFERENCE via `Value::from_struct_ref(&(..))`. Portable/GBA
+                // keeps it as a cheap `Value::Struct` (one `Rc` — the struct must be OWNED there, so it
+                // clones internally). Every other native backend serialises the borrow directly through
+                // `TishStruct::tish_to_object` (the ordered `object_from_pairs` boundary — see
+                // [`named_struct_to_object_expr`]) with NO whole-struct clone, byte-identical to the
+                // historical behaviour that read fields straight off the place (#565: the previous
+                // `from_struct((..).clone())` cloned the entire struct just to serialise it off-GBA).
+                // Property access on a boxed struct dispatches through the generated `impl TishStruct`
+                // (small match, no hash); materialisation is reached only on JSON.stringify / display /
+                // `Object.keys`-family / `for..in` / `in` / `Object.assign` / `{...s}` spread. `&(..)`
+                // borrows the place codegen already emits here (a value or a deref like `(*gs.borrow())`).
                 format!(
-                    "tishlang_runtime::Value::from_struct(({}).clone())",
+                    "tishlang_runtime::Value::from_struct_ref(&({}))",
                     native_expr
                 )
             }
