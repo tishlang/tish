@@ -1018,6 +1018,9 @@ pub(crate) struct Codegen {
     features: std::collections::HashSet<String>,
     /// spec -> native init strategy (legacy adapter object vs generated `generated_native` wrapper)
     native_module_init: std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
+    /// spec -> the `run()`-local holding that module's namespace object, bound ONCE in the preamble.
+    /// Building it is O(exports) — see `emit_native_namespace_preamble`.
+    native_ns_locals: std::collections::HashMap<String, String>,
     /// Typed native imports (`declare fun` + a native import): tish name -> its typed signature.
     /// A matching call emits a DIRECT `<crate>::name_typed(..)` instead of a boxed `value_call`.
     extern_fns: std::collections::HashMap<String, ExternSig>,
@@ -1292,6 +1295,7 @@ impl Codegen {
             string_charset: String::new(),
             features,
             native_module_init,
+            native_ns_locals: std::collections::HashMap::new(),
             extern_fns: std::collections::HashMap::new(),
             user_fn_returns: std::collections::HashMap::new(),
             async_context_stack: Vec::new(),
@@ -2044,6 +2048,48 @@ impl Codegen {
         }
     }
 
+    /// The Rust expression that CONSTRUCTS a native module's namespace object. O(exports): it inserts
+    /// every function the crate exports into a fresh map. Call it once per module, not once per import.
+    fn native_module_ns_ctor(init: &crate::resolve::NativeModuleInit) -> String {
+        match init {
+            crate::resolve::NativeModuleInit::Legacy {
+                crate_name,
+                export_fn,
+            } => format!("{}::{}()", crate_name, export_fn),
+            crate::resolve::NativeModuleInit::Generated { export_fn, .. } => {
+                format!("crate::generated_native::{}()", export_fn)
+            }
+        }
+    }
+
+    /// Bind every native module's namespace object to a `run()`-local, ONCE, before any import reads
+    /// from one.
+    ///
+    /// Each named import lowers to "get this key out of the module's namespace". Building that
+    /// namespace is O(exports) — a fresh `ObjectMap` with an `Arc<str>` key and a native closure per
+    /// exported function — so doing it at every import site is O(imports x exports): importing 68
+    /// names from a crate that exports 68 cost 4,624 allocations to bind 68 functions. On a GBA that
+    /// was measured at 3 seconds of black screen (`tish-gba/examples/bench-boot`), paid before the
+    /// program's first statement; `packages/engine.tish` there imports 117 symbols across two crates
+    /// and cost 4.3s. Hoisting makes it O(imports + exports).
+    ///
+    /// Emitted in sorted order so the generated Rust is byte-identical across builds (the map is a
+    /// `HashMap`, whose iteration order is not).
+    fn emit_native_namespace_preamble(&mut self) {
+        let mut specs: Vec<String> = self.native_module_init.keys().cloned().collect();
+        specs.sort();
+        for (i, spec) in specs.iter().enumerate() {
+            // Index rather than a sanitized spec: `cargo:a-b` and `cargo:a_b` sanitize to the same
+            // identifier, and silently binding one module's namespace under another's name would be a
+            // very quiet bug.
+            let local = format!("__tish_native_ns_{}", i);
+            let ctor = Self::native_module_ns_ctor(&self.native_module_init[spec]);
+            // A module can be resolved but have every one of its imports shadowed or unused.
+            self.writeln(&format!("#[allow(unused_variables)] let {} = {};", local, ctor));
+            self.native_ns_locals.insert(spec.clone(), local);
+        }
+    }
+
     /// Map native module spec to Rust init expression using resolved package.json modules.
     /// For built-in modules (tish:fs, tish:http, tish:process), use builtin_native_module_rust_init.
     fn native_module_rust_init(&self, spec: &str, export_name: &str) -> Option<String> {
@@ -2053,19 +2099,18 @@ impl Codegen {
         self.native_module_init.get(spec).map(|init| {
             // Native modules return a namespace object (like an ES module).
             // Named imports extract the field from that namespace: `import { foo } from "pkg"` → `ns.foo`.
-            let init_expr = match init {
-                crate::resolve::NativeModuleInit::Legacy {
-                    crate_name,
-                    export_fn,
-                } => format!("{}::{}()", crate_name, export_fn),
-                crate::resolve::NativeModuleInit::Generated { export_fn, .. } => {
-                    format!("crate::generated_native::{}()", export_fn)
-                }
-            };
-            format!(
-                "{{ let _ns = {}; match _ns {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
-                init_expr, export_name
-            )
+            // Read it from the hoisted local when there is one; the inline constructor is the fallback
+            // for anything emitted outside `run()`'s preamble.
+            match self.native_ns_locals.get(spec) {
+                Some(local) => format!(
+                    "{{ match &{} {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
+                    local, export_name
+                ),
+                None => format!(
+                    "{{ let _ns = {}; match _ns {{ Value::Object(ref _o) => _o.borrow().strings.get({:?}).cloned().unwrap_or(Value::Null), _ => Value::Null }} }}",
+                    Self::native_module_ns_ctor(init), export_name
+                ),
+            }
         })
     }
 
@@ -3087,6 +3132,9 @@ impl Codegen {
             self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
         }
         self.indent += 1;
+
+        // Before anything else: one namespace object per native module, shared by all of its imports.
+        self.emit_native_namespace_preamble();
 
         // Initialize builtins
         self.writeln("let mut console = Value::object(ObjectMap::from([");
