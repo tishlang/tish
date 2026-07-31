@@ -3,10 +3,11 @@
 //! Provides workspace discovery, path resolution, and Cargo build orchestration
 //! used by tishlang_wasm, tishlang_cranelift, tishlang_native, and the tish CLI.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Serialize nested `cargo build` calls that share the workspace `target/` dir (tests + `tish build`).
 static NESTED_CARGO_MUTEX: Mutex<()> = Mutex::new(());
@@ -17,6 +18,56 @@ fn mold_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// The `target_feature="..."` values in `rustc --print cfg` output.
+fn parse_target_features(print_cfg_stdout: &str) -> BTreeSet<String> {
+    print_cfg_stdout
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("target_feature=\""))
+        .filter_map(|l| l.strip_suffix('"'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Host target features rustc reports, optionally under one extra `-C` flag.
+fn rustc_target_features(codegen_flag: Option<&str>) -> Option<BTreeSet<String>> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let mut cmd = Command::new(rustc);
+    cmd.args(["--print", "cfg"]);
+    if let Some(flag) = codegen_flag {
+        cmd.args(["-C", flag]);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_target_features(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// True when `-C target-cpu=native` is worth passing on this host.
+///
+/// `native` asks LLVM to identify the host core. On hosts it cannot identify — notably
+/// the virtualized Apple Silicon behind GitHub Actions' macOS runners — it answers
+/// `generic`, which is *narrower* than the target's own default CPU. On
+/// aarch64-apple-darwin that silently drops `aes` and `sha2`, and crates that assert
+/// those are statically present then fail to compile at all; `ring` 0.17 trips
+/// `assertion failed: CAPS_STATIC == MIN_STATIC_FEATURES` in const-eval.
+///
+/// So this compares feature sets rather than trusting `native` blindly: keep the flag
+/// only when it is a strict win (every default feature survives). If rustc cannot be
+/// queried, skip the flag — the target default is always correct, just less tuned.
+fn native_target_cpu_is_safe() -> bool {
+    static SAFE: OnceLock<bool> = OnceLock::new();
+    *SAFE.get_or_init(|| {
+        match (
+            rustc_target_features(None),
+            rustc_target_features(Some("target-cpu=native")),
+        ) {
+            (Some(default), Some(native)) => default.is_subset(&native),
+            _ => false,
+        }
+    })
 }
 
 /// True if `root` looks like the Tish language repo (has `crates/tish_runtime`).
@@ -347,7 +398,13 @@ pub fn cargo_target_name(stem: &str) -> String {
     // A leading digit is prefixed with `_`; an empty result falls back to a fixed default.
     let mut name: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if name.is_empty() {
         return "tish_output".to_string();
@@ -371,6 +428,10 @@ pub fn create_build_dir(prefix: &str, out_name: &str) -> Result<PathBuf, String>
 }
 
 /// Run cargo build in the given directory.
+///
+/// `-C target-cpu=native` is added only for host builds, only when the caller has not
+/// already pinned a `target-cpu` in `RUSTFLAGS`, and only when `native` does not lose
+/// target features against the target default (see `native_target_cpu_is_safe`).
 /// If `cross_target` is Some, passes `--target` and skips `-C target-cpu=native`.
 pub fn run_cargo_build(
     build_dir: &Path,
@@ -395,10 +456,14 @@ pub fn run_cargo_build(
             merged_rustflags = format!("{} -C link-arg=-fuse-ld=mold", merged_rustflags.trim());
             merged_rustflags = merged_rustflags.trim().to_string();
         }
-    } else if merged_rustflags.is_empty() {
-        merged_rustflags = "-C target-cpu=native".to_string();
-    } else if !merged_rustflags.contains("target-cpu") {
-        merged_rustflags = format!("{} -C target-cpu=native", merged_rustflags);
+    } else if !merged_rustflags.contains("target-cpu") && native_target_cpu_is_safe() {
+        // Caller did not pin a CPU and `native` resolves to something at least as
+        // capable as the target default — see `native_target_cpu_is_safe`.
+        merged_rustflags = if merged_rustflags.is_empty() {
+            "-C target-cpu=native".to_string()
+        } else {
+            format!("{} -C target-cpu=native", merged_rustflags)
+        };
     }
 
     let mut cmd = Command::new("cargo");
@@ -437,6 +502,66 @@ pub fn run_cargo_build(
 #[cfg(test)]
 mod protoc_tests {
     use super::*;
+
+    /// Trimmed `rustc --print cfg --target aarch64-apple-darwin`.
+    const APPLE_DARWIN_DEFAULT_CFG: &str = r#"
+debug_assertions
+panic="unwind"
+target_arch="aarch64"
+target_feature="aes"
+target_feature="neon"
+target_feature="sha2"
+target_feature="sha3"
+target_os="macos"
+"#;
+
+    #[test]
+    fn parses_target_features_from_print_cfg() {
+        let features = parse_target_features(APPLE_DARWIN_DEFAULT_CFG);
+        assert_eq!(
+            features.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["aes", "neon", "sha2", "sha3"]
+        );
+        // Non-`target_feature` keys never leak in, and neither do the quotes.
+        assert!(!features.contains("aarch64"));
+        assert!(!features.contains("\"aes\""));
+    }
+
+    #[test]
+    fn native_cpu_rejected_when_it_drops_target_features() {
+        // What GitHub's virtualized Apple Silicon reports: `native` -> `generic`, which
+        // keeps only `neon`. Pinning it would break `ring`'s static feature assertions.
+        let default = parse_target_features(APPLE_DARWIN_DEFAULT_CFG);
+        let generic = parse_target_features("target_feature=\"neon\"\n");
+        assert!(!default.is_subset(&generic));
+    }
+
+    #[test]
+    fn native_cpu_accepted_when_it_only_adds() {
+        let default = parse_target_features(APPLE_DARWIN_DEFAULT_CFG);
+        let apple_m1 = parse_target_features(
+            "target_feature=\"aes\"\ntarget_feature=\"neon\"\n\
+             target_feature=\"sha2\"\ntarget_feature=\"sha3\"\ntarget_feature=\"lse\"\n",
+        );
+        assert!(default.is_subset(&apple_m1));
+        // Identical sets count as safe too — `native` matching the default is a no-op.
+        assert!(default.is_subset(&default));
+    }
+
+    #[test]
+    fn live_rustc_probe_still_parses() {
+        // Guards the parse against a `rustc --print cfg` format change: every target Tish
+        // builds on has at least one baseline target feature (x86_64 sse2, aarch64 neon).
+        // If this ever comes back empty the probe would silently disable target-cpu=native
+        // everywhere rather than only on hosts LLVM cannot identify.
+        let Some(features) = rustc_target_features(None) else {
+            return; // no rustc on PATH — nothing to assert
+        };
+        assert!(
+            !features.is_empty(),
+            "no target_feature in rustc --print cfg"
+        );
+    }
 
     #[test]
     fn cargo_target_name_replaces_hyphens() {
