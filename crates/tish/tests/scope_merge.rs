@@ -77,3 +77,34 @@ fn scope_exports_tish_merges_as_source() {
 fn scope_plain_main_merges_as_source() {
     assert_merged_as_source(&setup(r#","main":"index.tish""#));
 }
+
+/// The other half of the #38 split: a `@scope/pkg` that opts in via `tish.crate` (the tish-apple
+/// hosts, published as `@tishlang/tish-macos` / `@tishlang/tish-ios`) routes to the NATIVE path —
+/// lowered to `NativeModuleLoad`, not merged as source.
+#[test]
+fn scope_tish_crate_routes_native() {
+    let dir = setup(r#","tish":{"module":true,"crate":"test-greet","export":"greet_object"}"#);
+    let root = dir.path();
+    let modules = resolve_project(&root.join("main.tish"), Some(root)).expect("resolve");
+    let merged = merge_modules(modules).expect("merge");
+    let native_scope = merged.program.statements.iter().any(|s| {
+        matches!(
+            s,
+            Statement::VarDecl { init: Some(Expr::NativeModuleLoad { spec, .. }), .. }
+            if spec.as_ref() == "@test/greet"
+        )
+    });
+    assert!(
+        native_scope,
+        "@scope package with tish.crate must lower to NativeModuleLoad (native Rust-crate path)"
+    );
+    let has_greet = merged
+        .program
+        .statements
+        .iter()
+        .any(|s| matches!(s, Statement::FunDecl { name, .. } if name.as_ref() == "greet"));
+    assert!(
+        !has_greet,
+        "@scope package with tish.crate must NOT be merged as Tish source"
+    );
+}

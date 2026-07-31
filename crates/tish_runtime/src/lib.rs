@@ -1778,6 +1778,38 @@ pub mod pty;
 #[cfg(feature = "pty")]
 pub use pty::{pty_kill, pty_pid, pty_read, pty_resize, pty_spawn, pty_write};
 
+#[cfg(feature = "process")]
+pub mod process_spawn;
+#[cfg(feature = "process")]
+pub use process_spawn::{
+    process_close_stdin, process_kill, process_pid, process_read_stderr, process_read_stdout,
+    process_spawn, process_wait, process_write_stdin,
+};
+
+#[cfg(feature = "net")]
+pub mod net;
+#[cfg(feature = "net")]
+pub use net::{
+    net_accept, net_close, net_connect, net_listen, net_probe, net_read, net_sleep, net_write,
+};
+
+#[cfg(feature = "encoding")]
+pub mod encoding;
+#[cfg(feature = "encoding")]
+pub use encoding::{
+    base64_decode, base64_encode, base64_url_decode, base64_url_encode, utf8_decode, utf8_encode,
+};
+
+#[cfg(feature = "crypto")]
+pub mod crypto;
+#[cfg(feature = "crypto")]
+pub use crypto::{random_bytes, sha256, sha256_hex};
+
+#[cfg(feature = "zip")]
+pub mod zip;
+#[cfg(feature = "zip")]
+pub use zip::{zip_entries, zip_extract};
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,

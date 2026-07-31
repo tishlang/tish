@@ -2143,6 +2143,7 @@ impl Codegen {
                     "realpath" | "realpathSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::realpath(args))"),
                     "readlink" | "readlinkSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readlink(args))"),
                     "truncate" | "truncateSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::truncate(args))"),
+                    "chmod" | "chmodSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::chmod(args))"),
                     "mkdtemp" | "mkdtempSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdtemp(args))"),
                     "cp" | "cpSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::cp(args))"),
                     "access" | "accessSync" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::access(args))"),
@@ -2166,6 +2167,7 @@ impl Codegen {
                     "realpath" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::realpath_promise(args))"),
                     "readlink" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::readlink_promise(args))"),
                     "truncate" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::truncate_promise(args))"),
+                    "chmod" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::chmod_promise(args))"),
                     "mkdtemp" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::mkdtemp_promise(args))"),
                     "cp" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::cp_promise(args))"),
                     "access" => Some("Value::native(|args: &[Value]| tishlang_runtime::fs_ext::access_promise(args))"),
@@ -2200,9 +2202,20 @@ impl Codegen {
                     "execFile" => Some("Value::native(|args: &[Value]| tish_process_exec_file(args))"),
                     "execCapture" => Some("Value::native(|args: &[Value]| tish_process_exec_capture(args))"),
                     "execFileCapture" => Some("Value::native(|args: &[Value]| tish_process_exec_file_capture(args))"),
+                    "spawn" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_spawn(args))"),
+                    "readStdout" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_read_stdout(args))"),
+                    "readStderr" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_read_stderr(args))"),
+                    "writeStdin" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_write_stdin(args))"),
+                    "closeStdin" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_close_stdin(args))"),
+                    "wait" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_wait(args))"),
+                    "kill" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_kill(args))"),
+                    "pid" => Some("Value::native(|args: &[Value]| tishlang_runtime::process_pid(args))"),
                     "argv" => Some("Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))"),
                     "env" => Some("Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect())"),
-                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args))); m.insert(Arc::from(\"execCapture\"), Value::native(|args: &[Value]| tish_process_exec_capture(args))); m.insert(Arc::from(\"execFileCapture\"), Value::native(|args: &[Value]| tish_process_exec_file_capture(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); Value::object(m) }"),
+                    // Node-style platform string so `process.platform` reads identically on the JS
+                    // target (Node's real global) and native (this): macos->darwin, windows->win32.
+                    "platform" => Some("Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into())"),
+                    "process" => Some("{ let mut m = ObjectMap::default(); m.insert(Arc::from(\"exit\"), Value::native(|args: &[Value]| tish_process_exit(args))); m.insert(Arc::from(\"cwd\"), Value::native(|args: &[Value]| tish_process_cwd(args))); m.insert(Arc::from(\"exec\"), Value::native(|args: &[Value]| tish_process_exec(args))); m.insert(Arc::from(\"execFile\"), Value::native(|args: &[Value]| tish_process_exec_file(args))); m.insert(Arc::from(\"execCapture\"), Value::native(|args: &[Value]| tish_process_exec_capture(args))); m.insert(Arc::from(\"execFileCapture\"), Value::native(|args: &[Value]| tish_process_exec_file_capture(args))); m.insert(Arc::from(\"argv\"), Value::Array(VmRef::new(std::env::args().map(|s| Value::String(s.into())).collect()))); m.insert(Arc::from(\"env\"), Value::object(std::env::vars().map(|(k,v)| (Arc::from(k.as_str()), Value::String(v.into()))).collect::<ObjectMap>())); m.insert(Arc::from(\"platform\"), Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into())); Value::object(m) }"),
                     _ => None,
                 },
             "tish:ws" if self.has_feature("ws") => match export_name {
@@ -2232,6 +2245,37 @@ impl Codegen {
                     "pid" => Some("Value::native(|args: &[Value]| tishlang_runtime::pty_pid(args))"),
                     _ => None,
                 },
+            "tish:net" if self.has_feature("net") => match export_name {
+                    "connect" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_connect(args))"),
+                    "read" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_read(args))"),
+                    "write" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_write(args))"),
+                    "close" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_close(args))"),
+                    "listen" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_listen(args))"),
+                    "accept" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_accept(args))"),
+                    "probe" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_probe(args))"),
+                    "sleep" => Some("Value::native(|args: &[Value]| tishlang_runtime::net_sleep(args))"),
+                    _ => None,
+                },
+            "tish:encoding" if self.has_feature("encoding") => match export_name {
+                    "base64Encode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_encode(args))"),
+                    "base64Decode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_decode(args))"),
+                    "base64UrlEncode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_encode(args))"),
+                    "base64UrlDecode" => Some("Value::native(|args: &[Value]| tishlang_runtime::base64_url_decode(args))"),
+                    "utf8Decode" => Some("Value::native(|args: &[Value]| tishlang_runtime::utf8_decode(args))"),
+                    "utf8Encode" => Some("Value::native(|args: &[Value]| tishlang_runtime::utf8_encode(args))"),
+                    _ => None,
+                },
+            "tish:crypto" if self.has_feature("crypto") => match export_name {
+                    "sha256" => Some("Value::native(|args: &[Value]| tishlang_runtime::sha256(args))"),
+                    "sha256Hex" => Some("Value::native(|args: &[Value]| tishlang_runtime::sha256_hex(args))"),
+                    "randomBytes" => Some("Value::native(|args: &[Value]| tishlang_runtime::random_bytes(args))"),
+                    _ => None,
+                },
+            "tish:zip" if self.has_feature("zip") => match export_name {
+                    "extract" => Some("Value::native(|args: &[Value]| tishlang_runtime::zip_extract(args))"),
+                    "entries" => Some("Value::native(|args: &[Value]| tishlang_runtime::zip_entries(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -2241,7 +2285,8 @@ impl Codegen {
         if self.features.contains("full") {
             matches!(
                 name,
-                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty"
+                "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
+                    | "encoding" | "crypto" | "zip"
             )
         } else {
             self.features.contains(name)
@@ -3379,6 +3424,9 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln("p.insert(Arc::from(\"env\"), Value::object(env_obj));");
+            // Node-style platform string (macos->darwin, windows->win32) so bare `process.platform`
+            // matches the JS target's Node global and the named `tish:process` export.
+            self.writeln("p.insert(Arc::from(\"platform\"), Value::String(match std::env::consts::OS { \"macos\" => \"darwin\", \"windows\" => \"win32\", o => o }.into()));");
             self.writeln("p");
             self.indent -= 1;
             self.writeln("});");
