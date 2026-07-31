@@ -12,9 +12,9 @@
 //! `PropMap` on a cache miss). Phase 1b will attach the ordered key list to each shape so objects can
 //! drop per-object key storage entirely (the butterfly representation).
 
-use crate::compat::{AHashMap, Arc, OnceLock, RwLock};
-#[cfg(feature = "portable")]
-use alloc::{vec, vec::Vec};
+use crate::compat::Arc;
+#[cfg(not(feature = "portable"))]
+use crate::compat::{AHashMap, OnceLock, RwLock};
 
 /// Identity of an object's ordered key-set.
 pub type ShapeId = u32;
@@ -31,15 +31,18 @@ pub const DICT_SHAPE: ShapeId = u32::MAX;
 /// Edges are keyed by an `ahash` map, not the default SipHash one: `transition` is on the hot path of
 /// every object construction (and `JSON.parse` — profiled as ~16% of parse, almost all SipHash), and
 /// ahash is ~2–3× faster on short string keys. Random-seeded per process, so no HashDoS regression.
+#[cfg(not(feature = "portable"))]
 #[derive(Default)]
 struct ShapeNode {
     transitions: AHashMap<Arc<str>, ShapeId>,
 }
 
+#[cfg(not(feature = "portable"))]
 struct Registry {
     nodes: Vec<ShapeNode>,
 }
 
+#[cfg(not(feature = "portable"))]
 fn registry() -> &'static RwLock<Registry> {
     static REG: OnceLock<RwLock<Registry>> = OnceLock::new();
     REG.get_or_init(|| {
@@ -56,6 +59,28 @@ fn registry() -> &'static RwLock<Registry> {
 /// object with the same construction path reuses it. Cheap on the hot path (a read-lock + one hashmap
 /// lookup once the edge exists). A `DICT_SHAPE` input (or shape-space exhaustion) stays `DICT_SHAPE`.
 pub fn transition(from: ShapeId, key: &Arc<str>) -> ShapeId {
+    // On `portable` (the embedded/GBA link) nothing ever READS a shape id: the only consumers are
+    // the bytecode VM (`tish_vm`) and the std runtime's inline caches (`tish_runtime`), and neither
+    // is linked there — the GBA facade's `get_prop` goes straight to `PropMap`. Maintaining the
+    // registry anyway cost a lock plus an ahash lookup on every new-key insert AND — since this
+    // file has no eviction of any kind — a permanent `ShapeNode` plus an `Arc::clone` of the key
+    // for every distinct construction path, for the life of the program, on a 136 KB heap.
+    // Opt out via the sentinel the file already defines for exactly this case: `DICT_SHAPE` never
+    // matches an inline cache, so any future reader degrades to the slow path rather than trusting
+    // a slot index that was never recorded.
+    #[cfg(feature = "portable")]
+    {
+        let _ = (from, key);
+        DICT_SHAPE
+    }
+    #[cfg(not(feature = "portable"))]
+    {
+        transition_tracked(from, key)
+    }
+}
+
+#[cfg(not(feature = "portable"))]
+fn transition_tracked(from: ShapeId, key: &Arc<str>) -> ShapeId {
     if from == DICT_SHAPE {
         return DICT_SHAPE;
     }
