@@ -3660,9 +3660,17 @@ impl Codegen {
                         let escaped = Self::escape_ident(name.as_ref());
                         return Ok(format!("{} = ({}) as i32", escaped, int_code));
                     }
+                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
+                    // An RHS that is ALREADY an integer stores straight into the register. `d = d + 1`
+                    // reaches here — it is arithmetic, not a bitwise chain, so `emit_int32_operand`
+                    // declines it — and boxing that i32 into a `Value::Number` only to run ToInt32 back
+                    // out of it was the whole cost of incrementing an annotated counter.
+                    let escaped_int = Self::escape_ident(name.as_ref());
+                    if val_ty.is_integer_scalar() {
+                        return Ok(format!("{} = ({}) as i32", escaped_int, val_code));
+                    }
                     // Defensive: gate guarantees `Some`, but if a future RHS shape slips through,
                     // fall back to a sound f64-narrowed store rather than miscompiling.
-                    let (val_code, val_ty) = self.emit_typed_expr(value)?;
                     let v = if val_ty.is_native() {
                         val_ty.to_value_expr(&val_code)
                     } else {
@@ -14131,6 +14139,22 @@ impl Codegen {
     /// native `Num<i32,8>` arithmetic instead of boxing the literal side through `f64`. Uses the
     /// same truncating `(n * 256) as i32` conversion as the dynamic `fixed`↔`Value` boundary, so
     /// the constant is bit-identical to the boxed path.
+    /// A numeric literal that is EXACTLY a whole number inside `i32`'s range, as an `i32`. Used to keep
+    /// `x > 0` / `i < 100` in integer registers when the other side is already an integer — a fraction
+    /// or an out-of-range magnitude returns `None` and stays on the `f64` path, where it is correct.
+    fn int_literal_of(e: &Expr) -> Option<i32> {
+        if let Expr::Literal {
+            value: Literal::Number(n),
+            ..
+        } = e
+        {
+            if n.fract() == 0.0 && *n >= i32::MIN as f64 && *n <= i32::MAX as f64 {
+                return Some(*n as i32);
+            }
+        }
+        None
+    }
+
     fn fixed_literal_of(e: &Expr) -> Option<String> {
         if let Expr::Literal {
             value: Literal::Number(n),
@@ -23209,6 +23233,83 @@ impl Codegen {
                 // A narrow int storage read (`u8` HP, `i16` tile x) promotes the same way — read
                 // as its exact `f64` value so arithmetic keeps JS Number semantics; the truncating
                 // store back to the field happens at the assignment site.
+                // …but when BOTH sides are already integers, that detour is pure loss on a CPU with no
+                // FPU. On ARM7TDMI every f64 op is a soft-float library CALL, so `i + 1` on a `: i32`
+                // counter costs two int→float conversions, a call, and a float→int store. It is why
+                // annotating a loop counter `: i32` measured SLOWER than leaving it a plain number
+                // (examples/bench-ai) — the opposite of what an annotation is for.
+                //
+                // Keeping the pair in integer registers is not an approximation: every i32 is exact in
+                // f64, so `+`, `-` and the relational operators give bit-identical answers in either
+                // domain. Only the operators where the two domains genuinely DISAGREE stay on floats:
+                //   `/`  JS division is real division — `5 / 2` is 2.5, not 2
+                //   `%`  integer `%` panics on a zero divisor where JS yields NaN
+                //   `*`  a product can leave i32's range while staying exact in f64, and the bitwise
+                //        lowering below deliberately relies on that headroom (`h * 16777619`)
+                // Operands widen to `i32` first so mixed widths (a `u8` HP against an `i16` tile
+                // coordinate) still agree with JS Number semantics. `u32` is excluded because it is the
+                // one width that does not fit — reading 3 billion `as i32` would flip its sign.
+                // The adds wrap rather than panic, which matches both JS (`to_int32` is modulo 2³²) and
+                // the truncating `as` store every integer target already performs.
+                let fits_i32 = |t: &RustType| {
+                    matches!(
+                        t,
+                        RustType::I32
+                            | RustType::I8
+                            | RustType::U8
+                            | RustType::I16
+                            | RustType::U16
+                    )
+                };
+                // An integer against a whole-number LITERAL is the shape most of this actually is —
+                // `x > 0`, `i < 100`, `0 - dir`. The literal types as `f64`, which would drag the
+                // integer side out of its register for a soft-float compare over two values that are
+                // both plainly integers. Fold it into the integer domain instead. Only exact whole
+                // numbers inside i32's range qualify, so `x < 2.5` and `x < 3e9` still go to floats,
+                // where they belong.
+                let (l, lt, r, rt) = if fits_i32(&lt) && rt == RustType::F64 {
+                    match Self::int_literal_of(right) {
+                        Some(v) => (l, lt, format!("{}i32", v), RustType::I32),
+                        None => (l, lt, r, rt),
+                    }
+                } else if fits_i32(&rt) && lt == RustType::F64 {
+                    match Self::int_literal_of(left) {
+                        Some(v) => (format!("{}i32", v), RustType::I32, r, rt),
+                        None => (l, lt, r, rt),
+                    }
+                } else {
+                    (l, lt, r, rt)
+                };
+                if fits_i32(&lt) && fits_i32(&rt) {
+                    let li = format!("(({}) as i32)", l);
+                    let ri = format!("(({}) as i32)", r);
+                    match op {
+                        BinOp::Add => {
+                            return Ok((
+                                format!("({}).wrapping_add({})", li, ri),
+                                RustType::I32,
+                            ))
+                        }
+                        BinOp::Sub => {
+                            return Ok((
+                                format!("({}).wrapping_sub({})", li, ri),
+                                RustType::I32,
+                            ))
+                        }
+                        BinOp::Lt => return Ok((format!("({} < {})", li, ri), RustType::Bool)),
+                        BinOp::Le => return Ok((format!("({} <= {})", li, ri), RustType::Bool)),
+                        BinOp::Gt => return Ok((format!("({} > {})", li, ri), RustType::Bool)),
+                        BinOp::Ge => return Ok((format!("({} >= {})", li, ri), RustType::Bool)),
+                        BinOp::StrictEq => {
+                            return Ok((format!("({} == {})", li, ri), RustType::Bool))
+                        }
+                        BinOp::StrictNe => {
+                            return Ok((format!("({} != {})", li, ri), RustType::Bool))
+                        }
+                        _ => {}
+                    }
+                }
+
                 let (l, lt) = if lt.is_integer_scalar() {
                     (format!("(({}) as f64)", l), RustType::F64)
                 } else {
