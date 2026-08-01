@@ -1706,6 +1706,12 @@ impl Scanner {
         self.chars.get(self.i + 1).copied()
     }
 
+    /// True when the char immediately before the cursor is `:`, i.e. the `//` about to
+    /// be scanned is the scheme separator of a URL (`http://`) rather than a comment.
+    fn prev_is_colon(&self) -> bool {
+        self.i > 0 && self.chars.get(self.i - 1) == Some(&':')
+    }
+
     /// Consume one char, tracking line/col like the lexer (col resets after `\n`).
     fn bump(&mut self) -> Option<char> {
         let c = *self.chars.get(self.i)?;
@@ -1765,7 +1771,23 @@ impl Scanner {
                     self.seen_nonws = true;
                     self.scan_template();
                 }
-                '/' if self.peek2() == Some('/') => self.scan_line_comment(),
+                // `://` is a URL scheme separator, never a comment. This scanner has no JSX
+                // awareness, so JSX TEXT — which, unlike a string or an attribute value, is bare
+                // source — used to have its URLs read as comments:
+                //
+                //   <div>Redirect URI: http://127.0.0.1/callback</div>
+                //
+                // scanned `//127.0.0.1/callback</div>` as a line comment, and the printer then
+                // re-emitted it after the element. Worse, the re-emitted text is a REAL comment, so
+                // every subsequent run found one more and the file grew without converging — and
+                // `--check` could never pass on such a file. See tishlang/tish#578.
+                //
+                // Guarding on the preceding `:` fixes the whole class (http://, file://, dune://)
+                // without teaching this scanner to parse JSX, which would mean distinguishing
+                // `<div>` from `a < b` and risks breaking comment scanning in ordinary code.
+                '/' if self.peek2() == Some('/') && !self.prev_is_colon() => {
+                    self.scan_line_comment()
+                }
                 '/' if self.peek2() == Some('*') => self.scan_block_comment(),
                 ' ' | '\t' | '\r' | '\n' => {
                     self.bump();
@@ -1882,6 +1904,37 @@ mod tests {
         let src = "fn add(a, b) {\n  return a + b\n}\n";
         let out = format_source(src).unwrap();
         let _ = tishlang_parser::parse(&out).unwrap();
+    }
+
+    /// tishlang/tish#578 — a URL in JSX TEXT had its `//` scanned as a line comment, so the
+    /// printer re-emitted everything after it as a trailing comment. The re-emitted text was
+    /// itself a real comment, so each run appended another copy and the file never converged.
+    #[test]
+    fn url_in_jsx_text_is_not_a_comment() {
+        let src = "/** @jsxImportSource lattish */\n\nexport fn Demo() {\n  return <div>Redirect URI: http://127.0.0.1/callback for details</div>\n}\n";
+        let once = format_source(src).unwrap();
+        // Not `!contains("//127.0.0.1")` — that substring is part of the legitimate URL. The
+        // corruption signature is the text appearing TWICE: once in the JSX, once hoisted out.
+        assert_eq!(
+            once.matches("127.0.0.1").count(),
+            1,
+            "URL text was duplicated into a comment:\n{once}"
+        );
+        // Idempotence is the property that actually broke: formatting must reach a fixed point,
+        // otherwise `--check` can never pass no matter how many times the file is formatted.
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting is not idempotent");
+        let thrice = format_source(&twice).unwrap();
+        assert_eq!(twice, thrice, "formatting is not idempotent");
+    }
+
+    /// The guard keys off the `:` immediately before `//`, so ordinary trailing comments —
+    /// including ones right after a colon-bearing construct — must still be recognised.
+    #[test]
+    fn ordinary_comments_still_scanned() {
+        let src = "fn f() {\n  let o = { a: 1 } // trailing\n  return o\n}\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("// trailing"), "comment was dropped:\n{out}");
     }
 
     /// Debug-render the parsed AST with all `Span { … }` contents removed, so two programs compare
