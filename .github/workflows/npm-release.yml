@@ -137,9 +137,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSET_URL=$(echo '${{ toJSON(github.event.release.assets) }}' | jq -r --arg n "${{ matrix.asset }}" '.[] | select(.name == $n) | .url')
+          # Look the asset up through the API, NOT `github.event.release.assets`.
+          #
+          # The event payload is a snapshot frozen when the release event fired, and ci.yml creates
+          # the release BEFORE it finishes uploading the tarballs — so a package whose tarball lands
+          # a few seconds later is simply absent from the payload and the job fails with
+          # "Release has no asset". Re-running does not help: a re-run replays the SAME frozen
+          # payload, so it fails identically forever. That is what happened to v3.2.1 — the payload
+          # carried 14 assets, the release has 21, and the 7 it never saw included the tarballs for
+          # @tishlang/tish, tish-lsp, tish-lint, tish-format and cargo-bindgen.
+          #
+          # Querying live also lets a re-run recover a release whose uploads have since completed,
+          # and the retry below covers the first run still racing them.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            ASSET_URL=$(curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?per_page=100" \
+              | jq -r --arg n "${{ matrix.asset }}" '.[] | select(.name == $n and .state == "uploaded") | .url')
+            [ -n "$ASSET_URL" ] && [ "$ASSET_URL" != "null" ] && break
+            echo "asset ${{ matrix.asset }} not uploaded yet (attempt $attempt/10) — waiting 30s"
+            sleep 30
+          done
           if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "Release has no asset ${{ matrix.asset }}"
+            echo "Release ${{ github.event.release.tag_name }} has no uploaded asset ${{ matrix.asset }} after 5 minutes"
             exit 1
           fi
           curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL" -o "${{ matrix.asset }}"
