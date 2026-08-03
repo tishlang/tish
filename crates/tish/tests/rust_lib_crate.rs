@@ -105,6 +105,21 @@ fn main() {
     assert_eq!(text(&lib::lookup(Value::String("kick".into()))), "miss", "reassignment visible");
 
     assert_eq!(num(&lib::initRuns()), 1.0, "still initialised once");
+
+    // A throw is parked for the next checkpoint, not unwound. Across the `pub fn` boundary there is
+    // no Tish frame to surface it in, so a parked throw used to sit latched and make every LATER
+    // call bail and return null. Reading a property off a null is all it takes.
+    let _ = lib::runtime::get_index(&Value::Null, &Value::String("nope".into()));
+    assert_eq!(
+        num(&lib::add(Value::Number(1.0), Value::Number(2.0))),
+        3.0,
+        "a parked throw must not brick the module"
+    );
+    for _ in 0..20 {
+        let _ = lib::runtime::get_index(&Value::Null, &Value::String("nope".into()));
+    }
+    assert_eq!(text(&lib::lookup(Value::String("kick".into()))), "miss", "still working after 20");
+
     println!("ALL_OK");
 }
 "#,
