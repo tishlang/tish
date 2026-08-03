@@ -21,7 +21,10 @@ tish-unity	local:~/Projects/tish/tish-unity/native/tish_unity_bridge	.	ffi	cargo
 # tish-stripe/cedar/biscuit/webauthn/brainstorm-pg have no test fns, so for them `cargo test` is a
 # build/codegen guard. tish-oidc + tish-polars are still genuinely broken (kept xfail). tish-pg is a
 # local path absent on this machine (skips). tish-apple-common is CONFIRMED CLEAN (pass below); its
-# tish-macos/tish-ios crates are macOS-only + heavy Value-use, not Linux-checkable.
+# tish-macos/tish-ios crates are macOS-only + heavy Value-use, not Linux-checkable — but note Cargo
+# still loads EVERY workspace member's manifest to check one package, so a broken sibling-repo path
+# dep in tish-macos takes the whole row down regardless (fixed in tishlang/tish-apple#6).
+# The package is `tishlang_apple_common`; `crates/tish-apple-common` is only the directory name.
 tish-pg	local:~/Projects/tish-pg	.	rust	cargo test --no-run	xfail
 tish-callbacks	local:~/Projects/tish/tish-callbacks	.	rust	cargo test	pass
 tish-oidc	local:~/Projects/tish/tish-oidc	.	rust	cargo check	xfail
@@ -31,7 +34,7 @@ tish-biscuit	local:~/Projects/tish/tish-biscuit	.	rust	cargo test	pass
 tish-webauthn	local:~/Projects/tish/tish-webauthn	.	rust	cargo test	pass
 brainstorm-pg	local:~/Projects/brainstorm/crates/brainstorm-pg	.	rust	cargo test	pass
 tish-polars	git:https://github.com/spacedevin/tish-polars.git@main	.	rust	cargo check	xfail
-tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo check -p tish-apple-common	pass
+tish-apple	git:https://github.com/tishlang/tish-apple.git@main	.	rust	cargo check -p tishlang_apple_common	pass
 #
 # ── tish-program consumers — no compile link; hit only by SEMANTIC changes (div-by-zero, key order) ──
 # Tested via the repo's own build/test harness against the HEAD binary (see header). expected=pass —

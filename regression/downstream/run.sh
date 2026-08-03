@@ -57,11 +57,20 @@ echo ""
 
 # Rewrite every `path = "..../crates/tish_NAME"` in the repo's Cargo.tomls to the
 # HEAD checkout — robust for path-dep consumers (no version-match issues).
+#
+# Only rewrites a name that ACTUALLY EXISTS under the tish checkout. The `crates/tish_*` shape is not
+# unique to this repo — tish-apple pointed at `../../../tish-desktop/crates/tish_broker`, a crate in
+# a different repo — and blindly repointing that at `$TISH/crates/tish_broker` turned a resolvable
+# dep into a dangling one, so the workspace failed to load and the row read as a tish regression when
+# nothing in tish had changed. Leave a path we don't own exactly as we found it.
 rewrite_tish_paths() {
   local root="$1" t="$2"
   find "$root" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
     | while IFS= read -r f; do
-        TISH_ABS="$t" perl -i -pe 's{path\s*=\s*"[^"]*?/crates/(tish_[A-Za-z0-9_]+)"}{path = "$ENV{TISH_ABS}/crates/$1"}g' "$f" 2>/dev/null || true
+        TISH_ABS="$t" perl -i -pe '
+          s{path\s*=\s*"[^"]*?/crates/(tish_[A-Za-z0-9_]+)"}{
+            -d "$ENV{TISH_ABS}/crates/$1" ? "path = \"$ENV{TISH_ABS}/crates/$1\"" : $&
+          }ge' "$f" 2>/dev/null || true
       done
 }
 
