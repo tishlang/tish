@@ -404,6 +404,10 @@ pub fn build_after_help() -> String {
           Native executable (see --native-backend)
   {t}js{r}
           JavaScript bundle
+  {t}rust-lib{r}
+          Rust library source crate (crate-type = \"rlib\") at `-o <dir>` — one `pub fn` per
+          `export fn` of the entry module, over `tishlang_runtime::Value`. Cargo is NOT run; the
+          crate is the output, for the consumer to depend on. The Rust counterpart of `--target js`
   {t}wasm{r}
           WebAssembly (.tish project; .js source supported on some paths)
   {t}wasm-gpu{r}

@@ -1,0 +1,35 @@
+// Fixture for `--target rust-lib`. Exercises the two things a library emit has to get right that a
+// whole-program emit never has to: an export reached from Rust, and module-level state that must
+// outlive the `run()` frame — including a `clear*()` that REASSIGNS it rather than mutating in place
+// (the shape @spacedevin/deck's registries use).
+
+let registry = {}
+let initCount = 0
+
+initCount = initCount + 1
+
+export fn register(k, v) {
+  registry[String(k)] = v
+  return Object.keys(registry).length
+}
+
+export fn lookup(k) {
+  let hit = registry[String(k)]
+  if (hit === null) {
+    return "miss"
+  }
+  return hit
+}
+
+export fn clearAll() {
+  registry = {}
+  return Object.keys(registry).length
+}
+
+export fn initRuns() {
+  return initCount
+}
+
+export fn add(a, b) {
+  return a + b
+}

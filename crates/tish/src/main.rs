@@ -914,9 +914,9 @@ fn build_file(
         .map_err(|e| e.to_string());
     }
 
-    if target != "native" && target != "gba" {
+    if target != "native" && target != "gba" && target != "rust-lib" {
         return Err(format!(
-            "Unknown target: {}. Use 'native', 'gba', 'js', 'wasm', 'wasm-gpu', 'wasi', or 'bytecode'.",
+            "Unknown target: {}. Use 'native', 'gba', 'rust-lib', 'js', 'wasm', 'wasm-gpu', 'wasi', or 'bytecode'.",
             target
         ));
     }
@@ -935,6 +935,11 @@ fn build_file(
             return Err("tish build --target gba requires a .tish entry file.".to_string());
         }
         tishlang_native::NativeBuildConfig::gba()
+    } else if target == "rust-lib" {
+        if is_js {
+            return Err("tish build --target rust-lib requires a .tish entry file.".to_string());
+        }
+        tishlang_native::NativeBuildConfig::rust_lib()
     } else if let Some(triple) = ios_triple {
         tishlang_native::NativeBuildConfig::ios_staticlib(triple)
     } else if crate_type == "staticlib" {
@@ -980,6 +985,12 @@ fn build_file(
             &build_config,
         )
         .map_err(|e| e.to_string())?;
+    }
+
+    // `rust-lib` writes a crate DIRECTORY at `-o`, and already reported it — the artifact-path
+    // rewriting below is all about locating a single built file, which does not apply.
+    if build_config.artifact == tishlang_native::NativeArtifact::RustLib {
+        return Ok(());
     }
 
     let out_name = Path::new(output_path)

@@ -652,7 +652,7 @@ pub fn compile_project_full_emit(
     if let Some(cap) = feature_cap {
         all_features.retain(|f| cap.contains(f));
     }
-    let rust = compile_with_native_modules_emit(
+    let rust = compile_with_native_modules_emit_exports(
         &merged.program,
         project_root,
         &all_features,
@@ -660,6 +660,7 @@ pub fn compile_project_full_emit(
         &native_build.native_init,
         optimize,
         emit_mode,
+        &merged.entry_exports,
     )?;
     Ok((rust, native_modules, all_features, native_build))
 }
@@ -728,6 +729,16 @@ fn run_type_check(program: &Program) -> Result<(), CompileError> {
     Ok(())
 }
 
+/// One entry-module export, as the `RustLib` surface sees it.
+struct RustLibExport {
+    /// The Rust local `run()` binds — for a re-export, the dependency's binding.
+    local_name: String,
+    /// The name the crate exposes (and the key in the export table).
+    exported_name: String,
+    /// Parameter count when the export names a `fn`; `None` for a value export.
+    arity: Option<usize>,
+}
+
 pub fn compile_with_native_modules_emit(
     program: &Program,
     project_root: Option<&Path>,
@@ -736,6 +747,33 @@ pub fn compile_with_native_modules_emit(
     native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
     optimize: bool,
     emit_mode: crate::NativeEmitMode,
+) -> Result<String, CompileError> {
+    compile_with_native_modules_emit_exports(
+        program,
+        project_root,
+        features,
+        native_modules,
+        native_init,
+        optimize,
+        emit_mode,
+        &[],
+    )
+}
+
+/// Like [`compile_with_native_modules_emit`], plus the entry module's exported
+/// `(local_name, exported_name)` pairs. Only [`crate::NativeEmitMode::RustLib`] reads them — they
+/// become the emitted crate's `pub fn` surface. Every other mode ignores the argument, which is
+/// why the plain entry point above can pass `&[]`.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_with_native_modules_emit_exports(
+    program: &Program,
+    project_root: Option<&Path>,
+    features: &[String],
+    native_modules: &[crate::resolve::ResolvedNativeModule],
+    native_init: &std::collections::HashMap<String, crate::resolve::NativeModuleInit>,
+    optimize: bool,
+    emit_mode: crate::NativeEmitMode,
+    entry_exports: &[(String, String)],
 ) -> Result<String, CompileError> {
     // Per-compile thread-local state — the narrow-int/`fixed`/`i32` numeric profile and the import-
     // scheme registry — must not outlive THIS compile. Both persist on the thread, so a later compile
@@ -786,6 +824,7 @@ pub fn compile_with_native_modules_emit(
         };
     let mut g = Codegen::new_with_native_modules(project_root, features, map);
     g.emit_mode = emit_mode;
+    g.entry_exports = entry_exports.to_vec();
     g.has_native_ui_host = native_modules.iter().any(|m| {
         m.package_name == "tish-macos"
             || m.package_name == "tish-ios"
@@ -1245,6 +1284,10 @@ pub(crate) struct Codegen {
     /// closures it must not return a `Result` from a `Value`-returning closure.
     value_fn_depth: u32,
     emit_mode: crate::NativeEmitMode,
+    /// `RustLib` only: the entry module's `(local_name, exported_name)` pairs, as computed by
+    /// `merge_modules` for the JS bundle's trailing `export { … }`. Drives the `pub fn` wrappers.
+    /// Empty for every other emit mode.
+    entry_exports: Vec<(String, String)>,
     /// Scheme imports as `(scheme_name, absolute_path)`, in first-seen order. Populated (Gba mode)
     /// before the entry is emitted from the active [`crate::schemes`] registry; drives the
     /// `mod __scheme_<name>_<j> { … }` blocks and their per-scheme registration. The handle a tish
@@ -1363,6 +1406,7 @@ impl Codegen {
             program_fun_decl_names: std::collections::HashSet::new(),
             value_fn_depth: 0,
             emit_mode: crate::NativeEmitMode::DesktopBin,
+            entry_exports: Vec::new(),
             scheme_files: Vec::new(),
             has_native_ui_host: false,
             program_uses_document: false,
@@ -2939,6 +2983,14 @@ impl Codegen {
             self.write("use std::rc::Rc;\n");
             self.write("use std::sync::Arc;\n");
         }
+        // RustLib: re-export the runtime prelude rather than importing it privately, so the crate's
+        // public API is self-contained — a consumer gets `Value` (and `ObjectMap` / `PropMap` /
+        // `VmRef`) from THIS crate and cannot version-skew them against a separate `tishlang_runtime`
+        // dependency of their own. Also avoids a duplicate-import error, since `Value` is already in
+        // this list and could not be re-exported a second time at the crate root.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            self.write("pub ");
+        }
         self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, encode_uri_component as tish_encode_uri_component, decode_uri_component as tish_decode_uri_component, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_expm1 as tish_math_expm1, math_log1p as tish_math_log1p, math_clz32 as tish_math_clz32, math_fround as tish_math_fround, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_of as tish_array_of, array_from as tish_array_from, object_is as tish_object_is, object_has_own as tish_object_has_own, structured_clone as tish_structured_clone, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, number_is_integer as tish_number_is_integer, number_is_safe_integer as tish_number_is_safe_integer, number_is_nan as tish_number_is_nan, number_is_finite as tish_number_is_finite, object_assign as tish_object_assign, object_freeze as tish_object_freeze, object_is_frozen as tish_object_is_frozen, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, ObjectData, PropMap, TishError, Value, VmRef};\n");
         if self.program_has_jsx {
             self.write("use tishlang_ui::{fragment_value, install_thread_local_host, native_create_root, native_use_state, ui_h, ui_text, HeadlessHost};\n");
@@ -3053,6 +3105,9 @@ impl Codegen {
             self.indent -= 1;
             self.writeln("}");
             self.writeln("");
+        }
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            self.emit_rust_lib_surface(program)?;
         }
         // M5 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out): emit a parallel
         // native `fn f_native` for each eligible top-level numeric fn at top level; direct calls
@@ -3552,6 +3607,29 @@ impl Codegen {
             self.writeln("tishlang_runtime::drain_timers();");
         }
 
+        // RustLib: hand the entry module's exported bindings to the thread-local table before
+        // `run()`'s frame drops. The bindings are ordinary `Value` locals; cloning one clones an
+        // `Rc`, so the closure — and every module-level cell it captured — stays alive and shared.
+        // That is what makes module state survive between `pub fn` calls (and stay mutable through
+        // `clear*`-style reassignment, since captures are `VmRef` cells, not copies).
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            let pairs: Vec<String> = self
+                .rust_lib_exports(program)
+                .iter()
+                .map(|e| {
+                    format!(
+                        "({:?}, {}.clone())",
+                        e.exported_name,
+                        Self::escape_ident(&e.local_name)
+                    )
+                })
+                .collect();
+            self.writeln(&format!(
+                "__tish_publish_exports(::std::vec![{}]);",
+                pairs.join(", ")
+            ));
+        }
+
         self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
@@ -3577,6 +3655,191 @@ impl Codegen {
         if self.emit_mode == crate::NativeEmitMode::Gba {
             self.output = gba_no_std_rewrite(core::mem::take(&mut self.output));
         }
+        Ok(())
+    }
+
+    /// The entry module's exports, paired with the arity of the `fn` each names (if it names one).
+    /// `merge_modules` unwraps `export` into plain top-level declarations and records the
+    /// `(local, exported)` pairs — including through `export { … } from './x.tish'` re-exports,
+    /// which resolve to the dependency's local binding — so a barrel module still yields the full
+    /// surface. Sorted for deterministic output.
+    fn rust_lib_exports(&self, program: &Program) -> Vec<RustLibExport> {
+        let mut arities: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            if let Statement::FunDecl { name, params, .. } = stmt {
+                arities.insert(name.as_ref(), params.len());
+            }
+        }
+        let mut out: Vec<RustLibExport> = self
+            .entry_exports
+            .iter()
+            .map(|(local, exported)| RustLibExport {
+                local_name: local.clone(),
+                exported_name: exported.clone(),
+                arity: arities.get(local.as_str()).copied(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.exported_name.cmp(&b.exported_name));
+        out
+    }
+
+    /// Emit the `RustLib` public surface: the thread-local module instance, the lazy `ensure_init`,
+    /// and one `pub fn` per entry export.
+    ///
+    /// The module body itself is the ordinary `run()` — this only changes *when* it runs and what
+    /// outlives it. Storage is `thread_local!` rather than a global because `Value` is `!Send`
+    /// unless the `send-values` feature is on (it follows `http`), so a `static` would not compile
+    /// for the common configuration. Per-thread instances also match how a consumer uses this:
+    /// register into the module's registries, then call it, on one thread.
+    fn emit_rust_lib_surface(&mut self, program: &Program) -> Result<(), CompileError> {
+        if self.is_async {
+            return Err(CompileError::new(
+                "--target rust --emit lib: the entry module has top-level `await`. A library has \
+                 no runtime to drive it — move the async work into an exported function."
+                    .to_string(),
+                None,
+            ));
+        }
+        let exports = self.rust_lib_exports(program);
+        if exports.is_empty() {
+            return Err(CompileError::new(
+                "--target rust --emit lib: the entry module exports nothing, so the crate would \
+                 have no public API. Add `export fn …` to the entry module."
+                    .to_string(),
+                None,
+            ));
+        }
+        // Only `export fn` is supported. A value export has no arity, and its Rust local is not
+        // necessarily a `Value` to publish (a `const` string lowers to `&str`), so it cannot be
+        // handed to the export table the way a closure can. Say so instead of emitting a getter
+        // that would always read back null.
+        let non_fn: Vec<&str> = exports
+            .iter()
+            .filter(|e| e.arity.is_none())
+            .map(|e| e.exported_name.as_str())
+            .collect();
+        if !non_fn.is_empty() {
+            return Err(CompileError::new(
+                format!(
+                    "--target rust --emit lib: only `export fn` can cross the crate boundary, but \
+                     the entry module also exports the value(s) `{}`. Wrap each in an exported \
+                     function (`export fn {}() {{ … }}`).",
+                    non_fn.join("`, `"),
+                    non_fn[0]
+                ),
+                None,
+            ));
+        }
+
+        self.writeln("// ── Tish library surface ──────────────────────────────────────────────");
+        // `Value` and friends are already re-exported by the (pub) runtime prelude above; this adds
+        // the whole runtime for consumers that need more than the prelude carries.
+        self.writeln("pub use tishlang_runtime as runtime;");
+        self.writeln("");
+        self.writeln("thread_local! {");
+        self.indent += 1;
+        self.writeln(
+            "static __TISH_MODULE: ::std::cell::RefCell<::std::option::Option<::std::collections::HashMap<&'static str, Value>>> =",
+        );
+        self.writeln("    ::std::cell::RefCell::new(::std::option::Option::None);");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("/// Called once from the tail of `run()` with the entry module's exports.");
+        self.writeln("fn __tish_publish_exports(pairs: ::std::vec::Vec<(&'static str, Value)>) {");
+        self.indent += 1;
+        self.writeln("__TISH_MODULE.with(|m| {");
+        self.writeln("    *m.borrow_mut() = ::std::option::Option::Some(pairs.into_iter().collect());");
+        self.writeln("});");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("/// Run the module body exactly once per thread, before the first export call.");
+        self.writeln("fn __tish_ensure_init() {");
+        self.indent += 1;
+        self.writeln("// Park an empty table BEFORE running the body: that makes init non-reentrant");
+        self.writeln("// (an export reached while the module is still initialising sees an empty");
+        self.writeln("// table and returns null, rather than recursing forever).");
+        self.writeln("let fresh = __TISH_MODULE.with(|m| {");
+        self.writeln("    let mut b = m.borrow_mut();");
+        self.writeln("    if b.is_some() { return false; }");
+        self.writeln("    *b = ::std::option::Option::Some(::std::collections::HashMap::new());");
+        self.writeln("    true");
+        self.writeln("});");
+        self.writeln("if fresh {");
+        self.writeln("    // A module whose top level fails cannot be recovered from here: every");
+        self.writeln("    // export would observe half-initialised state.");
+        self.writeln("    run().unwrap_or_else(|e| panic!(\"tish module initialisation failed: {}\", e));");
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("/// Clone an export out of the table. The borrow is released before the value is");
+        self.writeln("/// used, because an export is free to call back into another export.");
+        self.writeln("fn __tish_export(name: &str) -> Value {");
+        self.indent += 1;
+        self.writeln("__tish_ensure_init();");
+        self.writeln("__TISH_MODULE.with(|m| {");
+        self.writeln("    m.borrow().as_ref().and_then(|t| t.get(name).cloned()).unwrap_or(Value::Null)");
+        self.writeln("})");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("thread_local! {");
+        self.writeln("    static __TISH_LAST_THROW: ::std::cell::RefCell<Value> = ::std::cell::RefCell::new(Value::Null);");
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("/// The value thrown by the most recent export call, or null if it completed normally.");
+        self.writeln("///");
+        self.writeln("/// A `pub fn … -> Value` has no error channel, so a throw that escapes an export is drained");
+        self.writeln("/// and recorded here rather than left parked. Reading it is the way to tell \"returned null\"");
+        self.writeln("/// from \"threw\".");
+        self.writeln("pub fn tish_last_throw() -> Value {");
+        self.indent += 1;
+        self.writeln("__TISH_LAST_THROW.with(|t| t.borrow().clone())");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("fn __tish_call_export(name: &str, args: &[Value]) -> Value {");
+        self.indent += 1;
+        self.writeln("// A throw is PARKED for the next checkpoint rather than unwound (#303). Across a `pub fn`");
+        self.writeln("// boundary there is no Tish frame to surface it in, so a parked throw would sit latched and");
+        self.writeln("// every LATER call would bail at its own checkpoint and silently return null — one bad call");
+        self.writeln("// bricking the module for the rest of the process. A host hits this simply by reading a");
+        self.writeln("// property off a null the runtime handed it. So: enter clean, leave clean.");
+        self.writeln("let _ = tishlang_runtime::take_pending_throw();");
+        self.writeln("let out = match __tish_export(name) {");
+        self.writeln("    Value::Function(f) => f.call(args),");
+        self.writeln("    other => other,");
+        self.writeln("};");
+        self.writeln("let thrown = tishlang_runtime::take_pending_throw().unwrap_or(Value::Null);");
+        self.writeln("__TISH_LAST_THROW.with(|t| *t.borrow_mut() = thrown);");
+        self.writeln("out");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+
+        for e in &exports {
+            // Checked above: every remaining export is a `fn`, so the arity is present.
+            let n = e.arity.unwrap_or(0);
+            let params: Vec<String> = (0..n).map(|i| format!("a{}: Value", i)).collect();
+            let args: Vec<String> = (0..n).map(|i| format!("a{}", i)).collect();
+            self.writeln(&format!(
+                "pub fn {}({}) -> Value {{",
+                Self::escape_ident(&e.exported_name),
+                params.join(", ")
+            ));
+            self.indent += 1;
+            self.writeln(&format!(
+                "__tish_call_export({:?}, &[{}])",
+                e.exported_name,
+                args.join(", ")
+            ));
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        self.writeln("");
         Ok(())
     }
 
@@ -21961,6 +22224,14 @@ impl Codegen {
     /// the routing state so call sites de-virtualize. On any failure the state is left empty (path
     /// disabled) and nothing is appended to the output.
     fn setup_aggregate_fns(&mut self, program: &Program) {
+        // #177 de-virtualization deletes the boxed `let <name> = Value::native(..)` local for every
+        // routed fn. `RustLib` publishes exactly those locals as the crate's public API, so an
+        // exported fn that got de-virtualized would leave the emitted `__tish_publish_exports` call
+        // referencing a binding that no longer exists. The unboxed path is a numeric fast path;
+        // a correct public surface outranks it.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            return;
+        }
         let dbg = std::env::var("TISH_AGG_DEBUG").is_ok();
         // The unboxed struct alias: the (unique) name `A` used as an `A[]` array param of some fn,
         // and registered as an all-`Copy`-field struct alias.
