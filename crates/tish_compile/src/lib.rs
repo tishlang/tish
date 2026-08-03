@@ -40,6 +40,19 @@ pub enum NativeEmitMode {
     DesktopBin,
     /// `[lib] crate-type = ["staticlib"]` — no `fn main()`, host calls `tish_ios_launch`.
     EmbeddedLib,
+    /// `[lib] crate-type = ["rlib"]` — a Rust *library* crate whose public API is the entry
+    /// module's `export fn`s, so a Tish library can be consumed from Rust the way `--target js`
+    /// lets it be consumed from JS. No `fn main()`, no `tish_ios_launch`.
+    ///
+    /// The module body still lowers to the ordinary whole-program `run()`; what differs is that
+    /// `run()` is invoked lazily behind an `ensure_init()` and its exported bindings are parked in
+    /// a `thread_local!` so they outlive the call. That keeps module-level state alive between
+    /// `pub fn` calls with the same semantics an ESM module has — including reassignment, since
+    /// top-level `let`s are captured by the emitted closures as `VmRef` cells.
+    ///
+    /// `thread_local!` (rather than a global) is forced by `Value`: `send-values` is off unless
+    /// `http` is enabled, so `VmRef` is `Rc<RefCell<_>>` and `Value` is `!Send`.
+    RustLib,
     /// Game Boy Advance ROM: `#![no_std]`, `#[agb::entry] fn agb_main(gba)`, links the
     /// `tishlang_runtime_gba` facade. Numbers/async lowering diverge; see codegen `emit_program`.
     Gba,
@@ -49,7 +62,7 @@ pub use codegen::CompileError;
 pub use codegen::{
     compile, compile_project, compile_project_full, compile_project_full_emit,
     compile_with_features, compile_with_native_modules, compile_with_native_modules_emit,
-    compile_with_project_root,
+    compile_with_native_modules_emit_exports, compile_with_project_root,
 };
 pub use platform_resolve::{
     apply_resolve_env, parse_platform, parse_surface, platform_suffixes, platform_virtual_keys,

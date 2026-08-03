@@ -11,6 +11,10 @@ pub enum NativeArtifact {
     /// A GBA ROM: cargo builds an ELF for `thumbv4t-none-eabi`, then `agb-gbafix`
     /// converts it to a `.gba`.
     GbaRom,
+    /// A Rust *library source crate* (`crate-type = ["rlib"]`) whose public API is the entry
+    /// module's `export fn`s. Unlike every other artifact, cargo is **not** run — the emitted
+    /// crate directory is itself the output, for the consumer to add as a path/registry dependency.
+    RustLib,
 }
 
 /// Options passed from the CLI into nested `cargo build`.
@@ -42,6 +46,16 @@ impl NativeBuildConfig {
             artifact: NativeArtifact::GbaRom,
             cargo_target: Some("thumbv4t-none-eabi".to_string()),
             emit_mode: NativeEmitMode::Gba,
+        }
+    }
+
+    /// `tish build --target rust --emit lib`: emit a Cargo library crate and stop. Host target —
+    /// the consumer decides what to build it for.
+    pub fn rust_lib() -> Self {
+        Self {
+            artifact: NativeArtifact::RustLib,
+            cargo_target: None,
+            emit_mode: NativeEmitMode::RustLib,
         }
     }
 

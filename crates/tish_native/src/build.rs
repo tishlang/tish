@@ -149,6 +149,17 @@ pub fn build_via_cargo_with_config(
             project_root,
         );
     }
+    if build_config.artifact == NativeArtifact::RustLib {
+        return emit_rust_lib_crate(
+            rust_code,
+            native_modules,
+            output_path,
+            features,
+            extra_dependencies_toml,
+            generated_native_rs,
+            project_root,
+        );
+    }
 
     let out_stem = output_path
         .file_stem()
@@ -348,6 +359,122 @@ fn read_facade_agb_version(facade_path: &Path) -> Option<String> {
 /// Runs its own `cargo build` (NOT `run_cargo_build`) so the `.cargo/config.toml`
 /// rustflags (`-Tgba.ld`, `-Ctarget-cpu=arm7tdmi`) apply — `run_cargo_build` sets a
 /// `RUSTFLAGS` env that would shadow them.
+/// Read `version = "…"` from the `[package]` section of a crate's `Cargo.toml`.
+fn read_crate_version(crate_dir: &Path) -> Option<String> {
+    let toml = fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    for line in toml.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+        // Only the first (package) table — stop before dependency versions.
+        if line.starts_with('[') && !line.starts_with("[package]") {
+            break;
+        }
+    }
+    None
+}
+
+/// `--target rust --emit lib`: write a Cargo **library source crate** to `output_path` and stop.
+///
+/// This is the one artifact that does not run cargo. The consumer decides what to build it for and
+/// how to depend on it, exactly as they would with any other crate — which is the point: it lets a
+/// Tish library be consumed from Rust the way `--target js` lets it be consumed from JS.
+///
+/// The `tishlang_runtime` dependency carries **both** `path` and `version`. Cargo prefers the path
+/// locally and falls back to the registry version when the crate is published, so the emitted crate
+/// is publishable without a post-processing step.
+fn emit_rust_lib_crate(
+    rust_code: &str,
+    native_modules: Vec<ResolvedNativeModule>,
+    output_path: &Path,
+    features: &[String],
+    extra_dependencies_toml: &str,
+    generated_native_rs: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<(), String> {
+    let crate_name = tishlang_build_utils::cargo_target_name(
+        output_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tish_lib"),
+    );
+    let runtime_path = tishlang_build_utils::find_runtime_path_for_project(project_root)?;
+    let runtime_version = read_crate_version(Path::new(&runtime_path))
+        .map(|v| format!(", version = {:?}", v))
+        .unwrap_or_default();
+
+    let runtime_features = runtime_features_for_cargo(features);
+    let runtime_refs: Vec<&str> = runtime_features.iter().map(String::as_str).collect();
+    let features_str = if runtime_refs.is_empty() {
+        String::new()
+    } else {
+        format!(", features = {:?}", runtime_refs)
+    };
+
+    let native_deps: String = native_modules
+        .iter()
+        .filter(|m| m.use_path_dependency)
+        .map(|m| {
+            let path = m.crate_path.display().to_string().replace('\\', "/");
+            format!("{} = {{ path = {:?} }}\n", m.package_name, path)
+        })
+        .collect();
+
+    let mut more_deps = String::new();
+    if !native_deps.is_empty() {
+        more_deps.push_str(&format!("\n{}", native_deps));
+    }
+    if !extra_dependencies_toml.trim().is_empty() {
+        more_deps.push_str(&format!("\n{}", extra_dependencies_toml));
+    }
+
+    let lib_rs = if generated_native_rs.is_some() {
+        inject_generated_native_mod(rust_code)
+    } else {
+        rust_code.to_string()
+    };
+
+    let cargo_toml = format!(
+        r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "{name}"
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+tishlang_runtime = {{ path = {runtime:?}{version}{features} }}
+{more}"#,
+        name = crate_name,
+        runtime = runtime_path,
+        version = runtime_version,
+        features = features_str,
+        more = more_deps,
+    );
+
+    let src_dir = output_path.join("src");
+    fs::create_dir_all(&src_dir)
+        .map_err(|e| format!("Cannot create {}: {}", src_dir.display(), e))?;
+    fs::write(output_path.join("Cargo.toml"), cargo_toml)
+        .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
+    if let Some(gen) = generated_native_rs {
+        fs::write(src_dir.join("generated_native.rs"), gen)
+            .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
+    }
+    fs::write(src_dir.join("lib.rs"), lib_rs)
+        .map_err(|e| format!("Cannot write lib.rs: {}", e))?;
+
+    println!("Emitted Rust library crate: {}", output_path.display());
+    Ok(())
+}
+
 fn build_gba_rom(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
