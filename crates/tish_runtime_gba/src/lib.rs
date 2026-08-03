@@ -266,6 +266,23 @@ pub fn get_index(obj: &Value, index: &Value) -> Value {
     }
 }
 
+/// `&str` `s[i]` — char at a non-negative integer `idx`; non-int / negative / OOB → null.
+///
+/// Mirrors `tish_runtime::str_index`, and exists here because codegen emits a call to it whenever
+/// the indexed expression is statically a `&str` rather than a `Value` — which is what a module
+/// `const` string lowers to. Without it, `const D = "0123456789"` followed by `D[i]` is a hard
+/// E0425 on the GBA target only, while the identical code compiles and runs everywhere else.
+#[inline]
+pub fn str_index(s: &str, idx: &Value) -> Value {
+    match idx {
+        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => match s.chars().nth(*n as usize) {
+            Some(c) => Value::String(c.to_string().into()),
+            None => Value::Null,
+        },
+        _ => Value::Null,
+    }
+}
+
 pub fn delete_property(obj: &Value, key: &Value) -> Value {
     match obj {
         Value::Object(m) => {
