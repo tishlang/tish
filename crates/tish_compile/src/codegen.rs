@@ -6963,6 +6963,23 @@ impl Codegen {
         Ok(())
     }
 
+    /// `.clone()` an emitted operand that is a bare Rust identifier, leave anything else alone.
+    ///
+    /// Used where an operand is yielded as the value of an expression that does not consume it
+    /// exclusively (`&&` / `||`): moving a non-`Copy` `Value` local out of such a position makes
+    /// every later read a use-after-move. A parenthesised expression, call, field access, or an
+    /// already-`.clone()`d ident is a temporary, so it needs nothing.
+    fn clone_if_bare_ident(s: &str) -> String {
+        let bare = !s.is_empty()
+            && !s.starts_with(|c: char| c.is_ascii_digit())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if bare {
+            format!("{}.clone()", s)
+        } else {
+            s.to_string()
+        }
+    }
+
     fn emit_call_arg(&mut self, arg: &CallArg) -> Result<String, CompileError> {
         let e = match arg {
             CallArg::Expr(e) | CallArg::Spread(e) => e,
@@ -25014,8 +25031,21 @@ impl Codegen {
             // the same local (`aid && out.indexOf(aid)`), and a bare `let __l = aid;` moves the non-`Copy`
             // `Value` so the reuse is a borrow-after-move (E0382). The left operand is still evaluated
             // exactly once (its side effects don't double-run); only its value is cloned for the test.
-            BinOp::And => format!("{{ let __l = ({}).clone(); if __l.is_truthy() {{ {} }} else {{ __l }} }}", l, r),
-            BinOp::Or => format!("{{ let __l = ({}).clone(); if __l.is_truthy() {{ __l }} else {{ {} }} }}", l, r),
+            //
+            // The RESULT operand has the same hazard: when it lowers to a bare local (`inGenBlock &&
+            // currentTrack`), yielding it moves that local out, so a later read — the next iteration
+            // of the enclosing loop, or any subsequent use — is E0382. Clone it in that case only;
+            // anything else is already a temporary (or already cloned), so the fast path is unchanged.
+            BinOp::And => format!(
+                "{{ let __l = ({}).clone(); if __l.is_truthy() {{ {} }} else {{ __l }} }}",
+                l,
+                Self::clone_if_bare_ident(r)
+            ),
+            BinOp::Or => format!(
+                "{{ let __l = ({}).clone(); if __l.is_truthy() {{ __l }} else {{ {} }} }}",
+                l,
+                Self::clone_if_bare_ident(r)
+            ),
             BinOp::BitAnd => Self::emit_bitwise_binop(l, r, "&"),
             BinOp::BitOr => Self::emit_bitwise_binop(l, r, "|"),
             BinOp::BitXor => Self::emit_bitwise_binop(l, r, "^"),
