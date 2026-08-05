@@ -63,33 +63,50 @@ so `(x as f64) as i32` is the identity. `>>>` is excluded: its uint32 can exceed
 Rust's float→int `as` saturates, so the two routes genuinely disagree. The index form carries
 `.max(0)` to reproduce the saturating f64→usize cast exactly.
 
-## What is still open: the ACCUMULATE
+## The accumulate — FIXED, and my first diagnosis of it was wrong
 
-`acc = acc + (w & MASK)` — the shape above, and the commonest expression in any packed-word data
-structure, since `w & FIELD` is how you read a field.
+```
+acc = acc + (arr[i] & 255)     22742 -> 813   28x
+acc = acc + arr[i]  (control)    838 -> 838
+```
 
-**Do not fix it by typing bitwise results `I32`.** That is the obvious one-line change and it is a
-measured **5x pessimisation**: the int-domain fusion at `codegen.rs:23759` is *gated on*
-`result_ty == RustType::F64`, so retyping the result disables the fusion that makes bitwise chains
-fast in the first place. The F64 typing and the fusion are a matched pair. Measured with that
-change in: flood fill 1,470 → 7,531, K1 22,742 → 25,582.
+A masked read now costs the same as an unmasked one.
 
-The fix belongs at the consumer, like the three above. Sketch that was attempted:
+**The fix did NOT belong at the consumer**, which is what this document originally said and what
+three attempts assumed. It belongs inside `emit_int32_operand`, which has an `Add`/`Sub` arm now,
+placed ABOVE its generic leaf fold.
 
-* at the `RustType::I32` arm of `Expr::Assign` (`codegen.rs:4034`), when the RHS is `Add`/`Sub` and
-  both operands can be produced in the integer domain, emit `wrapping_add`/`wrapping_sub`.
-* sound because the target is `i32`, so the result is ToInt32'd regardless, and for int32 operands
-  `to_int32(a + b) == a.wrapping_add(b)` exactly — `|a + b| < 2^32` is far inside f64's
-  exact-integer range. The truncation the assignment already performs is what licenses it.
+That fold was the whole problem, and it is worth naming because it defeats every consumer-side
+patch silently: for `acc + (x & 255)` it falls through to `emit_typed_expr`, sees an `F64`, and
+returns `Some("to_int32((acc as f64) + (... as f64))")`. It reports SUCCESS while emitting exactly
+the round trip this function exists to remove. So the assign site's first branch took it, every
+later branch was unreachable, and adding code to those branches changed nothing — which is precisely
+what happened three times before an `eprintln` at the arm's entry showed `int32op=true` on the case
+that was demonstrably slow.
 
-**Why it did not land:** producing the operands needs a helper broader than `emit_int32_operand`,
-which declines two shapes it is right to decline — an expression the type system already calls
-`i32` (no ToInt32 needed), and a bitwise node with one unmodelled leaf (an array element read,
-which discards the whole expression). A version accepting both was written, and the arm was reached
-for `mb = mb + readCell(mj)` (`li=true ri=false`, correctly declining a call) but never for
-`ka = ka + (arr[i] & 255)`, which returns earlier in the arm for a reason not yet pinned down.
-Reproducing that needs an `eprintln` at each early return in the arm; it is a half-day, not a
-mystery.
+Soundness is licensed by this function's own contract: its result is ToInt32'd by the caller, and
+for int32 operands `to_int32(a + b) == a.wrapping_add(b)` exactly, since `|a + b| < 2^32` is far
+inside f64's exact-integer range. `+` is still NOT a ToInt32 context in general and is untouched
+outside this one.
+
+The operand helper `int32_or_native_i32` accepts what `emit_int32_operand` lowers, plus what the
+type system already calls `i32` — an `: i32` local, a `Vec<i32>` element read. Those need no ToInt32
+lowering because they ARE integers, and the leaf fold only recognises `F64` leaves, so it declines
+them. Every accumulator has one on its left-hand side. The helper also rejects a returned string
+containing `to_int32`, so the fold's fake success cannot be mistaken for the real thing.
+
+### Still not to be attempted: typing bitwise results `I32`
+
+The obvious one-line root fix is a measured **5x pessimisation**. The int-domain fusion at
+`codegen.rs:23759` is *gated on* `result_ty == RustType::F64`, so retyping the result disables the
+fusion that makes bitwise chains fast in the first place. The F64 typing and the fusion are a matched
+pair. Measured with that change in: flood fill 1,470 -> 7,531, K1 22,742 -> 25,582.
+
+## Scope of the win
+
+It is large where code ACCUMULATES a masked value and nil where it stores or compares one — those
+were already covered above. `tish-gba`'s `packages/drop_game.tish` was unmoved (5,216 -> 5,189 peak)
+because its hot path stores and compares. `bench-grid`'s K1 is where the shape lives.
 
 ## Why it matters
 

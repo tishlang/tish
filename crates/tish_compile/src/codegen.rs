@@ -23463,6 +23463,29 @@ impl Codegen {
         self.emit_int32_operand(e)
     }
 
+    /// An operand that is provably an int32: either one `emit_int32_operand` lowers, or one the
+    /// type system already calls `i32`.
+    ///
+    /// The second case is what `emit_int32_operand` alone misses. An `: i32` local and a `Vec<i32>`
+    /// element read need no ToInt32 lowering — they ARE integers — but that function's leaf fold
+    /// only recognises `F64` leaves, so it declines them and falls back to a `to_int32` wrapper.
+    /// Every accumulator has one on its left-hand side.
+    fn int32_or_native_i32(&mut self, e: &Expr) -> Result<Option<String>, CompileError> {
+        if let Some(c) = self.emit_int32_operand(e)? {
+            // Reject the generic fold's own output: if it handed back a `to_int32(..)` wrapper it
+            // has not actually reached the integer domain, and using it would keep the round trip
+            // while claiming to have removed it.
+            if !c.contains("to_int32") {
+                return Ok(Some(c));
+            }
+        }
+        let (code, ty) = self.emit_typed_expr(e)?;
+        if ty == RustType::I32 {
+            return Ok(Some(code));
+        }
+        Ok(None)
+    }
+
     fn emit_int32_operand(&mut self, e: &Expr) -> Result<Option<String>, CompileError> {
         if let Expr::Binary {
             left, op, right, ..
@@ -23502,6 +23525,33 @@ impl Codegen {
                     _ => unreachable!(),
                 };
                 return Ok(Some(code));
+            }
+            // ARITHMETIC in a ToInt32 context: `acc + (w & MASK)`, `i - 1`.
+            //
+            // `+` is not itself a ToInt32 context, so this cannot be done in general — but THIS
+            // FUNCTION'S CONTRACT is that its result will be ToInt32'd by the caller, and for int32
+            // operands `to_int32(a + b) == a.wrapping_add(b)` exactly, since |a + b| < 2^32 is far
+            // inside f64's exact-integer range. So inside this context, and only here, the integer
+            // form is equivalent.
+            //
+            // It has to sit ABOVE the generic leaf fold below, which would otherwise swallow the
+            // whole expression and hand back `to_int32((a as f64) + (b as f64))` — technically a
+            // success, and exactly the round trip this exists to remove.
+            //
+            // Measured on GBA (tish-gba `examples/bench-grid`): `acc = acc + (arr[i] & 255)` ran at
+            // 44.4 ticks an iteration against 1.64 for the same read unmasked — a 27x penalty on
+            // every packed-word structure, since `w & FIELD` is how you read a field.
+            if matches!(op, BinOp::Add | BinOp::Sub) {
+                let li = self.int32_or_native_i32(left)?;
+                let ri = self.int32_or_native_i32(right)?;
+                if let (Some(li), Some(ri)) = (li, ri) {
+                    let f = if matches!(op, BinOp::Add) {
+                        "wrapping_add"
+                    } else {
+                        "wrapping_sub"
+                    };
+                    return Ok(Some(format!("({}).{}({})", li, f, ri)));
+                }
             }
         }
         // `Math.imul(a, b)` in an int32 context → the raw i32 `wrapping_mul` (no f64 excursion, no
