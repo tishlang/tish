@@ -1,6 +1,8 @@
 # A bitwise value consumed by an integer costs 27x on GBA
 
-**Status:** open. Three consumer sites fixed in `b2c9f9ac2`; the accumulate site remains.
+**Status:** CLOSED. Five consumer sites, three commits: `49ac5739a` (element store, array index,
+integer-typed local binding), `b32827ca9` (the masked accumulate), `4f0798f98` (the element READ
+index). Every one was found by timing production code in `tish-gba`, never by predicting it.
 **Found by:** `tish-gba/examples/bench-grid`, porting the Magical Drop rules from Rust to tish.
 
 ## The measurement
@@ -101,6 +103,57 @@ The obvious one-line root fix is a measured **5x pessimisation**. The int-domain
 `codegen.rs:23759` is *gated on* `result_ty == RustType::F64`, so retyping the result disables the
 fusion that makes bitwise chains fast in the first place. The F64 typing and the fusion are a matched
 pair. Measured with that change in: flood fill 1,470 -> 7,531, K1 22,742 -> 25,582.
+
+## The FIFTH site, found last and most cheaply missed: the READ index
+
+```
+fn copy, BITWISE index   22541 -> 2371 /1000   9.5x
+fn copy, flat index       2273 -> 2273         control, unmoved
+```
+
+`arr[a | b]` lowered its element STORE index integrally — that was fixed first — and its element
+READ index as `((a|b) as f64) as usize`, two soft-float calls per read. So the packed-grid access
+`P[dc|r] = P[sc|r] & keep` paid on exactly half of itself.
+
+The cause is mundane and worth recording as a shape to look for rather than a bug to remember: the
+read site held a **hand-inlined copy of `emit_index_usize`**, byte-identical to it down to the panic
+message, written before the int-domain shortcut existed. Teaching the helper therefore fixed the
+store and left the read behind, and nothing pointed at the divergence because the two spellings had
+been identical for as long as anyone had looked. The fix deletes the copy and calls the helper.
+
+The shortcut is gated where it already was: `emit_int32_for_int_consumer` requires the ROOT operator
+to be bitwise, so `arr[i + j]` still lowers through f64 and the `Add`/`Sub` arm above cannot wrap a
+huge index into a small valid one. Inside `arr[(i + j) | 0]` it does apply, and correctly — that
+spelling IS ToInt32, which is wrapping by definition.
+
+Measured in `tish-gba/examples/grid-demo`, whose AI copies a 63-cell board per candidate:
+
+```
+board copy      2103 -> 480 ticks   4.4x   (33 -> 7.6 per cell)
+AI frame avg    4463 -> 2336
+AI frame peak   5672 -> 3176        was OVER a 4389-tick frame, now inside one
+```
+
+and in `examples/drop-tish`, the full ported rules, with no change to that repo at all:
+
+```
+rules frame avg  1947 -> 1392
+rules frame peak 5189 -> 4037       likewise now inside ONE frame
+```
+
+### How it hid, which is the part worth generalising
+
+`bench-grid` reported nothing, because every pass it had indexed from **top level with a plain loop
+counter** — which the compiler substitutes for a `usize` binding, so no pass ever exercised a
+bitwise index inside a function. The bench measured the shape someone wrote down, not the shape the
+code ships.
+
+It surfaced only from a phase timer inside the game, where a 63-cell copy came back at 57% of the
+whole evaluation. It had been dismissed by reading the code twice; its own comment said it was
+bounded to the board's real height, which was true and beside the point.
+
+`bench-grid` now has pass **M** for it, asserted rather than merely printed, and the assertion was
+checked by reverting the fix: **ratio 1.04 with it, 9.9 without, checksum identical either way.**
 
 ## Scope of the win
 
