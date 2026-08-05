@@ -101,21 +101,41 @@ type BgAsset = (
     &'static agb::display::tile_data::TileData,
 );
 
-static ASSET_BGS: SingleCore<RefCell<Vec<BgAsset>>> = SingleCore::new(RefCell::new(Vec::new()));
+/// ⚠️ A FIXED TABLE, not a `Vec`, because every entry is `&'static` cartridge data and the registry
+/// never needed to own one.
+///
+/// As a `Vec` it did: registering N backgrounds ran N pushes with log2(N) reallocs, all during
+/// module init before the program body, and the freed buffers left the heap too fragmented for the
+/// one big contiguous block a GBA UI canvas wants. A game with a handful of backgrounds booted; a
+/// game with 162 died in the allocator with plenty of total heap free.
+///
+/// This costs `MAX_BGS * size_of::<Option<BgAsset>>()` of STATIC memory and allocates nothing.
+/// ⚠️ Not a `Vec` with `reserve` — that charges every small game for the largest one.
+const MAX_BGS: usize = 256;
+static ASSET_BGS: SingleCore<RefCell<[Option<BgAsset>; MAX_BGS]>> =
+    SingleCore::new(RefCell::new([None; MAX_BGS]));
+static ASSET_BGS_N: SingleCore<RefCell<usize>> = SingleCore::new(RefCell::new(0));
 
 /// Register a background (palettes + tile data), returning its i32 handle.
 pub fn __asset_register_bg(bg: BgAsset) -> i32 {
-    ASSET_BGS.with(|c| {
-        let mut v = c.borrow_mut();
-        let idx = v.len() as i32;
-        v.push(bg);
+    ASSET_BGS_N.with(|n| {
+        let mut n = n.borrow_mut();
+        if *n >= MAX_BGS {
+            return -1;
+        }
+        let idx = *n as i32;
+        ASSET_BGS.with(|c| c.borrow_mut()[*n] = Some(bg));
+        *n += 1;
         idx
     })
 }
 
 /// Look up a registered background by handle. `None` if out of range.
 pub fn asset_bg(handle: i32) -> Option<BgAsset> {
-    ASSET_BGS.with(|c| c.borrow().get(handle as usize).copied())
+    if handle < 0 || handle as usize >= MAX_BGS {
+        return None;
+    }
+    ASSET_BGS.with(|c| c.borrow()[handle as usize])
 }
 
 /// Registered fonts (`font<N>:` imports) — a compile-time-baked `Font`. All `font<N>:` schemes share
