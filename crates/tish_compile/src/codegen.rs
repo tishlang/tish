@@ -24128,45 +24128,15 @@ impl Codegen {
                                 };
                                 // #173 part 3: prove the index in-bounds BEFORE emitting it.
                                 let in_bounds = self.index_in_bounds(index, name.as_ref());
-                                let idx_usize = if let Expr::Ident { name: idx_name, .. } =
-                                    index.as_ref()
-                                {
-                                    if let Some(uv) =
-                                        self.usize_var_subst.get(idx_name.as_ref())
-                                    {
-                                        uv.clone()
-                                    } else {
-                                        let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                        if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-                                            format!("({}) as usize", idx_code)
-                                        } else {
-                                            let iv = if idx_ty.is_native() {
-                                                idx_ty.to_value_expr(&idx_code)
-                                            } else {
-                                                idx_code
-                                            };
-                                            format!(
-                                                "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                                                iv
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                                    if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
-                                        format!("({}) as usize", idx_code)
-                                    } else {
-                                        let iv = if idx_ty.is_native() {
-                                            idx_ty.to_value_expr(&idx_code)
-                                        } else {
-                                            idx_code
-                                        };
-                                        format!(
-                                            "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                                            iv
-                                        )
-                                    }
-                                };
+                                // The READ index goes through the same helper as the element STORE.
+                                // These two arms used to be a hand-inlined copy of it that predated
+                                // the int-domain shortcut, so `arr[a | b]` lowered its store index
+                                // integrally and its read index as `((a|b) as f64) as usize` — two
+                                // soft-float calls on ARM7TDMI, on the read half of every packed-grid
+                                // access. Measured in tish-gba: a 63-cell board copy whose body is
+                                // `P[dc|r] = P[sc|r] & keep` cost 2,103 ticks, 33 per cell, against
+                                // ~1.6 for a module `i32[]` read plus write.
+                                let idx_usize = self.emit_index_usize(index)?;
                                 // #567: inside the wrapped block the index is pre-bound to `__bi`
                                 // (evaluated BEFORE the borrow, so an index that itself reads this cell
                                 // — `arr[arr.length-1]` — doesn't double-lock the non-reentrant cell).
