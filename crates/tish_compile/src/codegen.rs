@@ -12046,6 +12046,21 @@ impl Codegen {
             }
         }
 
+        // Int-domain shortcut for an integer-typed local: `let nw: i32 = w | P_MARK` binds the
+        // integer form rather than `(int as f64) as i32`, so `nw` is i32-backed and every later use
+        // — including storing it into an `i32[]` — stays integral. Without this the annotation
+        // actively costs: measured 23,4xx ticks/1000 for `let v: i32 = j & 255; arr[j] = v`
+        // against 1,5xx for `arr[j] = j & 255` written directly.
+        if target_type.is_integer_scalar() {
+            if let Some(int_code) = self.emit_int32_for_int_consumer(expr)? {
+                return Ok(if *target_type == RustType::I32 {
+                    int_code
+                } else {
+                    format!("({}) as {}", int_code, target_type.to_rust_type_str())
+                });
+            }
+        }
+
         // #179 Stage C: `arr.length` on a native `Vec<_>` against an F64 target → native
         // `(arr.len() as f64)` (no boxing). Lets `let n = arr.length` stay native f64.
         if let (
@@ -13630,7 +13645,11 @@ impl Codegen {
         let in_bounds = self.index_in_bounds(index, name.as_ref());
         let idx_usize = self.emit_index_usize(index)?;
         let native_val = if *elem_type == RustType::I32 {
-            if let Expr::Binary {
+            // A bitwise RHS stays in the integer domain instead of `(int as f64) as i32`. Exact —
+            // see `emit_int32_for_int_consumer`.
+            if let Some(int_code) = self.emit_int32_for_int_consumer(value)? {
+                int_code
+            } else if let Expr::Binary {
                 left,
                 op: BinOp::Sub,
                 right,
@@ -13741,6 +13760,12 @@ impl Codegen {
             if let Some(uv) = self.usize_var_subst.get(idx_name.as_ref()) {
                 return Ok(uv.clone());
             }
+        }
+        // Same int-domain shortcut as the element store, with one correction: `(neg as f64) as
+        // usize` SATURATES to 0, while `(neg_i32) as usize` wraps to a huge value. `.max(0)` makes
+        // the two identical for every input, and costs a compare against a soft-float call.
+        if let Some(int_code) = self.emit_int32_for_int_consumer(index)? {
+            return Ok(format!("({}).max(0) as usize", int_code));
         }
         let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
         if idx_ty == RustType::F64 || idx_ty == RustType::I32 {
@@ -13865,6 +13890,19 @@ impl Codegen {
         value: &Expr,
         target_ty: &RustType,
     ) -> Result<String, CompileError> {
+        // Same int-domain shortcut as the `Vec<i32>` element store: a bitwise RHS bound to an
+        // integer target keeps its integer form instead of `(int as f64) as i32`. Without this,
+        // `let v: i32 = w & 255` is f64-backed and every later use of `v` pays the conversion —
+        // measured at 23,4xx ticks/1000 against 1,5xx for the direct form.
+        if target_ty.is_integer_scalar() {
+            if let Some(int_code) = self.emit_int32_for_int_consumer(value)? {
+                return Ok(if *target_ty == RustType::I32 {
+                    int_code
+                } else {
+                    format!("({}) as {}", int_code, target_ty.to_rust_type_str())
+                });
+            }
+        }
         let (val_code, val_ty) = self.emit_typed_expr(value)?;
         if val_ty == *target_ty {
             return Ok(val_code);
@@ -23394,6 +23432,37 @@ impl Codegen {
     /// the round-trips. Crucially, only bitwise/shift nodes recurse — an `f64` `*`/`+`/`-` node is
     /// a *leaf* here, so e.g. `(h * 16777619) >>> 0` keeps its `f64` multiply (the 2^53 rule: the
     /// product exceeds 2^53 and must round in `f64` *before* `ToUint32`, exactly as V8 does).
+    /// Int-domain code for a bitwise/shift expression that is about to be consumed by something
+    /// wanting an INTEGER — a `Vec<i32>` element store, an array index.
+    ///
+    /// `result_type_of_binop` (types.rs) types every bitwise result `F64`, which is semantically
+    /// right (JS bitwise returns a Number) and a real win against boxing. But the int-domain chain
+    /// is then wrapped `(… ) as f64` and an integer consumer immediately casts it back, so on a
+    /// target with no FPU every `arr[i] = w | BIT` pays a soft-float round trip in each direction.
+    /// Measured on GBA (tish-gba `examples/bench-grid`): `arr[j] = 7` and `arr[j] = j` cost ~1.4
+    /// ticks per 1000, `arr[j] = j & 255` cost 23.2, and a bitwise INDEX cost 19.9 — ~15x, twice per
+    /// cell access for anything built on a packed word.
+    ///
+    /// SOUNDNESS. Only the SIGNED-result ops qualify. Their value is by construction inside i32, so
+    /// `(x as f64) as i32` is the identity and dropping both casts cannot change it. `>>>` is
+    /// excluded deliberately: it yields a uint32 Number that can exceed `i32::MAX`, and Rust's
+    /// float→int `as` SATURATES, so the f64 route and the int route genuinely disagree there.
+    fn emit_int32_for_int_consumer(
+        &mut self,
+        e: &Expr,
+    ) -> Result<Option<String>, CompileError> {
+        let Expr::Binary { op, .. } = e else {
+            return Ok(None);
+        };
+        if !matches!(
+            op,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+        ) {
+            return Ok(None);
+        }
+        self.emit_int32_operand(e)
+    }
+
     fn emit_int32_operand(&mut self, e: &Expr) -> Result<Option<String>, CompileError> {
         if let Expr::Binary {
             left, op, right, ..
