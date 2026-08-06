@@ -68,10 +68,31 @@ path. **The information is present at parse time and thrown away.** That is the 
 `int-domain-consumer-boundary.md`, where a value was known to be an integer and the consumer
 converted it anyway; fixing that one was worth 28x and 4.4x on two hot paths.
 
-A table of `name -> RustType` for annotated top-level functions, consulted where a call's result
-meets a typed consumer, would turn the example above into an integer add and drop two soft-float
-conversions per call. It does not require any new calling convention — the call stays boxed, only
-its RESULT stops being opaque.
+Such a table, consulted where a call's result meets a typed consumer, would turn the example above
+into an integer add and drop two soft-float conversions per call. It requires no new calling
+convention — the call stays boxed, only its RESULT stops being opaque.
+
+**IT CANNOT BE BUILT ON THE ANNOTATION, AND THE FIRST VERSION OF THIS ISSUE SAID IT COULD.** Return
+annotations are erased and unchecked:
+
+```tish
+function liar(x: i32): i32 {
+  if (x > 0) { return "not a number" }
+  return 7
+}
+console.log(liar(1))   // -> not a number
+```
+
+That runs, and prints the string. A table keyed on `: i32` would have unboxed it as a number —
+either panicking or producing a garbage value where the language today returns a string. The claim
+was written from reading the AST and corrected by a two-line program; it is left visible here
+because it is the obvious way to build this and it is wrong.
+
+So the table has to be backed by PROOF that every return is numeric, not by the declaration. That
+proof already exists: `returns_numeric`, which M5 runs in its fixpoint for exactly this reason.
+Reusing it makes the qualification "annotated native return AND every return path verified numeric
+AND the name never reassigned" — the same standard M5 already holds itself to, and the reason this
+is a contained change rather than a trivial one.
 
 ## Item 2 — a MORE precise annotation disqualifies the optimization
 
@@ -94,6 +115,9 @@ Whether M5 should grow an `i32` shape is a design decision rather than an obviou
 Filing it separately from item 1 for that reason.
 
 ## What was checked, and what turned out to be wrong
+
+**The annotation is not a contract** — see the `liar` repro under item 1. This is the single most
+important thing on this page for anyone implementing it.
 
 **Changing the annotation is not a workaround.** `readCell` was rebuilt as `(i: number): number`:
 47,691 → 44,823 ticks, about 6%, and the generated Rust contains **no `readCell_native`** — M5 still
