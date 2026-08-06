@@ -12379,13 +12379,39 @@ impl Codegen {
         &self,
         stmts: &[Statement],
     ) -> std::collections::HashMap<String, RustType> {
-        let mut env: HashMap<String, RustType> = HashMap::new();
-        Self::collect_annotated_types(stmts, &self.type_aliases, &mut env);
+        // MODULE SCOPE ONLY. `collect_annotated_types` over the whole program builds a NAME-FLAT
+        // map, which `collect_demoted_numeric_locals` can use because its error direction is safe —
+        // over-demoting only costs a box. Proving is the opposite: a numeric `s` in one function
+        // would make a STRING `s` in another look numeric, and the return gets coerced.
+        //
+        // That is not hypothetical. It shipped: `function ruleTag(mask: i32) { let s = ""; …;
+        // return s }` was proven numeric off an unrelated numeric `s`, and every ROM using it
+        // panicked with "expected number". Each fn gets its own scope now.
+        let mut module_env: HashMap<String, RustType> = HashMap::new();
+        let top_only: Vec<Statement> = stmts
+            .iter()
+            .filter(|s| matches!(s, Statement::VarDecl { .. }))
+            .cloned()
+            .collect();
+        Self::collect_annotated_types(&top_only, &self.type_aliases, &mut module_env);
 
-        let mut decls: Vec<(String, &Statement)> = Vec::new();
+        let mut decls: Vec<(String, &Statement, HashMap<String, RustType>)> = Vec::new();
         for s in stmts {
-            if let Statement::FunDecl { async_: false, name, body, .. } = s {
-                decls.push((name.to_string(), body.as_ref()));
+            if let Statement::FunDecl { async_: false, name, params, body, .. } = s {
+                let mut env = module_env.clone();
+                // This fn's own params and locals — not a nested closure's, whose names are its own.
+                for prm in params {
+                    if let FunParam::Simple(tp) = prm {
+                        if let Some(ann) = &tp.type_ann {
+                            let ty = RustType::from_annotation(ann);
+                            if ty.is_native() {
+                                env.insert(tp.name.to_string(), ty);
+                            }
+                        }
+                    }
+                }
+                Self::collect_own_locals(body.as_ref(), &self.type_aliases, &mut env);
+                decls.push((name.to_string(), body.as_ref(), env));
             }
         }
 
@@ -12401,7 +12427,7 @@ impl Codegen {
         let mut out: std::collections::HashMap<String, RustType> = std::collections::HashMap::new();
         loop {
             let mut changed = false;
-            for (name, body) in &decls {
+            for (name, body, env) in &decls {
                 if out.contains_key(name) || excluded.contains(name) {
                     continue;
                 }
@@ -12413,7 +12439,7 @@ impl Codegen {
                 let mut ty: Option<RustType> = None;
                 let mut ok = true;
                 for e in &rets {
-                    let Some(et) = self.proof_numeric_type(e, &env, &out) else {
+                    let Some(et) = self.proof_numeric_type(e, env, &out) else {
                         ok = false;
                         break;
                     };
@@ -12500,6 +12526,36 @@ impl Codegen {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// Annotated locals declared directly in this body — through blocks, ifs and loops, but NOT
+    /// into a nested function, whose locals are its own scope and would re-create the name
+    /// collision this exists to avoid.
+    fn collect_own_locals(
+        s: &Statement,
+        aliases: &HashMap<String, RustType>,
+        env: &mut HashMap<String, RustType>,
+    ) {
+        match s {
+            Statement::VarDecl { .. } => {
+                Self::collect_annotated_types(core::slice::from_ref(s), aliases, env)
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for x in statements {
+                    Self::collect_own_locals(x, aliases, env);
+                }
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::collect_own_locals(then_branch, aliases, env);
+                if let Some(e) = else_branch {
+                    Self::collect_own_locals(e, aliases, env);
+                }
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } => {
+                Self::collect_own_locals(body, aliases, env)
+            }
+            _ => {}
         }
     }
 
