@@ -94,6 +94,42 @@ Reusing it makes the qualification "annotated native return AND every return pat
 AND the name never reassigned" — the same standard M5 already holds itself to, and the reason this
 is a contained change rather than a trivial one.
 
+### An implementation attempt, and where it stopped
+
+Tried and BACKED OUT, recorded so the next attempt starts where this one stopped rather than
+rediscovering three days of it.
+
+**The proof works.** A `user_fn_ret: HashMap<String, RustType>` built by fixpoint, keyed on every
+`return` being provably numeric, qualified the right functions — `{"readCell": I32, "copyBitwise":
+I32, "copyFlat": I32}` on `bench-grid`. Soundness held: the `liar` program above still printed its
+string on both the interpreter and codegen, and the bench checksum was byte-identical.
+
+The proof does NOT reuse `expr_native_type`, and that is the first real finding:
+
+> **`result_type_of_binop` requires BOTH operands to be `F64`.** So `arr[i] & 255` where `arr` is a
+> `Vec<i32>` types as `Value` — the element is `I32`, the literal `F64`, and no arm covers the mix.
+> On GBA, where `i32[]` is the annotation the hardware wants, that is nearly every masked read of a
+> typed array.
+
+Widening `result_type_of_binop` would change lowering everywhere it is consulted, so the attempt used
+a separate, weaker predicate: "is this a NUMBER" rather than "can this be lowered natively". Two
+unconditional JS facts carry it — `- * / % **` always ToNumber, and `& | ^ << >>` always ToInt32
+(so an int32 even if an operand was a string) — with `+` the only binop needing both sides proven.
+
+**Where it stopped: the emit side never fired.** An `Expr::Call` arm in `emit_typed_expr`, returning
+the proven type with a checked unbox, was never reached for the target shape
+`mb = mb + readCell(mj)` — confirmed with a probe, zero hits. What is known:
+
+* `mb`'s registered type IS `I32`, so the assignment enters the int-domain block that calls
+  `emit_int32_operand(value)` (`codegen.rs:4050`).
+* That should reach the `Add`/`Sub` arm, whose `int32_or_native_i32(right)` falls through to
+  `emit_typed_expr` on the call — which would have hit the new arm.
+* It does not. `emit_typed_expr` is never called with a `Call` anywhere in that program.
+
+So something between the assignment's `emit_int32_operand` and the `Add` arm is returning early, and
+that is the single unknown left. Whoever picks this up should start by probing entry to the `Add`
+arm rather than at the emit site.
+
 ## Item 2 — a MORE precise annotation disqualifies the optimization
 
 M5 (`native_fns`) already lowers a top-level function to a real free `fn`, with direct calls
