@@ -834,6 +834,7 @@ pub fn compile_with_native_modules_emit_exports(
             || m.crate_name == "tishlang_ios"
     });
     g.emit_program(&program)?;
+    g.emit_gba_key_table();
     Ok(g.output)
 }
 
@@ -1293,6 +1294,16 @@ pub(crate) struct Codegen {
     /// `mod __scheme_<name>_<j> { … }` blocks and their per-scheme registration. The handle a tish
     /// name binds to is its index AMONG same-scheme entries (= its slot in that scheme's arena).
     scheme_files: Vec<(String, String)>,
+    /// GBA only: the program-wide intern table for OBJECT-LITERAL KEYS, in first-seen order,
+    /// plus the name→index map. `RefCell` so `cached_object_key` can stay `&self`.
+    ///
+    /// ⚠️ This is a HEAP fix, not a tidiness one. Off-GBA every key site gets its own `OnceLock`,
+    /// which dedupes repeated evaluation of ONE site but never across sites — and a data table is
+    /// N sibling object literals, so N separate sites each allocate their own copy of every key
+    /// name. A real ROM measured 1,890 key sites over 474 distinct names: 1,416 duplicate `Arc<str>`
+    /// allocations that exist only to spell "name" and "id" again. One table, indexed, kills all of
+    /// them. See `cached_object_key`.
+    gba_keys: std::cell::RefCell<(Vec<String>, std::collections::HashMap<String, usize>)>,
     /// Program links `tish:macos` / `tish:ios` — skip HeadlessHost install.
     has_native_ui_host: bool,
     /// Program references browser global `document` — inject tish-canvas.
@@ -1408,6 +1419,7 @@ impl Codegen {
             emit_mode: crate::NativeEmitMode::DesktopBin,
             entry_exports: Vec::new(),
             scheme_files: Vec::new(),
+            gba_keys: std::cell::RefCell::new((Vec::new(), std::collections::HashMap::new())),
             has_native_ui_host: false,
             program_uses_document: false,
             cse_subst: Vec::new(),
@@ -3862,11 +3874,64 @@ impl Codegen {
     /// unchanged, and `PropMap` dedup + hidden-class shapes key by text, not pointer — so shapes,
     /// insertion order, and `Object.keys` are all unaffected. Same inline-`static` idiom as the
     /// per-site `PropIC` caches.
+    /// Append the GBA object-key intern table. Called ONCE, after the whole program is emitted,
+    /// because the key set is only complete then — Rust does not care that a `fn` is defined below
+    /// its callers.
+    ///
+    /// ⚠️ `static mut` + `&raw mut` rather than a `OnceLock`: the target is `#![no_std]` and the GBA
+    /// is single-core, so there is no thread to race with. Taking a raw pointer avoids the
+    /// `static_mut_refs` lint that a plain `&mut __TISH_KEYS` would trip.
+    fn emit_gba_key_table(&mut self) {
+        if self.emit_mode != crate::NativeEmitMode::Gba {
+            return;
+        }
+        let names: Vec<String> = self.gba_keys.borrow().0.clone();
+        if names.is_empty() {
+            return;
+        }
+        let list = names
+            .iter()
+            .map(|k| format!("{:?}", k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.write(&format!(
+            "\n// Object-literal keys, interned program-wide: {} distinct names.\n\
+             static __TISH_KEY_NAMES: [&str; {}] = [{}];\n\
+             static mut __TISH_KEYS: Option<Vec<Arc<str>>> = None;\n\
+             fn __tish_key(i: usize) -> Arc<str> {{\n\
+             \x20   unsafe {{\n\
+             \x20       let t = &raw mut __TISH_KEYS;\n\
+             \x20       if (*t).is_none() {{\n\
+             \x20           *t = Some(__TISH_KEY_NAMES.iter().map(|s| Arc::from(*s)).collect());\n\
+             \x20       }}\n\
+             \x20       match (*t).as_ref() {{\n\
+             \x20           Some(v) => v[i].clone(),\n\
+             \x20           None => Arc::from(__TISH_KEY_NAMES[i]),\n\
+             \x20       }}\n\
+             \x20   }}\n\
+             }}\n",
+            names.len(),
+            names.len(),
+            list
+        ));
+    }
+
     fn cached_object_key(&self, k: &str) -> String {
         if self.emit_mode == crate::NativeEmitMode::Gba {
-            // No `OnceLock` on no_std GBA; emit a direct interned key (`Arc` = `Rc`).
-            // Object-literal keys in a hot loop are a later perf item on GBA.
-            return format!("Arc::from({:?})", k);
+            // No `OnceLock` on no_std GBA — and a per-site cache would be the wrong tool anyway.
+            // Intern PROGRAM-WIDE instead: every distinct key name is allocated once, at first use,
+            // and each site clones an `Arc` (= `Rc`) out of one table. See the `gba_keys` field.
+            let mut t = self.gba_keys.borrow_mut();
+            let idx = match t.1.get(k) {
+                Some(&i) => i,
+                None => {
+                    let i = t.0.len();
+                    t.0.push(k.to_string());
+                    t.1.insert(k.to_string(), i);
+                    i
+                }
+            };
+            return format!("__tish_key({})", idx);
         }
         format!(
             "{{ static K: ::std::sync::OnceLock<::std::sync::Arc<str>> = \
