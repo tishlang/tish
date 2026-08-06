@@ -1210,6 +1210,17 @@ pub(crate) struct Codegen {
     /// `RustType::Value`. This is the rust-AOT analogue of the VM array-JIT bailing to the
     /// interpreter on a non-numeric element. See `collect_demoted_numeric_locals`.
     demoted_numeric_locals: std::collections::HashSet<String>,
+    /// Top-level fns whose EVERY return is provably numeric → the native type a call to one yields.
+    ///
+    /// Without it a call is opaque, so a local assigned from one demotes to a boxed `Value` and
+    /// every arithmetic consumer falls back to the generic `ops::add` plus two soft-float
+    /// conversions — most of the ~92 ticks a user-fn call costs on GBA
+    /// (`docs/issues/user-fn-call-cost-on-gba.md`).
+    ///
+    /// KEYED ON A PROOF, NOT THE ANNOTATION. `function f(): i32 { return "no" }` compiles and
+    /// returns the string — return types are erased — so trusting the declaration would reinterpret
+    /// a `String` as a number.
+    user_fn_ret: std::collections::HashMap<String, RustType>,
     /// Integer-range lattice (#174): names of `f64` locals the analysis proves always hold an
     /// integer within `[min, max]`, both strictly inside `(-2^53, 2^53)` so `as i64` is exact and
     /// `i64` arithmetic is bit-identical to the `f64` the interpreter/VM use. Lets the codegen
@@ -1394,6 +1405,7 @@ impl Codegen {
             aggregate_array_locals: std::collections::HashSet::new(),
             agg_cur_ret: None,
             demoted_numeric_locals: std::collections::HashSet::new(),
+            user_fn_ret: std::collections::HashMap::new(),
             int_range_locals: std::collections::HashMap::new(),
             diag_coord_indices: std::collections::HashSet::new(),
             int_i32_vec_locals: std::collections::HashSet::new(),
@@ -3208,6 +3220,9 @@ impl Codegen {
         // `VarDecl` lowers them as boxed `Value` rather than native `f64` (else the store coerces
         // and panics on a JS string-concat result like `s = s + arr[i]`). See
         // `collect_demoted_numeric_locals` / `demoted_numeric_locals`.
+        // BEFORE the demotion pass, which consults it: a local assigned from a provably-numeric
+        // call must stop demoting, which is half of where the win comes from.
+        self.user_fn_ret = self.collect_user_fn_rets(&program.statements);
         self.demoted_numeric_locals = self.collect_demoted_numeric_locals(&program.statements);
         self.int_valued_locals = Self::collect_int_valued_locals(&program.statements);
         self.int_range_locals = self.collect_int_range_locals(&program.statements);
@@ -12358,6 +12373,190 @@ impl Codegen {
     // demoted). The map is name-flat across the whole program (a name demoted in one function is
     // demoted in all) — still sound, and harmless to the perf gauntlet, where each kernel is its
     // own program with unique accumulator names.
+    /// Which top-level fns provably return a number, and as what native type. A fixpoint, because
+    /// one qualifying fn makes calls to it numeric inside another; growing only, so it terminates.
+    fn collect_user_fn_rets(
+        &self,
+        stmts: &[Statement],
+    ) -> std::collections::HashMap<String, RustType> {
+        let mut env: HashMap<String, RustType> = HashMap::new();
+        Self::collect_annotated_types(stmts, &self.type_aliases, &mut env);
+
+        let mut decls: Vec<(String, &Statement)> = Vec::new();
+        for s in stmts {
+            if let Statement::FunDecl { async_: false, name, body, .. } = s {
+                decls.push((name.to_string(), body.as_ref()));
+            }
+        }
+
+        // A REASSIGNED name is not this fn at the call site, and a SHADOWED one is not either —
+        // `emit_typed_expr` sees a bare callee name with no scope information. Excluding every name
+        // ever bound as a variable or parameter is blunt, but the alternative is a miscompile.
+        let mut reassigns: Vec<(String, &Expr)> = Vec::new();
+        Self::collect_reassignments_stmts(stmts, &mut reassigns);
+        let mut excluded: std::collections::HashSet<String> =
+            reassigns.iter().map(|(n, _)| n.clone()).collect();
+        Self::collect_bound_names(stmts, &mut excluded);
+
+        let mut out: std::collections::HashMap<String, RustType> = std::collections::HashMap::new();
+        loop {
+            let mut changed = false;
+            for (name, body) in &decls {
+                if out.contains_key(name) || excluded.contains(name) {
+                    continue;
+                }
+                let mut rets: Vec<&Expr> = Vec::new();
+                Self::collect_return_exprs(body, &mut rets);
+                if rets.is_empty() {
+                    continue; // no return yields `undefined`, which is not a number
+                }
+                let mut ty: Option<RustType> = None;
+                let mut ok = true;
+                for e in &rets {
+                    let Some(et) = self.proof_numeric_type(e, &env, &out) else {
+                        ok = false;
+                        break;
+                    };
+                    ty = match ty {
+                        None => Some(et),
+                        Some(prev) if prev == et => Some(et),
+                        Some(_) => Some(RustType::F64), // mixed I32/F64 settles on the wider
+                    };
+                }
+                if ok {
+                    if let Some(final_ty) = ty {
+                        out.insert(name.clone(), final_ty);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Is `e` provably a NUMBER, and which native type describes it?
+    ///
+    /// Separate from `expr_native_type`, which answers the stricter "can this be LOWERED natively"
+    /// and is bound by `result_type_of_binop`, whose arms require BOTH operands `F64`. That rejects
+    /// `arr[i] & 255` on a `Vec<i32>` — element `I32`, literal `F64` — which on GBA is nearly every
+    /// masked read of a typed array. Widening that function would change lowering everywhere it is
+    /// consulted, to serve a question it is not being asked.
+    ///
+    /// Two unconditional JS facts carry it: `- * / % **` coerce with ToNumber, and `& | ^ << >>`
+    /// with ToInt32 — a number, and an int32 one, even if an operand was a string. `>>>` is excluded
+    /// (its uint32 can exceed `i32::MAX`) and `+` needs both sides proven, because it concatenates.
+    fn proof_numeric_type(
+        &self,
+        e: &Expr,
+        env: &HashMap<String, RustType>,
+        fn_rets: &std::collections::HashMap<String, RustType>,
+    ) -> Option<RustType> {
+        let numeric = |t: &RustType| matches!(t, RustType::F64 | RustType::I32);
+        match e {
+            Expr::Literal { value: Literal::Number(_), .. } => Some(RustType::F64),
+            Expr::Ident { name, .. } => env.get(name.as_ref()).filter(|t| numeric(t)).cloned(),
+            Expr::Index { object, optional: false, .. } => {
+                if let Expr::Ident { name, .. } = object.as_ref() {
+                    if let Some(RustType::Vec(inner)) = env.get(name.as_ref()) {
+                        if numeric(inner) {
+                            return Some((**inner).clone());
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Unary { op, operand, .. } => match op {
+                UnaryOp::Neg | UnaryOp::Pos => {
+                    self.proof_numeric_type(operand, env, fn_rets).map(|_| RustType::F64)
+                }
+                _ => None,
+            },
+            Expr::Binary { left, op, right, .. } => match op {
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    Some(RustType::I32)
+                }
+                BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => Some(RustType::F64),
+                BinOp::Add => {
+                    let l = self.proof_numeric_type(left, env, fn_rets)?;
+                    let r = self.proof_numeric_type(right, env, fn_rets)?;
+                    Some(if l == RustType::I32 && r == RustType::I32 {
+                        RustType::I32
+                    } else {
+                        RustType::F64
+                    })
+                }
+                _ => None,
+            },
+            Expr::Conditional { then_branch, else_branch, .. } => {
+                let a = self.proof_numeric_type(then_branch, env, fn_rets)?;
+                let b = self.proof_numeric_type(else_branch, env, fn_rets)?;
+                Some(if a == b { a } else { RustType::F64 })
+            }
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } => fn_rets.get(name.as_ref()).cloned(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Every name bound as a variable or a function parameter, anywhere, at any depth.
+    fn collect_bound_names(stmts: &[Statement], out: &mut std::collections::HashSet<String>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl { name, .. } => {
+                    out.insert(name.to_string());
+                }
+                Statement::FunDecl { params, body, .. } => {
+                    for p in params {
+                        if let FunParam::Simple(tp) = p {
+                            out.insert(tp.name.to_string());
+                        }
+                    }
+                    Self::collect_bound_names(core::slice::from_ref(body.as_ref()), out);
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    Self::collect_bound_names(statements, out)
+                }
+                Statement::If { then_branch, else_branch, .. } => {
+                    Self::collect_bound_names(core::slice::from_ref(then_branch.as_ref()), out);
+                    if let Some(e) = else_branch {
+                        Self::collect_bound_names(core::slice::from_ref(e.as_ref()), out);
+                    }
+                }
+                Statement::While { body, .. } | Statement::For { body, .. } => {
+                    Self::collect_bound_names(core::slice::from_ref(body.as_ref()), out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Every `return <expr>` in a body, through blocks, ifs and loops. NOT into a nested function.
+    fn collect_return_exprs<'a>(s: &'a Statement, out: &mut Vec<&'a Expr>) {
+        match s {
+            Statement::Return { value: Some(e), .. } => out.push(e),
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for x in statements {
+                    Self::collect_return_exprs(x, out);
+                }
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                Self::collect_return_exprs(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::collect_return_exprs(e, out);
+                }
+            }
+            Statement::While { body, .. } | Statement::For { body, .. } => {
+                Self::collect_return_exprs(body, out)
+            }
+            _ => {}
+        }
+    }
+
     fn collect_demoted_numeric_locals(&self, stmts: &[Statement]) -> HashSet<String> {
         // 1. Flat env: every annotated local/param name → its native `RustType`.
         let mut env: HashMap<String, RustType> = HashMap::new();
@@ -15801,6 +16000,19 @@ impl Codegen {
                 let lt = self.expr_native_type(left, env);
                 let rt = self.expr_native_type(right, env);
                 RustType::result_type_of_binop(*op, &lt, &rt).unwrap_or(RustType::Value)
+            }
+            // A call to a fn whose every return is PROVEN numeric. Without this a call is opaque and
+            // any local assigned from one demotes to a boxed `Value`. `env` shadowing wins: a local
+            // of that name is not the fn.
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if !env.contains_key(name.as_ref()) {
+                        if let Some(ft) = self.user_fn_ret.get(name.as_ref()) {
+                            return ft.clone();
+                        }
+                    }
+                }
+                RustType::Value
             }
             // `vec[i]` where `vec` is a `number[]` (Vec<f64>) → the element type. A `Vec<f64>`
             // can only hold numbers, so this never feeds a string into the accumulator.
@@ -24264,6 +24476,33 @@ impl Codegen {
                                 };
                                 return Ok((code, ty));
                             }
+                        }
+                    }
+                }
+                // A user fn whose every return is PROVEN numeric (`collect_user_fn_rets`). The call
+                // stays boxed — this is not a calling convention — but its RESULT stops being
+                // opaque, so the surrounding arithmetic stays integral instead of dropping to the
+                // generic `ops::add` and its two soft-float conversions.
+                //
+                // The `_ =>` arm is unreachable by construction: membership required every return
+                // to be numeric. Written out rather than `unreachable!()` so a proof bug surfaces as
+                // the same diagnostic every other coercion in this file produces.
+                if !self.user_fn_ret.is_empty() {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if let Some(ty) = self.user_fn_ret.get(name.as_ref()).cloned() {
+                            let boxed = self.emit_expr(expr)?;
+                            let conv = if ty == RustType::I32 {
+                                "tishlang_runtime::to_int32(*n)"
+                            } else {
+                                "*n"
+                            };
+                            return Ok((
+                                format!(
+                                    "match &{} {{ Value::Number(n) => {}, _ => panic!(\"expected number\") }}",
+                                    boxed, conv
+                                ),
+                                ty,
+                            ));
                         }
                     }
                 }
