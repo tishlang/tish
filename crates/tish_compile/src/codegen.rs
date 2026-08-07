@@ -24802,16 +24802,24 @@ impl Codegen {
                 // M5: direct call to an eligible native fn -> `name_native(<native args>)`.
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
                     if self.native_fns.contains(fname.as_ref()) {
+                        // The ABI this callee actually has. Passing every argument through
+                        // `coerce_native_arg` — as the boxed-context site already does — is what
+                        // keeps a NATIVE argument of the other width from being handed over raw:
+                        // `manhattan(c, r, tac_unit_col(id), tac_unit_row(id))` types its extern
+                        // args I32 and the callee takes f64, which emitted `manhattan_native(.., i32)`
+                        // and rustc rejected it with E0308. Value args keep their existing
+                        // from_value_expr path (coerce_native_arg's first arm IS that path).
+                        let want = if self.native_fns_i32.contains(fname.as_ref()) {
+                            RustType::I32
+                        } else {
+                            RustType::F64
+                        };
                         let mut argc: Vec<String> = Vec::with_capacity(args.len());
                         let mut ok = true;
                         for a in args {
                             if let CallArg::Expr(e) = a {
                                 let (ac, at) = self.emit_typed_expr(e)?;
-                                argc.push(if at == RustType::Value {
-                                    RustType::F64.from_value_expr(&ac)
-                                } else {
-                                    ac
-                                });
+                                argc.push(self.coerce_native_arg(&ac, at, want.clone()));
                             } else {
                                 ok = false;
                                 break;
@@ -24827,13 +24835,15 @@ impl Codegen {
                                     RustType::F64,
                                 ));
                             }
+                            // …and report the ABI's OWN return type, for the same reason: an
+                            // i32-ABI callee reported as F64 mistypes every consumer downstream.
                             return Ok((
                                 format!(
                                     "{}({})",
                                     self.native_call_target(fname.as_ref()),
                                     argc.join(", ")
                                 ),
-                                RustType::F64,
+                                want,
                             ));
                         }
                     }
