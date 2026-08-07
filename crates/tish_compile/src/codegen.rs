@@ -16131,16 +16131,6 @@ impl Codegen {
             // A call to a fn whose every return is PROVEN numeric. Without this a call is opaque and
             // any local assigned from one demotes to a boxed `Value`. `env` shadowing wins: a local
             // of that name is not the fn.
-            Expr::Call { callee, .. } => {
-                if let Expr::Ident { name, .. } = callee.as_ref() {
-                    if !env.contains_key(name.as_ref()) {
-                        if let Some(ft) = self.user_fn_ret.get(name.as_ref()) {
-                            return ft.clone();
-                        }
-                    }
-                }
-                RustType::Value
-            }
             // `vec[i]` where `vec` is a `number[]` (Vec<f64>) → the element type. A `Vec<f64>`
             // can only hold numbers, so this never feeds a string into the accumulator.
             Expr::Index {
@@ -16219,9 +16209,14 @@ impl Codegen {
                 }
                 RustType::Value
             }
+            // ONE Call arm, and the singularity is load-bearing: the numeric-return proof briefly
+            // lived in its own `Expr::Call` arm ABOVE this one, which shadowed everything below —
+            // native-fn results, the Math intrinsics and the #169 reduce modelling all became
+            // unreachable (rustc said so, as a warning nobody read) and every accumulator they
+            // feed demoted to a boxed `Value`. CI caught it as issue_169 + the #320 push test.
             Expr::Call { callee, args, .. } => {
-                // M5 native fn (`fn f_native(..) -> f64`); requires all-positional args.
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    // M5 native fn (`fn f_native(..) -> f64`); requires all-positional args.
                     if self.native_fns.contains(fname.as_ref())
                         && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
                     {
@@ -16230,6 +16225,14 @@ impl Codegen {
                         } else {
                             RustType::F64
                         };
+                    }
+                    // A call to a fn whose every return is PROVEN numeric (the boxed call's RESULT
+                    // stops being opaque — the dispatch is unchanged). `env` shadowing wins: a
+                    // local of that name is not the fn.
+                    if !env.contains_key(fname.as_ref()) {
+                        if let Some(ft) = self.user_fn_ret.get(fname.as_ref()) {
+                            return ft.clone();
+                        }
                     }
                 }
                 // Single-arg `Math.<intrinsic>(x)` lowered to a direct `f64` method → number.
@@ -24742,9 +24745,15 @@ impl Codegen {
                 // The `_ =>` arm is unreachable by construction: membership required every return
                 // to be numeric. Written out rather than `unreachable!()` so a proof bug surfaces as
                 // the same diagnostic every other coercion in this file produces.
+                // NOT for fns that also have an M5 native form: the direct-call path below emits
+                // `name_native(..)` bare, and this block reaching them first wrapped that same call
+                // in `Value::Number(..)` and match-unwrapped it straight back — the boxed round
+                // trip the #320 push test pins against. A proof is the fallback, never the winner.
                 if !self.user_fn_ret.is_empty() {
                     if let Expr::Ident { name, .. } = callee.as_ref() {
-                        if let Some(ty) = self.user_fn_ret.get(name.as_ref()).cloned() {
+                        if self.native_fns.contains(name.as_ref()) {
+                            // fall through to the native direct-call path
+                        } else if let Some(ty) = self.user_fn_ret.get(name.as_ref()).cloned() {
                             let boxed = self.emit_expr(expr)?;
                             let conv = if ty == RustType::I32 {
                                 "tishlang_runtime::to_int32(*n)"
