@@ -283,6 +283,35 @@ pub fn str_index(s: &str, idx: &Value) -> Value {
     }
 }
 
+/// `&str` charCodeAt — the code unit at `idx`, NaN when out of range. Mirrors
+/// `tish_runtime::str_char_code_at`, and missing here for the same reason `str_index` was: codegen
+/// emits it whenever the receiver is statically a `&str`, so `"abc".charCodeAt(i)` was a hard E0425
+/// on the GBA target only while compiling everywhere else. Found by a ROM that hashes its own trace.
+#[inline]
+pub fn str_char_code_at(s: &str, idx: &Value) -> Value {
+    let i = match idx {
+        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
+        _ => return Value::Number(f64::NAN),
+    };
+    match s.chars().nth(i) {
+        Some(c) => Value::Number(c as u32 as f64),
+        None => Value::Number(f64::NAN),
+    }
+}
+
+/// `&str` charAt — the 1-character string at `idx`, `""` out of range. Same reason as above.
+#[inline]
+pub fn str_char_at(s: &str, idx: &Value) -> Value {
+    let i = match idx {
+        Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => *n as usize,
+        _ => return Value::String("".into()),
+    };
+    match s.chars().nth(i) {
+        Some(c) => Value::String(c.to_string().into()),
+        None => Value::String("".into()),
+    }
+}
+
 pub fn delete_property(obj: &Value, key: &Value) -> Value {
     match obj {
         Value::Object(m) => {
