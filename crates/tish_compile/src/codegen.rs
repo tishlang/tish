@@ -14243,6 +14243,26 @@ impl Codegen {
         if *target_ty == RustType::F64 && val_ty.is_integer_scalar() {
             return Ok(format!("({}) as f64", val_code));
         }
+        // FIXED CROSSES DIRECTLY, not through a `Value`. Without these arms a `fixed` reaching an
+        // `f64` extern parameter (or the reverse) fell to the boxed round trip below — allocate a
+        // Value::Number, then immediately unwrap it — which is the whole cost the typed-extern path
+        // exists to remove, reintroduced at the boundary it was removed from (#607). Same scaling as
+        // `RustType::Fixed`'s Value conversions in types.rs, so the values are identical either way.
+        if *target_ty == RustType::F64 && val_ty == RustType::Fixed {
+            return Ok(format!("(({}).to_raw() as f64 / 256.0)", val_code));
+        }
+        if *target_ty == RustType::Fixed && val_ty == RustType::F64 {
+            return Ok(format!(
+                "tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)",
+                val_code
+            ));
+        }
+        if *target_ty == RustType::Fixed && val_ty.is_integer_scalar() {
+            return Ok(format!(
+                "tishlang_runtime::Fixed::from_raw((({}) as i32).wrapping_mul(256))",
+                val_code
+            ));
+        }
         let boxed = if val_ty.is_native() {
             val_ty.to_value_expr(&val_code)
         } else {
@@ -19032,6 +19052,24 @@ impl Codegen {
         match (from, want) {
             (RustType::Value, w) => w.from_value_expr(code),
             (RustType::I32, RustType::F64) => format!("(({}) as f64)", code),
+            // FIXED IS NOT AN f64 AND THE FALLTHROUGH BELOW USED TO PRETEND IT WAS. `fixed` is agb's
+            // `Num<i32,8>`; handed to a native `f64` parameter it is a hard E0308 in the generated
+            // program, not a slow path — which is how four call sites in one file of hyrule stopped
+            // that game building the moment its helper became M5-eligible. The scaling is the same
+            // one `RustType::Fixed`'s Value boundary uses (`types.rs:603`), so a value crossing here
+            // reads identically to one crossing there.
+            (RustType::Fixed, RustType::F64) => format!("(({}).to_raw() as f64 / 256.0)", code),
+            // And the other direction, for the same reason: a native f64 reaching a `fixed`
+            // parameter. Truncating, matching `Fixed::from_value_expr` (`types.rs:507`).
+            (RustType::F64, RustType::Fixed) => format!(
+                "tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)",
+                code
+            ),
+            (RustType::I32, RustType::Fixed) => format!(
+                "tishlang_runtime::Fixed::from_raw((({}) as i32).wrapping_mul(256))",
+                code
+            ),
+            (RustType::Fixed, RustType::I32) => format!("(({}).to_raw() >> 8)", code),
             (_, RustType::I32) => format!("tishlang_runtime::to_int32({})", code),
             _ => code.to_string(),
         }
@@ -20460,6 +20498,42 @@ impl Codegen {
         None
     }
 
+    /// Every module-level `let`/`const` name. On GBA these are locals of `run()` — nothing gives
+    /// them a top-level home — so a free `fn` naming one does not compile.
+    fn collect_module_level_binding_names(
+        statements: &[Statement],
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for s in statements {
+            match s {
+                Statement::VarDecl { name, .. } => {
+                    out.insert(name.to_string());
+                }
+                Statement::VarDeclDestructure { pattern, .. } => {
+                    Self::collect_destruct_names(pattern, &mut out);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Does `body` read a module binding it would not be able to see as a free `fn`? Names the body
+    /// binds itself (params are checked by the caller; locals here) shadow the module one, so they
+    /// do not count — that is the same shadow rule #556 established for parameters.
+    fn body_reads_module_binding(
+        body: &Statement,
+        module_bindings: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut referenced = HashSet::new();
+        Self::collect_stmt_idents(body, &mut referenced);
+        let mut shadowed = HashSet::new();
+        Self::collect_local_var_names(body, &mut shadowed);
+        referenced
+            .iter()
+            .any(|n| module_bindings.contains(n) && !shadowed.contains(n))
+    }
+
     /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
     fn setup_native_vec_fns(&mut self, program: &Program) {
         use std::collections::HashMap;
@@ -20467,6 +20541,38 @@ impl Codegen {
         // #177 aggregate fns (`advance`/`offsetMomentum` on `Vec<Struct>`) take precedence — do not
         // also emit a broken `name_nv(&Vec<f64>)` wrapper for them.
         sigs.retain(|name, _| !self.aggregate_fns.contains_key(name));
+        // ON GBA, A MODULE BINDING IS NOT REACHABLE FROM A FREE `fn`. The passes that give module
+        // state a top-level home — `native_numeric_globals`' TLS cells and `module_const_f64_arrays`'
+        // statics — are the std-emitting ones, and they are gated off for GBA. So every module
+        // `let`/`const` is a local of `run()` there, while `name_nv` is emitted at top level: a body
+        // that reads one compiles to `error[E0425]: cannot find value CFG in this scope` and the
+        // game does not build (#594).
+        //
+        // Reject those fns here rather than emitting a broken program. They stay on the boxed path,
+        // which is correct and merely slower. Scoped to GBA deliberately: off-target the statics DO
+        // exist, the reference resolves, and eligibility must stay byte-identical to before.
+        //
+        // This does not close #594's other half — a lowered fn that can actually SEE module state,
+        // which needs those bindings emitted as statics on GBA too. It stops the miscompile.
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            let module_bindings = Self::collect_module_level_binding_names(&program.statements);
+            if !module_bindings.is_empty() {
+                let bodies_by_name: std::collections::HashMap<&str, &Statement> = program
+                    .statements
+                    .iter()
+                    .filter_map(|s| match s {
+                        Statement::FunDecl { name, body, .. } => Some((name.as_ref(), body.as_ref())),
+                        _ => None,
+                    })
+                    .collect();
+                sigs.retain(|name, _| {
+                    let Some(body) = bodies_by_name.get(name.as_str()) else {
+                        return true;
+                    };
+                    !Self::body_reads_module_binding(body, &module_bindings)
+                });
+            }
+        }
         if sigs.is_empty() {
             return;
         }
