@@ -1,7 +1,7 @@
 //! Build native binary via cargo (interim path until Cranelift backend is ready).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tishlang_compile::ResolvedNativeModule;
 
@@ -627,15 +627,34 @@ runner = ["mgba-qt", "-C", "logToStdout=1", "-C", "logLevel.gba.debug=127"]
     // with `-Tgba.ld` — cargo *joins* rustflags arrays across config files, so a
     // config-file approach would pass `-Tgba.ld` twice ("region already defined").
     // build-std still comes from the generated `[unstable]` config (not rustflags).
-    let status = Command::new("cargo")
+    //
+    // TISH_GBA_TARGET_DIR (opt-in, explicit — deliberately NOT the ambient
+    // CARGO_TARGET_DIR, which the desktop path scrubs for good reason): share ONE
+    // cargo target dir across every example's ROM build. Each example otherwise
+    // carries a full private dependency tree — measured at ~45 GB across the
+    // tish-gba fleet, and it filled the disk mid-build once. An inherited
+    // CARGO_TARGET_DIR meanwhile made cargo write where the ELF lookup below
+    // never looked ("GBA ELF not found" on a SUCCESSFUL compile), so that env is
+    // scrubbed here and only the explicit opt-in steers both paths together.
+    let shared_target = std::env::var_os("TISH_GBA_TARGET_DIR").map(PathBuf::from);
+    let target_root = shared_target
+        .clone()
+        .unwrap_or_else(|| build_dir.join("target"));
+    let mut cargo = Command::new("cargo");
+    cargo
         .arg("build")
         .arg("--release")
         .current_dir(&build_dir)
+        .env_remove("CARGO_TARGET_DIR")
         .env(
             "RUSTFLAGS",
             "-Clink-arg=-Tgba.ld -Ctarget-cpu=arm7tdmi -Cforce-frame-pointers=yes",
         )
-        .env("CARGO_TERM_COLOR", "always")
+        .env("CARGO_TERM_COLOR", "always");
+    if let Some(dir) = &shared_target {
+        cargo.env("CARGO_TARGET_DIR", dir);
+    }
+    let status = cargo
         .status()
         .map_err(|e| format!("Failed to run cargo for GBA build: {}", e))?;
     if !status.success() {
@@ -645,9 +664,8 @@ runner = ["mgba-qt", "-C", "logToStdout=1", "-C", "logLevel.gba.debug=127"]
         ));
     }
 
-    // ELF → .gba via agb-gbafix.
-    let elf = build_dir
-        .join("target")
+    // ELF → .gba via agb-gbafix. Resolved from the SAME root the build wrote to.
+    let elf = target_root
         .join("thumbv4t-none-eabi")
         .join("release")
         .join(&cargo_name);
