@@ -1,6 +1,8 @@
 # A call to a user tish function costs ~92 ticks on GBA
 
-**Status:** item 1 FIXED in `9993d6145` (93.4 -> 72.2 ticks a call). Item 2 open.
+**Status:** item 1 FIXED in `9993d6145` (93.4 -> 72.2 ticks a call). Item 2 PARTLY fixed in
+`e85e09566` — the ABI exists and works; it does not yet reach the code that motivated the issue.
+Item 3 (below) is what remains.
 **Found by:** `tish-gba`, porting a game's rules core from Rust to tish.
 **Related:** `int-domain-consumer-boundary.md` — same shape of finding (type information present
 and discarded), same bench ROM.
@@ -138,6 +140,43 @@ guidance, and every one is therefore ineligible.
 
 Whether M5 should grow an `i32` shape is a design decision rather than an obvious fix — an
 `fn f(i32, i32) -> i32` is exactly right for ARM7TDMI, but it is a second native ABI to maintain.
+
+### PARTLY FIXED in `e85e09566`
+
+An all-`i32` signature now emits `fn f_native(mut a: i32, ..) -> i32` and direct calls target it.
+All-or-nothing: an `: i32` parameter is ToInt32-coerced on entry through the boxed path and an f64
+native parameter is not, so a mixed signature keeps the old ABI.
+
+Two things had to be fixed before the ABI could be reached at all, and both were larger than it:
+
+  * **M5 was switched off entirely on GBA** — the target the annotation exists for. The block was
+    gated `emit_mode != Gba` because sibling passes emit `thread_local!`. Those stay off; the
+    native-fn pass runs.
+  * **`numeric_shaped`/`native_safe_expr` did not know the bitwise operators.** `& | ^ << >> ~` were
+    absent from both, so any function containing one was ineligible however it was annotated — and
+    on this target that is nearly every function. Now accepted, gated on the GBA numeric vocabulary
+    so eligibility elsewhere is byte-identical (ungated it promoted fnv1a and changed its lowering).
+
+And it surfaced a latent miscompile: `native_safe_expr`'s index arm accepted any identifier as the
+indexed object without checking it is in scope for a TOP-LEVEL fn, so a fn reading a module array
+compiled to a body naming a binding that only exists inside `run()` (E0425). Fixed, with a test.
+
+## Item 3 — a native free fn cannot see module state, which is where the win is
+
+The ABI above changes nothing for the port that motivated this issue, and the reason is exact: every
+hot function in it reads a module-scope array (`PLANE[...]`, `DEPTH[...]`, `GS[...]`), and a
+module-scope `let` is emitted as a LOCAL OF `run()`, closed over by the boxed function closures. A
+top-level `fn` cannot name it — that is the miscompile fixed above, and rejecting those candidates
+is correct, not conservative.
+
+So the remaining work is not in the calling convention at all. It is: **emit module-scope arrays and
+scalars as top-level statics** (on GBA, where there is a single core and `SingleCore`/`static mut`
+are available) rather than as locals of `run()`, so that a native fn can reach them — and then let
+`globals` carry them, which every existing check already consults.
+
+Until that lands, a function is eligible only if it touches nothing but its parameters. That is the
+minority of any real program, and none of the ~20 calls per candidate in the search this issue
+opened with.
 Filing it separately from item 1 for that reason.
 
 ## What was checked, and what turned out to be wrong
