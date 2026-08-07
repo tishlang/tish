@@ -3148,37 +3148,42 @@ impl Codegen {
         // M5 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out): emit a parallel
         // native `fn f_native` for each eligible top-level numeric fn at top level; direct calls
         // route to it in emit_typed_expr.
-        // Gba mode: these passes emit `thread_local!` and other std-isms; gate them off initially
-        // (they are pure perf — correctness is unaffected). Re-audit for no_std later.
         if crate::native_opts_enabled() {
-            // GBA runs a REDUCED form of this block. The three sub-passes below emit `thread_local!`
-            // and other std-isms and stay off there; the native-fn pass itself emits plain free
-            // `fn`s and is exactly what a device with no FPU wants, so it runs. A candidate that
-            // needed one of the skipped passes simply fails to qualify — `globals` and
-            // `native_vec_names` are empty, so any identifier it reads that is not a parameter
-            // disqualifies it, which is the conservative direction.
+            // MODULE STATE GETS A TOP-LEVEL HOME ON GBA TOO (#594). These passes used to be skipped
+            // there because the numeric-global one emits `thread_local!`, which no_std has not got —
+            // and the const-array pass was collateral, gated only because it shared the block. The
+            // consequence was the bug this issue reports: a lowered free `fn` is emitted at top
+            // level, so every module binding it reads is a local of `run()` that does not exist at
+            // that scope, and the emitted crate fails with E0425.
+            //
+            // A const numeric array is `const G_X: [f64; N] = [..]` — no std in it at all. A mutable
+            // numeric global becomes `SingleCore<Cell<f64>>`, the facade's single-core static whose
+            // `with()` deliberately mirrors `LocalKey::with` (compat.rs), so every read and write the
+            // emitter already produces (`G.with(|c| c.get())`) is unchanged.
             let gba = self.emit_mode == crate::NativeEmitMode::Gba;
-            if !gba {
-                self.native_numeric_globals =
-                    Self::collect_native_numeric_globals(&program.statements);
-                if !self.native_numeric_globals.is_empty() {
+            self.native_numeric_globals =
+                Self::collect_native_numeric_globals(&program.statements);
+            if !self.native_numeric_globals.is_empty() {
+                if gba {
+                    self.emit_native_numeric_global_singlecore()?;
+                } else {
                     self.emit_native_numeric_global_tls()?;
-                    self.writeln("");
                 }
-                self.module_const_f64_arrays =
-                    Self::collect_module_const_f64_arrays(&program.statements);
-                self.module_const_f64_cum = Self::collect_module_const_cum(
-                    &program.statements,
-                    &self.module_const_f64_arrays,
-                );
-                self.module_const_f64_aliases = Self::collect_module_const_aliases(
-                    &program.statements,
-                    &self.module_const_f64_cum,
-                );
-                if !self.module_const_f64_arrays.is_empty() {
-                    self.emit_module_const_f64_arrays()?;
-                    self.writeln("");
-                }
+                self.writeln("");
+            }
+            self.module_const_f64_arrays =
+                Self::collect_module_const_f64_arrays(&program.statements);
+            self.module_const_f64_cum = Self::collect_module_const_cum(
+                &program.statements,
+                &self.module_const_f64_arrays,
+            );
+            self.module_const_f64_aliases = Self::collect_module_const_aliases(
+                &program.statements,
+                &self.module_const_f64_cum,
+            );
+            if !self.module_const_f64_arrays.is_empty() {
+                self.emit_module_const_f64_arrays()?;
+                self.writeln("");
             }
             let native_vec_names: std::collections::HashSet<String> = if gba {
                 std::collections::HashSet::new()
@@ -17025,6 +17030,22 @@ impl Codegen {
     }
 
     /// Emit `thread_local! { static G_NAME: Cell<f64> = ... }` for each eligible global.
+    /// #594, GBA: the no_std twin of `emit_native_numeric_global_tls`. `SingleCore` is the facade's
+    /// single-core static wrapper — sound because the GBA runs one cooperative thread and no
+    /// interrupt handler touches interpreter state — and its `with()` mirrors `LocalKey::with`, so
+    /// the read/write emission is shared with the TLS path rather than duplicated.
+    fn emit_native_numeric_global_singlecore(&mut self) -> Result<(), CompileError> {
+        for (name, init) in self.native_numeric_globals.clone() {
+            self.writeln(&format!(
+                "static {}: tishlang_runtime::SingleCore<core::cell::Cell<f64>> = \
+                 tishlang_runtime::SingleCore::new(core::cell::Cell::new({}));",
+                Self::native_global_static(&name),
+                Self::f64_lit(init),
+            ));
+        }
+        Ok(())
+    }
+
     fn emit_native_numeric_global_tls(&mut self) -> Result<(), CompileError> {
         self.writeln("thread_local! {");
         self.indent += 1;
@@ -17043,6 +17064,9 @@ impl Codegen {
     /// Top-level `let name = [n0, n1, …]` with numeric literals, never reassigned — emitted as
     /// `const G_name: [f64; N]` for direct indexing from native fns (fasta `codes`/`probs`).
     fn collect_module_const_f64_arrays(stmts: &[Statement]) -> HashMap<String, Vec<f64>> {
+        // Every name bound anywhere in the program by anything other than the candidate decls
+        // themselves. Collected alongside the existing per-fn local scan below.
+        let mut shadow_bindings: HashSet<String> = HashSet::new();
         use std::collections::{HashMap, HashSet};
         let mut candidates: HashMap<String, Vec<f64>> = HashMap::new();
         for s in stmts {
@@ -17083,6 +17107,16 @@ impl Codegen {
                     candidates.remove(&n);
                 }
             }
+            // …AND ANY OTHER BINDING OF THE NAME, not just `let`/`const`. `collect_local_var_names`
+            // sees VarDecl only, so a PARAMETER, a `for-of` variable or a `catch` binding named like
+            // a module const did not disqualify it — and the const fast path in `emit_typed_expr`'s
+            // Index arm is static, with no scope check, so `function f(T: number[], i) { return T[i] }`
+            // read the MODULE `T` and returned the wrong number with no diagnostic. The sibling
+            // numeric-global pass has always used `collect_binding_names` for exactly this reason.
+            Self::collect_binding_names(s, &mut shadow_bindings);
+        }
+        for n in &shadow_bindings {
+            candidates.remove(n);
         }
         let globals: HashSet<String> = candidates.keys().cloned().collect();
         let mut reassigns: Vec<(String, &Expr)> = Vec::new();
@@ -19091,7 +19125,11 @@ impl Codegen {
                 "tishlang_runtime::Fixed::from_raw((({}) as i32).wrapping_mul(256))",
                 code
             ),
-            (RustType::Fixed, RustType::I32) => format!("(({}).to_raw() >> 8)", code),
+            // DIVIDE, DO NOT SHIFT. `>> 8` is an arithmetic shift and FLOORS: fixed -1.5 would
+            // become -2 and -0.0039 would become -1. Rust integer division truncates toward zero,
+            // which is what ToInt32 and `as i32` do, so -1.5 -> -1 and -0.0039 -> 0. The two agree
+            // on every non-negative value, which is exactly why this would have shipped.
+            (RustType::Fixed, RustType::I32) => format!("(({}).to_raw() / 256)", code),
             (_, RustType::I32) => format!("tishlang_runtime::to_int32({})", code),
             _ => code.to_string(),
         }
@@ -19982,6 +20020,17 @@ impl Codegen {
         // fn either — its scalar params would be typed `f64` and mistype the arg (e.g. `fn rec(m){
         // log.push(m) }` called `rec("ran")`). Same gate the M4/M5/S-0 paths use.
         let nonnumeric = Self::fns_called_with_nonnumeric_arg(&program.statements);
+        // Every top-level fn name. A CALL to one is validated separately (`vec_body_calls_native`);
+        // what matters here is that the identifier itself is not a `run()` local the way a module
+        // `let` or a builtin like `Math` is.
+        let fn_names: std::collections::HashSet<String> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                Statement::FunDecl { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
         for s in &program.statements {
             if let Statement::FunDecl {
                 async_: false,
@@ -20008,12 +20057,27 @@ impl Codegen {
                         .params
                         .iter()
                         .any(|(_, k)| matches!(k, VecParamKind::Array { .. }));
-                    // #605: a scalars-in/STRING-out fn has neither an array parameter nor a
-                    // local vec op, so it never reached this group and stayed a boxed closure —
-                    // which is what "VecRetKind has no String" amounts to in practice. The return
-                    // shape earns admission on its own: `vec_fn_return_kind` only says `Str` when
-                    // EVERY return is a string, so there is one native signature to write.
-                    let string_out = sig.ret == VecRetKind::Str;
+                    // #605: a scalars-in/STRING-out fn has neither an array parameter nor a local
+                    // vec op, so it never reached this group and stayed a boxed closure — which is
+                    // what "VecRetKind has no String" amounts to in practice. The return shape earns
+                    // admission on its own, but ONLY under three extra conditions, each of which a
+                    // review found by breaking the version without it:
+                    //
+                    //  1. TOTAL. `vec_fn_return_kind` rejects an explicit bare `return;` but cannot
+                    //     see an IMPLICIT fall-through, and the lowered fn's tail yields
+                    //     `String::new()` where the boxed one yields `Value::Null` — so
+                    //     `function label(n){ if(n>0){return "pos"} }` returned "" instead of null.
+                    //     A wrong value, silently, from ordinary code.
+                    //  2. NO STRING-COMPARED PARAM. `scan_param_use` counts `===` as arithmetic, so
+                    //     `tag === "fire"` "proves" `tag` numeric and the param takes the f64 ABI —
+                    //     a `panic!("expected number")` on a no_std cart, or E0308. (infer.rs treats
+                    //     the same operator as OVERLOADED for exactly this reason.)
+                    //  3. NO MODULE READS, on EVERY target. A string or object module binding has a
+                    //     top-level home nowhere, and this is the first rule that admits a fn shaped
+                    //     to read one, so the GBA-only gate below is not enough.
+                    let string_out = sig.ret == VecRetKind::Str
+                        && Self::body_always_returns(body)
+                        && Self::body_names_only_its_own(params, body, &fn_names);
                     if has_array_param || Self::body_uses_local_vec_ops(body) || string_out {
                         sigs.insert(name.to_string(), sig);
                     }
@@ -20526,6 +20590,51 @@ impl Codegen {
         None
     }
 
+    /// Does `body` name ONLY things a free `fn` can see — its own parameters, its own locals, and
+    /// other top-level fns? Anything else (a module `let`, or a builtin like `Math`/`console`) is a
+    /// local of `run()` in the emitted program, and a free fn naming one is E0425.
+    ///
+    /// Stricter than the module-binding check it replaced for this door, and deliberately so:
+    /// `regex_redux`'s `nextBase()` is scalars-in/string-out, reaches for `Math.floor`, and the
+    /// native-vec emitter lowers that to a `get_prop` against the `Math` binding — which is not a
+    /// module `let`, so a module-only guard waved it through and the fixture stopped building.
+    fn body_names_only_its_own(
+        params: &[FunParam],
+        body: &Statement,
+        fn_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut referenced = HashSet::new();
+        Self::collect_stmt_idents(body, &mut referenced);
+        let mut bound: HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
+        Self::collect_local_var_names(body, &mut bound);
+        referenced
+            .iter()
+            .all(|n| bound.contains(n) || fn_names.contains(n))
+    }
+
+    /// Does every path through `body` end in an explicit `return <expr>`? Conservative: only a
+    /// trailing `return`, or an if/else where BOTH arms are total, counts. Anything else may fall
+    /// off the end, and a lowered fn's tail default (`String::new()` / `0.0`) is not what the boxed
+    /// path yields there (`Value::Null`).
+    fn body_always_returns(body: &Statement) -> bool {
+        match body {
+            Statement::Return { value: Some(_), .. } => true,
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                statements.last().is_some_and(Self::body_always_returns)
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                else_branch.as_ref().is_some_and(|e| {
+                    Self::body_always_returns(then_branch) && Self::body_always_returns(e)
+                })
+            }
+            _ => false,
+        }
+    }
+
     /// Every module-level `let`/`const` name. On GBA these are locals of `run()` — nothing gives
     /// them a top-level home — so a free `fn` naming one does not compile.
     fn collect_module_level_binding_names(
@@ -20533,17 +20642,29 @@ impl Codegen {
     ) -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
         for s in statements {
-            match s {
-                Statement::VarDecl { name, .. } => {
-                    out.insert(name.to_string());
-                }
-                Statement::VarDeclDestructure { pattern, .. } => {
-                    Self::collect_destruct_names(pattern, &mut out);
-                }
-                _ => {}
-            }
+            Self::collect_module_binding_names_of(s, &mut out);
         }
         out
+    }
+
+    /// One statement's module-level bindings. `Multi` matters: `let a = 1, b = 2` parses to it, and
+    /// codegen emits each declarator into the CURRENT scope — so at module level those are `run()`
+    /// locals exactly like a plain `let`, and missing them let a free fn name one (E0425).
+    fn collect_module_binding_names_of(s: &Statement, out: &mut std::collections::HashSet<String>) {
+        match s {
+            Statement::VarDecl { name, .. } => {
+                out.insert(name.to_string());
+            }
+            Statement::VarDeclDestructure { pattern, .. } => {
+                Self::collect_destruct_names(pattern, out);
+            }
+            Statement::Multi { statements, .. } => {
+                for inner in statements {
+                    Self::collect_module_binding_names_of(inner, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Does `body` read a module binding it would not be able to see as a free `fn`? Names the body
@@ -20553,13 +20674,14 @@ impl Codegen {
         body: &Statement,
         module_bindings: &std::collections::HashSet<String>,
     ) -> bool {
+        // NO SHADOW SUBTRACTION, deliberately. `collect_local_var_names` flattens every nested
+        // block, branch and loop into one set with no scope structure, so an inner
+        // `if (..) { let CFG = 0 }` would mask a module `CFG` read elsewhere in the body and let the
+        // fn lower with a free name (E0425). Over-rejecting costs a fn its lowering; under-rejecting
+        // costs the whole program its build.
         let mut referenced = HashSet::new();
         Self::collect_stmt_idents(body, &mut referenced);
-        let mut shadowed = HashSet::new();
-        Self::collect_local_var_names(body, &mut shadowed);
-        referenced
-            .iter()
-            .any(|n| module_bindings.contains(n) && !shadowed.contains(n))
+        referenced.iter().any(|n| module_bindings.contains(n))
     }
 
     /// Detect, validate, and emit the native-vec fn group. On any gap the group is left empty.
@@ -20583,7 +20705,24 @@ impl Codegen {
         // This does not close #594's other half — a lowered fn that can actually SEE module state,
         // which needs those bindings emitted as statics on GBA too. It stops the miscompile.
         if self.emit_mode == crate::NativeEmitMode::Gba {
-            let module_bindings = Self::collect_module_level_binding_names(&program.statements);
+            let mut module_bindings = Self::collect_module_level_binding_names(&program.statements);
+            // …EXCEPT the ones that now have a top-level home. Since #594 a module const numeric
+            // array is a `const` and a mutable numeric global is a `SingleCore` static, both
+            // reachable from a free fn — rejecting a fn for reading those would give up exactly the
+            // lowering this issue exists to enable. What remains unreachable is everything else:
+            // boxed objects, strings, arrays of non-numbers.
+            for k in self.module_const_f64_arrays.keys() {
+                module_bindings.remove(k);
+            }
+            for k in self.native_numeric_globals.keys() {
+                module_bindings.remove(k);
+            }
+            for k in self.module_const_f64_cum.keys() {
+                module_bindings.remove(k);
+            }
+            for k in self.module_const_f64_aliases.keys() {
+                module_bindings.remove(k);
+            }
             if !module_bindings.is_empty() {
                 let bodies_by_name: std::collections::HashMap<&str, &Statement> = program
                     .statements
@@ -20929,7 +21068,7 @@ impl Codegen {
                 }
             }
             Expr::Binary { left, op, right, .. } => {
-                let a = matches!(
+                let arith = matches!(
                     op,
                     BinOp::Add
                         | BinOp::Sub
@@ -20941,9 +21080,17 @@ impl Codegen {
                         | BinOp::Le
                         | BinOp::Gt
                         | BinOp::Ge
-                        | BinOp::StrictEq
-                        | BinOp::StrictNe
                 );
+                // `===`/`!==` ARE OVERLOADED — they compare strings as readily as numbers, so one is
+                // proof of a numeric operand ONLY when the other side is a numeric literal.
+                // `tag === "fire"` used to mark `tag` numeric, which handed a string parameter the
+                // f64 ABI: `panic!("expected number")` on a no_std cart, or E0308. `infer.rs`
+                // classifies the same operator as overloaded for exactly this reason, and the two
+                // disagreeing is what let it through here.
+                let num_lit = |x: &Expr| matches!(x, Expr::Literal { value: Literal::Number(_), .. });
+                let eq_numeric = matches!(op, BinOp::StrictEq | BinOp::StrictNe)
+                    && (num_lit(left) || num_lit(right));
+                let a = arith || eq_numeric;
                 Self::scan_param_use(left, p, a, f);
                 Self::scan_param_use(right, p, a, f);
             }

@@ -286,3 +286,202 @@ fn a_mixed_string_number_return_stays_boxed() {
         rust.lines().filter(|l| l.contains("maybe_nv")).take(3).collect::<Vec<_>>().join("\n")
     );
 }
+
+// ── #594 (the capability): module state a lowered fn CAN see, on GBA ─────────────────────────────
+
+/// A module const numeric array read from a lowered fn. `const G_TABLE: [f64; N] = [..]` needs no
+/// std at all — it was only ever unavailable on GBA because its pass shared a gate with the
+/// `thread_local!` one.
+const CONST_ARRAY_READ: &str = r#"
+const TABLE = [3, 1, 4, 1, 5, 9, 2, 6]
+function pick(n) {
+  let out = []
+  let i = 0
+  while (i < n) {
+    out.push(TABLE[i] * 2)
+    i = i + 1
+  }
+  return out
+}
+const R = pick(4)
+console.log(R.length)
+"#;
+
+#[test]
+fn a_module_const_array_is_reachable_from_a_lowered_fn_on_gba() {
+    let rust = compile_gba("const_array_gba", CONST_ARRAY_READ);
+    assert!(
+        rust.contains("const G_TABLE: [f64; 8]") || rust.contains("const G_table: [f64; 8]"),
+        "a module const numeric array should get a top-level `const` on GBA (#594):\n{}",
+        rust.lines().filter(|l| l.contains("TABLE")).take(4).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        rust.contains("fn pick_nv("),
+        "and the fn that reads it should lower (#594) — that is the whole point:\n{}",
+        rust.lines().filter(|l| l.contains("pick")).take(4).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// A mutable module numeric global read AND written from a lowered fn. On GBA the storage is the
+/// facade's `SingleCore<Cell<f64>>`, whose `with()` deliberately mirrors `LocalKey::with` — so the
+/// access shape the emitter already produces works unchanged.
+const NUMERIC_GLOBAL: &str = r#"
+let seed = 7
+function nextBase(): number {
+  seed = (seed * 3877 + 29573) % 139968
+  if (seed < 34992) { return 0 }
+  return 3
+}
+let acc = 0
+let k = 0
+while (k < 10) { acc = acc + nextBase(); k = k + 1 }
+console.log(acc)
+"#;
+
+#[test]
+fn a_module_numeric_global_is_reachable_from_a_lowered_fn_on_gba() {
+    let rust = compile_gba("numeric_global_gba", NUMERIC_GLOBAL);
+    // No `thread_local!` may reach a no_std target.
+    assert!(
+        !rust.contains("thread_local!"),
+        "GBA output must not contain thread_local! (no_std):\n{}",
+        rust.lines().filter(|l| l.contains("thread_local")).take(3).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        rust.contains("SingleCore") && rust.contains("Cell<f64>"),
+        "a mutable module numeric global should live in a SingleCore<Cell<f64>> static on GBA \
+         (#594):\n{}",
+        rust.lines().filter(|l| l.contains("seed") || l.contains("SingleCore")).take(5)
+            .collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        rust.contains("fn nextBase_native("),
+        "and the fn that touches it should lower (#594):\n{}",
+        rust.lines().filter(|l| l.contains("nextBase")).take(4).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// The Fixed conversions must agree with ToInt32 on SIGN, not just magnitude. An arithmetic shift
+/// (`>> 8`) floors, so a negative fixed would land one below where `as i32` puts it — -1.5 to -2
+/// rather than -1. Non-negative values agree either way, which is how such a bug ships.
+#[test]
+fn fixed_to_int_truncates_toward_zero_not_floor() {
+    let rust = compile_gba(
+        "fixed_trunc",
+        r#"
+declare fn take(n: i32): i32
+let f: fixed = 0 - 1.5
+let g: i32 = 7
+console.log(g)
+"#,
+    );
+    assert!(
+        !rust.contains(".to_raw() >> 8"),
+        "a Fixed->i32 conversion must divide (truncate toward zero), never arithmetic-shift (floor)"
+    );
+}
+
+// ── Findings from the adversarial review of the changes above ────────────────────────────────────
+
+/// A string-returning fn that can FALL OFF THE END must not lower. `vec_fn_return_kind` rejects an
+/// explicit bare `return;` but cannot see an implicit fall-through, and the lowered tail yields
+/// `String::new()` where the boxed path yields `Value::Null` — so `label(-1)` returned "" instead of
+/// null, silently, from ordinary code. `label(-1) === null` flipped true to false.
+#[test]
+fn a_partial_string_fn_does_not_lower() {
+    let rust = compile_gba(
+        "partial_string",
+        r#"
+function label(n) {
+  if (n > 0) { return "pos" }
+}
+console.log(label(-1))
+"#,
+    );
+    assert!(
+        !rust.contains("fn label_nv("),
+        "a string fn with an implicit fall-through must stay boxed — its lowered tail returns \"\" \
+         where tish returns null:\n{}",
+        rust.lines().filter(|l| l.contains("label")).take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// `===` is OVERLOADED: it compares strings as readily as numbers, so it is not proof that an
+/// operand is numeric. Treating it as arithmetic handed a string parameter the f64 ABI, which is a
+/// `panic!("expected number")` on a no_std cart.
+#[test]
+fn a_string_compared_param_does_not_get_the_f64_abi() {
+    let rust = compile_gba(
+        "string_param",
+        r#"
+function suit(tag) {
+  if (tag === "fire") { return "hearts" }
+  return "spades"
+}
+console.log(suit("fire"))
+"#,
+    );
+    assert!(
+        !rust.contains("fn suit_nv(mut tag: f64"),
+        "a param proven 'numeric' only by `=== \"fire\"` must not take the f64 ABI:\n{}",
+        rust.lines().filter(|l| l.contains("suit")).take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// A module const array must be disqualified by ANY binding of its name — a parameter, a for-of
+/// variable, a catch binding — not just a `let`. The const fast path in the Index arm is static with
+/// no scope check, so the module array was read in place of the local one: a WRONG VALUE with no
+/// diagnostic, on every target.
+#[test]
+fn a_param_shadowing_a_module_const_array_is_not_the_module_one() {
+    let rust = compile_gba(
+        "shadow_const",
+        r#"
+const T = [1, 2, 3]
+function f(T, i) { return T[i] * 2 }
+console.log(f([9, 8, 7], 0))
+"#,
+    );
+    assert!(
+        !rust.contains("const G_T:"),
+        "a name bound as a parameter anywhere must not become a module const (wrong value):\n{}",
+        rust.lines().filter(|l| l.contains("G_T")).take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// `let a = 1, b = 2` parses to `Statement::Multi`, and codegen emits each declarator into the
+/// current scope — at module level, a `run()` local. The module-binding guard must see them, or a
+/// free fn names one and the crate fails with E0425.
+#[test]
+fn multi_declared_module_bindings_are_seen_by_the_guard() {
+    let rust = compile_gba(
+        "multi_binding",
+        r#"
+const CFG = { n: 3 }, STEP = 10
+function build(raceId) {
+  let out = []
+  let i = 0
+  while (i < CFG.n) { out.push(raceId * STEP + i); i = i + 1 }
+  return out
+}
+const R = build(2)
+console.log(R.length)
+"#,
+    );
+    let mut in_nv = false;
+    let mut offenders: Vec<String> = Vec::new();
+    for line in rust.lines() {
+        if line.trim_start().starts_with("fn ") && line.contains("_nv(") {
+            in_nv = true;
+        } else if in_nv && line.starts_with('}') {
+            in_nv = false;
+        } else if in_nv && (line.contains("CFG") || line.contains("STEP")) {
+            offenders.push(line.trim().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a Multi-declared module binding leaked into a lowered fn (E0425):\n  {}",
+        offenders.join("\n  ")
+    );
+}
