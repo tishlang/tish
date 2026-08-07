@@ -647,3 +647,53 @@ fn a_use_in_an_if_condition_disqualifies_the_hoist() {
         rust
     );
 }
+
+// ── #594 residual, reported from tish-gba examples/hyrule ─────────────────────────────────────────
+//
+// Reported shape: a fn with NO PARAMS and NO RETURN that WRITES a module array, and IS CALLED. On
+// 3.3.0 that emitted the new `vm_read(&CELL)` module-scope capability without bringing the cell into
+// scope. Two facts from the report narrow it and are both encoded below:
+//   - the identical shape with NO callers compiles, because it is dead-code eliminated, so a repro
+//     MUST contain a call site;
+//   - inlining the body at the call site is a complete workaround.
+//
+// This is the `rangDone()` shape in hyrule's weapons.tish (`export function rangDone() { rangLive[0] = 0 }`),
+// which is the same `rangLive` E0425 that started this investigation.
+
+/// No params, no return, writes a module array, and — critically — is called.
+const WRITER_WITH_CALLER: &str = r#"
+let A: i32[] = [0, 0, 0]
+
+function readA(i: i32): i32 { return A[i] }
+
+function clearA() { A[0] = 0 }
+
+export function run(): i32 {
+  clearA()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn a_called_no_param_no_return_module_array_writer_compiles() {
+    let rust = compile_gba("writer_with_caller", WRITER_WITH_CALLER);
+    // The array is written, so it must NOT have been hoisted…
+    assert!(
+        !rust.contains("const G_A"),
+        "a written module array must not be hoisted:\n{}",
+        rust
+    );
+    // …and no lowered free fn may reference the boxed cell, which lives in `run()`. A free `fn`
+    // mentioning `A` is precisely the E0425 the report describes.
+    for (i, line) in rust.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("fn ") || t.starts_with("pub fn ") {
+            assert!(
+                !t.contains("clearA") || t.contains("_cell"),
+                "clearA must not be emitted as a free fn that cannot see module scope (line {}): {}",
+                i + 1,
+                t
+            );
+        }
+    }
+}
