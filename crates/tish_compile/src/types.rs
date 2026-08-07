@@ -30,6 +30,12 @@ fn gba_numerics() -> bool {
     GBA_NUMERICS.with(|c| c.get())
 }
 
+/// Public view of the same switch, for passes that must behave differently only where the extended
+/// numeric vocabulary exists — see the native-fn bitwise widening in `codegen.rs`.
+pub fn gba_numerics_enabled() -> bool {
+    gba_numerics()
+}
+
 /// Concrete Rust type representation for code generation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RustType {

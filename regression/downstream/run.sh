@@ -148,6 +148,26 @@ run_one() {
         echo "   ⚠ depends on lattish but no local workspace ($TISH/../lattish) or clone ($WORKDIR/lattish) found"
       fi
     fi
+
+    # Same treatment for @spacedevin/deck — deckard (tish-midi) grew a dependency on the deck
+    # workspace, and an isolated clone resolves it exactly the way an isolated clone resolved
+    # lattish: not at all. Wire the local workspace copy when it exists; anywhere it doesn't,
+    # say so up front rather than letting every .tish file fail resolution one by one (that
+    # failure mode showed as a 'regression' with an EMPTY error line, because the loop's
+    # per-file stderr capture had already been overwritten by the next file).
+    if [[ -f "$dir/$subdir/package.json" ]] && rg -q '"@spacedevin/deck"[[:space:]]*:' "$dir/$subdir/package.json" 2>/dev/null; then
+      local deck_src=""
+      if [[ -d "$TISH/../../deck" ]]; then deck_src="$(cd "$TISH/../.." && pwd)/deck"
+      elif [[ -d "$WORKDIR/deck" ]]; then deck_src="$WORKDIR/deck"; fi
+      if [[ -n "$deck_src" ]]; then
+        rm -rf "$dir/$subdir/node_modules/@spacedevin/deck"
+        mkdir -p "$dir/$subdir/node_modules/@spacedevin"
+        rsync -a --exclude node_modules --exclude .git "$deck_src/" "$dir/$subdir/node_modules/@spacedevin/deck/" >/dev/null 2>&1
+        echo "   wired LOCAL deck ($deck_src) -> node_modules/@spacedevin/deck"
+      else
+        echo "   ⚠ depends on @spacedevin/deck but no local workspace ($TISH/../../deck) or clone ($WORKDIR/deck) found"
+      fi
+    fi
   fi
 
   # 3. build + test
