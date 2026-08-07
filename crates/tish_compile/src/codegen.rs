@@ -17155,40 +17155,73 @@ impl Codegen {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 Self::walk_stmts_for_module_const_disqualifiers(statements, g, bad);
             }
+            // EVERY child expression has to be visited, not just the sub-statements. These arms used
+            // to walk only the bodies, so a use in a loop or branch CONDITION was invisible — which
+            // is how `while (i < SB_FORCE.length)` (card-gba qb-engine.tish) kept an array eligible
+            // for hoisting even though `.length` is a disqualifying member use. Same defect class as
+            // the missing closure arm below: the walker's silence meant "safe", not "absent".
             Statement::If {
+                cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
+                Self::walk_expr_for_module_const_disqualifiers(cond, g, bad);
                 Self::walk_stmt_for_module_const_disqualifiers(then_branch, g, bad);
                 if let Some(eb) = else_branch {
                     Self::walk_stmt_for_module_const_disqualifiers(eb, g, bad);
                 }
             }
-            Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(cond, g, bad);
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
-            Statement::For { init, body, .. } => {
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     Self::walk_stmt_for_module_const_disqualifiers(i, g, bad);
                 }
+                if let Some(c) = cond {
+                    Self::walk_expr_for_module_const_disqualifiers(c, g, bad);
+                }
+                if let Some(u) = update {
+                    Self::walk_expr_for_module_const_disqualifiers(u, g, bad);
+                }
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
-            Statement::ForOf { body, .. }
-            | Statement::ForIn { body, .. } => {
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
+                Self::walk_expr_for_module_const_disqualifiers(iterable, g, bad);
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
             Statement::Switch {
+                expr,
                 cases,
                 default_body,
                 ..
             } => {
-                for (_, stmts) in cases {
+                Self::walk_expr_for_module_const_disqualifiers(expr, g, bad);
+                for (case_expr, stmts) in cases {
+                    if let Some(e) = case_expr {
+                        Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                    }
                     Self::walk_stmts_for_module_const_disqualifiers(stmts, g, bad);
                 }
                 if let Some(stmts) = default_body {
                     Self::walk_stmts_for_module_const_disqualifiers(stmts, g, bad);
                 }
+            }
+            Statement::Throw { value, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(value, g, bad);
             }
             Statement::Try {
                 body,
@@ -17220,8 +17253,30 @@ impl Codegen {
                     Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
                 }
             }
-            _ => {}
+            // CONSERVATIVE DEFAULT. This walker decides whether it is safe to move an array into a
+            // `const`, so "I do not model this statement" must mean "refuse", never "permit" — the
+            // old `_ => {}` meant the latter, and a wrong permit is a program that does not compile.
+            // Over-rejecting only costs the hoist; under-rejecting cost four ROMs their build.
+            s => {
+                if Self::stmt_mentions_ident(s, g) {
+                    *bad = true;
+                }
+            }
         }
+    }
+
+    /// Complete-traversal membership test, used as the safe fallback by both walkers above.
+    fn stmt_mentions_ident(s: &Statement, g: &str) -> bool {
+        let mut idents = HashSet::new();
+        Self::collect_stmt_idents(s, &mut idents);
+        idents.contains(g)
+    }
+
+    /// As `stmt_mentions_ident`, for an expression subtree.
+    fn expr_mentions_ident(e: &Expr, g: &str) -> bool {
+        let mut idents = HashSet::new();
+        Self::collect_expr_idents(e, &mut idents);
+        idents.contains(g)
     }
 
     fn walk_expr_for_module_const_disqualifiers(e: &Expr, g: &str, bad: &mut bool) {
@@ -17334,7 +17389,68 @@ impl Codegen {
                     }
                 }
             }
-            _ => {}
+            // Everything below was missing, and the omission is what made this pass unsafe: an
+            // admission check whose walker reports "no disqualifying use" for a shape it does not
+            // recognise is silently permissive. `ArrowFunction` was the expensive one — every use
+            // inside a CLOSURE landed in `_ => {}`, so an array a closure writes got hoisted to a
+            // `const` anyway. Reads then renamed to `G_X` while the write kept the boxed local, and
+            // that local is declared after the closure: rustc reports `cannot find value` on a name
+            // the game never misspelled (card-gba queensblood/triad/gwent; tish-gba hyrule's
+            // `rangLive`). Renaming the write would not have been a fix either — a `const` cannot be
+            // assigned through, so a written array must not be hoisted at all. The sibling scalar
+            // walker has always had these arms; this one is a copy that lost them.
+            //
+            // Indexing stays deliberately absent from the disqualifier list: `X[i]` is the whole
+            // point of the hoist, so descending here must not become "any closure mention kills it",
+            // which would give back the #594 reachability this pass exists to provide.
+            Expr::ArrowFunction { body, .. } => match body {
+                ArrowBody::Expr(e) => Self::walk_expr_for_module_const_disqualifiers(e, g, bad),
+                ArrowBody::Block(s) => Self::walk_stmt_for_module_const_disqualifiers(s, g, bad),
+            },
+            // A write to a member of the const, by the same rule the `Member` arm above uses.
+            Expr::MemberAssign { object, value, .. } => {
+                if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
+                    *bad = true;
+                } else {
+                    Self::walk_expr_for_module_const_disqualifiers(object, g, bad);
+                }
+                Self::walk_expr_for_module_const_disqualifiers(value, g, bad);
+            }
+            Expr::Delete { target, .. }
+                if matches!(target.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) =>
+            {
+                *bad = true;
+            }
+            // The remaining shapes need no special rule: a bare mention of the name is already
+            // disqualifying via the `Ident` arm, so plain descent is sufficient.
+            Expr::New { callee, args, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(callee, g, bad);
+                for a in args {
+                    if let CallArg::Expr(e) | CallArg::Spread(e) = a {
+                        Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                    }
+                }
+            }
+            Expr::NullishCoalesce { left, right, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(left, g, bad);
+                Self::walk_expr_for_module_const_disqualifiers(right, g, bad);
+            }
+            Expr::TypeOf { operand, .. } => {
+                Self::walk_expr_for_module_const_disqualifiers(operand, g, bad);
+            }
+            Expr::TemplateLiteral { exprs, .. } => {
+                for e in exprs {
+                    Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
+                }
+            }
+            // CONSERVATIVE DEFAULT — see the statement walker. An expression shape this match does
+            // not model (today: `Await`, `JsxElement`, and anything the AST gains later) disqualifies
+            // if the name appears anywhere beneath it, rather than being waved through.
+            other => {
+                if Self::expr_mentions_ident(other, g) {
+                    *bad = true;
+                }
+            }
         }
     }
 

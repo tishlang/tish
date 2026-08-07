@@ -485,3 +485,165 @@ console.log(R.length)
         offenders.join("\n  ")
     );
 }
+
+// ── #48/#52-follow-up: the module-const-array hoist was blind to closures ─────────────────────────
+//
+// `collect_module_const_f64_arrays` hoists a module-level numeric array to a top-level
+// `const G_X: [f64; N]` so a LOWERED fn can reach it (that reachability is the whole point of #594).
+// Admission is supposed to reject any array that is written, or used as a value/member, because a
+// `const` is neither mutable nor addressable. The admission walker checks all of that — but its
+// expression arm had no `ArrowFunction` case, so every use inside a CLOSURE fell into `_ => {}` and
+// was invisible. The sibling scalar pass (`walk_expr_for_global_disqualifiers`) has always had that
+// arm; this walker is a copy that lost it.
+//
+// Net effect once the pass was enabled on GBA: an array that a closure writes got hoisted anyway.
+// The read side renamed to `G_X`, the write side kept the boxed local, and the boxed local is
+// declared *after* the closure — so rustc reports `cannot find value` on a name the game never
+// misspelled. Reported against card-gba (queensblood/triad/gwent) and reproduced independently by
+// tish-gba `examples/hyrule` (`rangLive`, weapons.tish).
+//
+// The trigger needs all three ingredients: a module numeric array, a typed top-level fn that reads
+// it (that is what nominates it for hoisting), and a write from inside a closure.
+
+/// The reported repro, reduced. Before the fix this emitted `const G_A: [f64; 3]` plus a write
+/// through a bare `A`, and rustc rejected it with E0425.
+const CLOSURE_WRITE: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let bump = () => { A[0] = A[0] + 1 }
+  bump()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn module_array_written_in_closure_is_not_hoisted_to_const() {
+    let rust = compile_gba("closure_write", CLOSURE_WRITE);
+    // The array is written, so it must stay a runtime binding: no const hoist at all. Renaming the
+    // write site would not be enough — a `const` cannot be assigned through.
+    assert!(
+        !rust.contains("const G_A"),
+        "a module array written from a closure must not be hoisted to a const:\n{}",
+        rust
+    );
+    // And the generated program must not reference a hoisted name it never declared.
+    assert!(
+        !rust.contains("G_A["),
+        "no read may be renamed to a hoist that does not exist:\n{}",
+        rust
+    );
+}
+
+/// The second missed case from the same report: `.length` lowers to `.len()`, which is a member use
+/// the walker already rejects — it was just unreachable inside a closure. A hoist here emitted
+/// `A.len()` against a name not in scope.
+const CLOSURE_LENGTH: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let count = () => { return A.length }
+  return readA(0) + count()
+}
+"#;
+
+#[test]
+fn module_array_member_used_in_closure_is_not_hoisted_to_const() {
+    let rust = compile_gba("closure_length", CLOSURE_LENGTH);
+    assert!(
+        !rust.contains("const G_A"),
+        "a module array whose `.length` a closure reads must not be hoisted:\n{}",
+        rust
+    );
+}
+
+/// The win must survive: a read-only array indexed from a closure is still a legal hoist, because
+/// the Index arm deliberately does not count `X[i]` as a disqualifying use of `X`. Without this the
+/// fix would be a blanket "any closure mention disables hoisting" and would give back #594.
+const CLOSURE_READ_ONLY: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let pick = () => { return A[1] }
+  return readA(0) + pick()
+}
+"#;
+
+#[test]
+fn read_only_module_array_still_hoists_when_a_closure_indexes_it() {
+    let rust = compile_gba("closure_read_only", CLOSURE_READ_ONLY);
+    assert!(
+        rust.contains("G_A"),
+        "a read-only module array must still hoist — that reachability is #594:\n{}",
+        rust
+    );
+}
+
+/// Not a gate — a probe that prints the emitted representation of a hoisted `i32[]` on GBA, so the
+/// f64-on-a-CPU-with-no-FPU question can be answered from generated code rather than assumption.
+#[test]
+#[ignore]
+fn probe_hoisted_array_representation() {
+    let rust = compile_gba("probe_repr", CLOSURE_READ_ONLY);
+    for line in rust.lines() {
+        if line.contains("G_A") {
+            println!("{}", line.trim());
+        }
+    }
+}
+
+/// The SECOND hole, found only because the first fix left queensblood at 4 errors instead of 12: the
+/// statement walker visited loop and branch BODIES but not their CONDITIONS. `.length` is a member
+/// use the walker already rejects — it was simply never reached in `while (i < X.length)`, which is
+/// how card-gba's `SB_FORCE`/`SB_PRE`/`TN_REWARD` (exported `i32[]` in qb-catalog.tish, consumed by
+/// qb-engine.tish:567 and main.tish:297) stayed eligible and hoisted.
+const COND_LENGTH: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let i: i32 = 0
+  let n: i32 = 0
+  while (i < A.length) { n = n + readA(i); i = i + 1 }
+  return n
+}
+"#;
+
+#[test]
+fn a_use_in_a_loop_condition_disqualifies_the_hoist() {
+    let rust = compile_gba("cond_length", COND_LENGTH);
+    assert!(
+        !rust.contains("const G_A"),
+        "`.length` in a while-condition is a member use and must block the hoist:\n{}",
+        rust
+    );
+}
+
+/// Same shape, in an `if` condition — that arm had the identical omission.
+const IF_COND: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  if (A.length > 2) { return readA(0) }
+  return 0
+}
+"#;
+
+#[test]
+fn a_use_in_an_if_condition_disqualifies_the_hoist() {
+    let rust = compile_gba("if_cond", IF_COND);
+    assert!(
+        !rust.contains("const G_A"),
+        "`.length` in an if-condition must block the hoist:\n{}",
+        rust
+    );
+}
