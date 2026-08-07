@@ -999,6 +999,10 @@ pub(crate) enum VecRetKind {
     F64,
     Unit,
     VecF64,
+    /// #605. Every `return` yields a string, so the fn can be a native `-> String` instead of a
+    /// boxed closure. OWNED, not `&str`: a returned string outlives the frame that built it, and a
+    /// borrow would need a lifetime the generated free fn has nowhere to name.
+    Str,
 }
 
 #[derive(Debug, Clone)]
@@ -6544,6 +6548,24 @@ impl Codegen {
                                         None,
                                     ));
                                 }
+                            }
+                        }
+                        VecRetKind::Str => {
+                            // #605. The body's own `return "…"`, emitted as an OWNED String so it
+                            // can leave the fn. `emit_typed_expr` already yields a `String` for a
+                            // string literal; anything else is converted rather than assumed,
+                            // because a wrong guess here is a type error in the emitted crate.
+                            let e = value.as_ref().ok_or_else(|| {
+                                CompileError::new("native-vec string fn: empty return", None)
+                            })?;
+                            let (c, ty) = self.emit_typed_expr(e)?;
+                            if ty == RustType::String {
+                                self.writeln(&format!("return {};", c));
+                            } else {
+                                self.writeln(&format!(
+                                    "return {};",
+                                    RustType::String.from_value_expr(&c)
+                                ));
                             }
                         }
                         VecRetKind::Unit => {
@@ -19986,7 +20008,13 @@ impl Codegen {
                         .params
                         .iter()
                         .any(|(_, k)| matches!(k, VecParamKind::Array { .. }));
-                    if has_array_param || Self::body_uses_local_vec_ops(body) {
+                    // #605: a scalars-in/STRING-out fn has neither an array parameter nor a
+                    // local vec op, so it never reached this group and stayed a boxed closure —
+                    // which is what "VecRetKind has no String" amounts to in practice. The return
+                    // shape earns admission on its own: `vec_fn_return_kind` only says `Str` when
+                    // EVERY return is a string, so there is one native signature to write.
+                    let string_out = sig.ret == VecRetKind::Str;
+                    if has_array_param || Self::body_uses_local_vec_ops(body) || string_out {
                         sigs.insert(name.to_string(), sig);
                     }
                 }
@@ -21028,6 +21056,17 @@ impl Codegen {
         {
             return Some(VecRetKind::F64);
         }
+        // #605: EVERY return a string literal. Held to the same standard as the numeric arm above —
+        // agreement across all returns, proven from the expressions, never from the annotation,
+        // because a return type is erased and unchecked (the `liar()` case). A mixed
+        // string-and-number fn falls through to `None` and stays boxed, which is the only shape a
+        // single native signature cannot express.
+        if ret_exprs
+            .iter()
+            .all(|e| matches!(e, Expr::Literal { value: Literal::String(_), .. }))
+        {
+            return Some(VecRetKind::Str);
+        }
         None
     }
 
@@ -21350,6 +21389,7 @@ impl Codegen {
         match sig.ret {
             VecRetKind::F64 => Some(RustType::F64),
             VecRetKind::VecF64 => Some(RustType::Vec(Box::new(RustType::F64))),
+            VecRetKind::Str => Some(RustType::String),
             VecRetKind::Unit => None,
         }
     }
@@ -21388,6 +21428,7 @@ impl Codegen {
         let ret_str = match sig.ret {
             VecRetKind::F64 => " -> f64",
             VecRetKind::VecF64 => " -> Vec<f64>",
+            VecRetKind::Str => " -> String",
             VecRetKind::Unit => "",
         };
         self.writeln("#[allow(non_snake_case, unused)]");
@@ -21450,6 +21491,11 @@ impl Codegen {
         // Total function: a value-returning fn that falls off the end gets a default.
         if sig.ret == VecRetKind::F64 {
             self.writeln("0.0");
+        }
+        // Same total-function guarantee for the string arm: falling off the end yields "" rather
+        // than leaving the emitted fn without a value on that path.
+        if sig.ret == VecRetKind::Str {
+            self.writeln("String::new()");
         }
         self.native_vec_ret = saved_ret;
         self.vec_ref_params = saved_refs;
@@ -21537,6 +21583,13 @@ impl Codegen {
                         "Value::Array(VmRef::new({}.iter().map(|&v| Value::Number(v)).collect()))",
                         call
                     )
+                } else {
+                    call
+                }
+            }
+            VecRetKind::Str => {
+                if as_value {
+                    format!("Value::String(({}).into())", call)
                 } else {
                     call
                 }
@@ -24849,6 +24902,7 @@ impl Codegen {
                                 let ty = match sig.ret {
                                     VecRetKind::F64 => RustType::F64,
                                     VecRetKind::VecF64 => RustType::Vec(Box::new(RustType::F64)),
+                                    VecRetKind::Str => RustType::String,
                                     VecRetKind::Unit => RustType::Value,
                                 };
                                 return Ok((code, ty));

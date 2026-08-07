@@ -87,34 +87,37 @@ fn fixed_extern_result_coerces_at_a_lowered_call_site() {
 /// never wrote. The lowered fn's parameters vanish as far as the module scope is concerned, and a
 /// hoisted capture of the same name then has nothing to bind to.
 const PKG: &str = r#"
-let sink: i32 = 0
-export function makeEntity() {
-  let obj = { id: 1 }
-  obj.setVy = (v) => { sink = sink + v }
-  obj.moveSpeed = (v) => { sink = sink + v * 2 }
+let acc: i32 = 0
+export function makeEntity(id: i32) {
+  let obj = { id: id }
+  obj.setVy = (v) => { acc = acc + v }
+  obj.moveSpeed = (v) => { acc = acc + v * 2 }
+  obj.hurt = (v) => { acc = acc - v }
   return obj
 }
-export function sunk(): i32 { return sink }
+export function total(): i32 { return acc }
 "#;
 
 const PARAM_COLLISION: &str = r#"
-import { makeEntity, sunk } from './pkg'
+import { makeEntity, total } from './pkg'
 
 function roomBase(v: i32, size: i32): i32 { return v - (v % size) }
 
-let e = makeEntity()
+let e = makeEntity(1)
 e.setVy(3)
-console.log(roomBase(37, 16) + sunk())
+e.moveSpeed(4)
+console.log(roomBase(37, 16) + total())
 "#;
 
 #[test]
 fn a_lowered_fn_param_is_not_hoisted_into_a_capture_list() {
     let rust = compile_gba_multi("param_collision", PARAM_COLLISION, &[("pkg.tish", PKG)]);
 
+    // Must actually LOWER, or the collision this guards cannot arise and the test proves nothing.
     assert!(
-        rust.contains("roomBase") ,
-        "fixture must actually emit roomBase:\n{}",
-        &rust[..rust.len().min(400)]
+        rust.contains("fn roomBase_native(mut v: i32"),
+        "roomBase should lower with the i32 ABI — otherwise this test is vacuous:\n{}",
+        rust.lines().filter(|l| l.contains("roomBase")).take(4).collect::<Vec<_>>().join("\n")
     );
 
     // `v` is an arrow PARAMETER and a lowered fn's parameter. Neither is a module binding, so no
@@ -230,5 +233,56 @@ fn a_lowered_vec_fn_never_references_module_scope() {
          (#594) — {} line(s):\n  {}",
         offenders.len(),
         offenders.join("\n  ")
+    );
+}
+
+// ── #605: VecRetKind has no String, so a string-returning fn cannot lower ────────────────────────
+
+/// Scalars in, STRING out. Correct today but boxed: the fn becomes a `Value::native` closure in a
+/// `VmRef` cell and every call is a `value_call`. `VecRetKind` only spoke `{F64, VecF64, Unit}`, so
+/// there was no shape for it to lower into.
+///
+/// Every return here is a string literal — the same standard the numeric path holds itself to
+/// (`vec_fn_return_kind` proves EVERY return agrees on one shape, never trusting the annotation,
+/// because a return type is erased and unchecked: the `liar()` case).
+const STRING_OUT: &str = r#"
+function label(n: i32): string {
+  if (n === 0) { return "zero" }
+  if (n === 1) { return "one" }
+  return "many"
+}
+let s: string = label(2)
+console.log(s)
+"#;
+
+#[test]
+fn a_string_returning_fn_lowers_to_a_native_fn() {
+    let rust = compile_gba("string_out", STRING_OUT);
+    assert!(
+        rust.contains("fn label_nv(") && rust.contains("-> String"),
+        "a scalars-in/string-out fn should lower to a native `-> String` fn (#605), got:\n{}",
+        rust.lines().filter(|l| l.contains("label")).take(5).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// The guard that keeps #605 sound. A fn whose returns do NOT all agree on `String` must stay
+/// boxed — mixing a string and a number is exactly the shape a single native signature cannot
+/// express, and guessing costs a miscompile rather than a slow path.
+const MIXED_OUT: &str = r#"
+function maybe(n: i32) {
+  if (n === 0) { return "zero" }
+  return n * 2
+}
+console.log(maybe(1))
+console.log(maybe(0))
+"#;
+
+#[test]
+fn a_mixed_string_number_return_stays_boxed() {
+    let rust = compile_gba("mixed_out", MIXED_OUT);
+    assert!(
+        !rust.contains("fn maybe_nv("),
+        "a fn returning both a string and a number must NOT lower (#605 soundness):\n{}",
+        rust.lines().filter(|l| l.contains("maybe_nv")).take(3).collect::<Vec<_>>().join("\n")
     );
 }
