@@ -19240,7 +19240,20 @@ impl Codegen {
                         self.skip_iter_local = Some(iter);
                     }
                 }
-                self.emit_statements_with_folds(statements)?;
+                // A NATIVE FN BODY IS A SCOPE, and it has to say so. `VarDecl` registers every
+                // name it emits into `outer_vars_stack.last_mut()`; without a frame of its own,
+                // a native fn's locals land in the MODULE frame — where they do not exist, because
+                // the body was emitted inside `fn name_native(..)` at top level. Any later closure
+                // referencing a same-named local of its own then sees the phantom in `outer_vars`
+                // and emits `let i_cell = VmRef::new(i.clone());` against nothing: E0425, 49 of the
+                // 114 tish-gba examples, every one of them with an `i` or `b` loop counter.
+                //
+                // The boxed FunDecl path has always pushed here (both of its arms do); this path
+                // was written without one and only became reachable when M5 was enabled for GBA.
+                self.outer_vars_stack.push(Vec::new());
+                let r = self.emit_statements_with_folds(statements);
+                self.outer_vars_stack.pop();
+                r?;
                 if self.pending_stayed_var.is_none() {
                     self.skip_iter_local = None;
                 }
