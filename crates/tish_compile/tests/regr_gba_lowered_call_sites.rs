@@ -310,8 +310,14 @@ console.log(R.length)
 #[test]
 fn a_module_const_array_is_reachable_from_a_lowered_fn_on_gba() {
     let rust = compile_gba("const_array_gba", CONST_ARRAY_READ);
+    // Element type is deliberately NOT pinned here — this test is about REACHABILITY (#594), and an
+    // all-integer table is now expected to hoist as `[i32; 8]` on GBA. The representation itself is
+    // pinned by `an_integral_module_const_array_is_emitted_as_i32_on_gba`.
     assert!(
-        rust.contains("const G_TABLE: [f64; 8]") || rust.contains("const G_table: [f64; 8]"),
+        rust.contains("const G_TABLE: [i32; 8]")
+            || rust.contains("const G_TABLE: [f64; 8]")
+            || rust.contains("const G_table: [i32; 8]")
+            || rust.contains("const G_table: [f64; 8]"),
         "a module const numeric array should get a top-level `const` on GBA (#594):\n{}",
         rust.lines().filter(|l| l.contains("TABLE")).take(4).collect::<Vec<_>>().join("\n")
     );
@@ -585,16 +591,61 @@ fn read_only_module_array_still_hoists_when_a_closure_indexes_it() {
     );
 }
 
-/// Not a gate — a probe that prints the emitted representation of a hoisted `i32[]` on GBA, so the
-/// f64-on-a-CPU-with-no-FPU question can be answered from generated code rather than assumption.
+// ── GBA representation: the hoist must not carry the host's f64 onto a CPU with no FPU ───────────
+//
+// ARM7TDMI has no hardware float. Hoisting `let A: i32[] = [1,2,3]` to `const G_A: [f64; 3]` cost
+// 8 bytes per element instead of 4, an `i32 -> f64 -> usize` round trip on every index, and an
+// `f64::NAN` out-of-range sentinel — while DISCARDING the element type the source had already
+// declared. These pin the integer representation.
+
 #[test]
-#[ignore]
-fn probe_hoisted_array_representation() {
-    let rust = compile_gba("probe_repr", CLOSURE_READ_ONLY);
-    for line in rust.lines() {
-        if line.contains("G_A") {
-            println!("{}", line.trim());
-        }
+fn an_integral_module_const_array_is_emitted_as_i32_on_gba() {
+    let rust = compile_gba("repr_int", CLOSURE_READ_ONLY);
+    assert!(
+        rust.contains("const G_A: [i32; 3]"),
+        "an all-integer module const array must hoist as [i32; N], not [f64; N]:\n{}",
+        rust
+    );
+    assert!(
+        !rust.contains("const G_A: [f64; 3]"),
+        "the f64 representation must be gone:\n{}",
+        rust
+    );
+}
+
+/// Non-integral values still need f64 — the narrowing is value-driven, not blanket.
+const FRACTIONAL: &str = r#"
+let P: number[] = [0.25, 0.5, 0.25]
+
+function readP(i: i32): number { return P[i] }
+
+export function run(): number {
+  let pick = () => { return P[1] }
+  return readP(0) + pick()
+}
+"#;
+
+#[test]
+fn a_fractional_module_const_array_stays_f64() {
+    let rust = compile_gba("repr_frac", FRACTIONAL);
+    assert!(
+        rust.contains("const G_P: [f64; 3]"),
+        "a fractional array must keep f64 — narrowing it would change its values:\n{}",
+        rust
+    );
+}
+
+/// The out-of-range read still has to answer NaN. There is no `i32` meaning "absent", so the
+/// bounds-checked form widens rather than inventing a sentinel that would read as a real element.
+#[test]
+fn an_unproven_index_still_answers_nan() {
+    let rust = compile_gba("repr_int", CLOSURE_READ_ONLY);
+    if rust.contains("f64::NAN") {
+        assert!(
+            rust.contains("as f64"),
+            "an i32-backed out-of-range read must widen before yielding NaN:\n{}",
+            rust
+        );
     }
 }
 

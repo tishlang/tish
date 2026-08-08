@@ -1102,6 +1102,18 @@ pub(crate) struct Codegen {
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
     /// for direct indexing from native fns (fasta `codes`/`probs`).
     module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
+    /// The STATIC names from `module_const_f64_arrays` whose every element is an exact integer in
+    /// `i32` range, so the hoist emits `[i32; N]` instead of `[f64; N]`.
+    ///
+    /// ARM7TDMI HAS NO FPU. These passes were written for the host, where `f64` is tish's number and
+    /// the representation is free; on GBA every `f64` touch is a soft-float call and every element
+    /// costs 8 bytes instead of 4. Worse, the source usually declares the element type — hoisting
+    /// `let A: i32[] = [1,2,3]` to `[f64; 3]` discards a type the program already stated, then pays
+    /// an `i32 -> f64 -> usize` round trip on each index to get back to where it started.
+    ///
+    /// Keyed by static name, not source name, so every read site (including the `_cum` aliases) can
+    /// ask the question with what it already has in hand.
+    module_const_int_statics: std::collections::HashSet<String>,
     /// Precomputed cumulative arrays for `module_const_f64_arrays` used as `cumulative(p)` input
     /// (`probs` → `G_probs_cum`).
     module_const_f64_cum: std::collections::HashMap<String, String>,
@@ -1383,6 +1395,7 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
+            module_const_int_statics: std::collections::HashSet::new(),
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
             map_instance_locals: std::collections::HashSet::new(),
@@ -3181,6 +3194,23 @@ impl Codegen {
                 &program.statements,
                 &self.module_const_f64_cum,
             );
+            // Pick the integer representation where the values allow it. GBA only: off-target the
+            // `f64` layout is free and eligibility must stay byte-identical to before.
+            //
+            // A `_cum` array is deliberately NOT considered — the fasta ladder that consumes one
+            // compares it against an `r_f64` and is specialised around f64 arms, so leaving cum
+            // alone keeps that path untouched.
+            if self.emit_mode == crate::NativeEmitMode::Gba {
+                for (name, vals) in &self.module_const_f64_arrays {
+                    if vals
+                        .iter()
+                        .all(|v| v.fract() == 0.0 && *v >= i32::MIN as f64 && *v <= i32::MAX as f64)
+                    {
+                        self.module_const_int_statics
+                            .insert(Self::module_const_static(name));
+                    }
+                }
+            }
             if !self.module_const_f64_arrays.is_empty() {
                 self.emit_module_const_f64_arrays()?;
                 self.writeln("");
@@ -5904,12 +5934,22 @@ impl Codegen {
                     return Ok(());
                 }
 
-                // Module-level const f64 arrays — no local slot in `run()`.
+                // Module-level const numeric arrays — no local slot in `run()`. The element type
+                // must match the emitted representation, or a consumer reading the type context
+                // coerces against a layout that is not there.
                 if self.module_const_f64_arrays.contains_key(name.as_ref())
                     && self.outer_vars_stack.len() == 1
                 {
+                    let elem = if self
+                        .module_const_int_statics
+                        .contains(&Self::module_const_static(name.as_ref()))
+                    {
+                        RustType::I32
+                    } else {
+                        RustType::F64
+                    };
                     self.type_context
-                        .define(name.as_ref(), RustType::Vec(Box::new(RustType::F64)));
+                        .define(name.as_ref(), RustType::Vec(Box::new(elem)));
                     return Ok(());
                 }
 
@@ -7954,7 +7994,7 @@ impl Codegen {
                     ));
                 }
                 if let Some(static_name) = self.module_const_f64_array_rust_ref(name.as_ref()) {
-                    let v = Self::module_const_f64_array_as_value(&static_name);
+                    let v = self.module_const_f64_array_as_value(&static_name);
                     return Ok(if self.value_fn_depth > 0 || !self.loop_stack.is_empty() {
                         format!("({}).clone()", v)
                     } else {
@@ -16798,7 +16838,15 @@ impl Codegen {
                 {
                     let sum_esc = Self::escape_ident(sum_name.as_ref());
                     let arms: Vec<String> = (0..n)
-                        .map(|i| format!("{} => {}[{}]", i, codes_static, i))
+                        // The fasta ladder is specialised around f64 arms, so an integer-represented
+                        // codes array widens here rather than perturbing that path.
+                        .map(|i| {
+                            if self.module_const_int_statics.contains(codes_static.as_str()) {
+                                format!("{} => {}[{}] as f64", i, codes_static, i)
+                            } else {
+                                format!("{} => {}[{}]", i, codes_static, i)
+                            }
+                        })
                         .collect();
                     self.writeln(&format!(
                         "{} = (({} + match ({} as usize) {{ {}, _ => 0.0 }}) % 2147483647_f64);",
@@ -17200,7 +17248,15 @@ impl Codegen {
                 body,
                 ..
             } => {
-                Self::walk_expr_for_module_const_disqualifiers(iterable, g, bad);
+                // ITERATING THE ARRAY IS A SUPPORTED USE, not a disqualifying one: `for (x of X)`
+                // lowers to a native index loop over the hoisted static (`for _fof_i0 in
+                // 0..G_X.len()`), so the name never survives into the output. Walking the iterable
+                // unconditionally would see a bare `Ident` and refuse the hoist, which loses the
+                // very optimisation the pass exists for (tests/core/typed_array_forof.tish).
+                // Anything else in iterable position is walked normally.
+                if !matches!(iterable, Expr::Ident { name, .. } if name.as_ref() == g) {
+                    Self::walk_expr_for_module_const_disqualifiers(iterable, g, bad);
+                }
                 Self::walk_stmt_for_module_const_disqualifiers(body, g, bad);
             }
             Statement::Switch {
@@ -17336,9 +17392,22 @@ impl Codegen {
                     callee.as_ref(),
                     Expr::Ident { name, .. } if name.as_ref() == "cumulative"
                 );
+                // A METHOD CALL ON THE ARRAY IS SUPPORTED: `X.join(", ")` emits the object through
+                // the `Value` bridge (`NumArrayBacking::Packed(G_X…)`), so the local name does not
+                // survive. Disqualifying it — which the `Member` arm below would do — costs the
+                // hoist for no reason (tests/core/template_literals.tish).
+                //
+                // This does NOT extend to a member READ such as `X.length`: that lowers to a bare
+                // `X.len()` with no rewrite, which is exactly one of the two shapes that broke the
+                // ROMs. The `Member` arm still rejects those.
+                let member_call_on_g = matches!(
+                    callee.as_ref(),
+                    Expr::Member { object, .. }
+                        if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g)
+                );
                 if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
                     *bad = true;
-                } else {
+                } else if !member_call_on_g {
                     Self::walk_expr_for_module_const_disqualifiers(callee, g, bad);
                 }
                 for (i, a) in args.iter().enumerate() {
@@ -17634,15 +17703,41 @@ impl Codegen {
         )
     }
 
-    fn module_const_f64_array_as_value(static_name: &str) -> String {
+    /// The boxed bridge. `NumArrayBacking::Packed` is a `Vec<f64>`, so an `[i32; N]` hoist widens on
+    /// the way out — this is the escape hatch where the array is handed to code that wants a
+    /// `Value`, and it is a whole-array copy either way.
+    fn module_const_f64_array_as_value(&self, static_name: &str) -> String {
+        let elems = if self.module_const_int_statics.contains(static_name) {
+            format!("{}.iter().map(|v| *v as f64)", static_name)
+        } else {
+            format!("{}.iter().copied()", static_name)
+        };
         format!(
-            "Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed({}.iter().copied().collect::<Vec<f64>>())))",
-            static_name
+            "Value::NumberArray(VmRef::new(tishlang_runtime::NumArrayBacking::Packed({}.collect::<Vec<f64>>())))",
+            elems
         )
     }
 
     fn emit_module_const_f64_arrays(&mut self) -> Result<(), CompileError> {
         for (name, vals) in self.module_const_f64_arrays.clone() {
+            let static_name = Self::module_const_static(name.as_str());
+            // `[i32; N]` where the values permit it — half the ROM, and reads that stay in the
+            // integer domain instead of round-tripping through soft float. See the field comment on
+            // `module_const_int_statics`.
+            if self.module_const_int_statics.contains(&static_name) {
+                let lit = vals
+                    .iter()
+                    .map(|v| format!("{}", *v as i32))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.writeln(&format!(
+                    "const {}: [i32; {}] = [{}];",
+                    static_name,
+                    vals.len(),
+                    lit
+                ));
+                continue;
+            }
             let lit = vals
                 .iter()
                 .map(|v| Self::f64_lit(*v))
@@ -17650,7 +17745,7 @@ impl Codegen {
                 .join(", ");
             self.writeln(&format!(
                 "const {}: [f64; {}] = [{}];",
-                Self::module_const_static(name.as_str()),
+                static_name,
                 vals.len(),
                 lit
             ));
@@ -24978,33 +25073,47 @@ impl Codegen {
                                     iv
                                 )
                             };
-                            let access = if in_bounds {
-                                format!("{}[{}]", static_name, idx_usize)
+                            let is_int = self.module_const_int_statics.contains(&static_name);
+                            // The proven-in-bounds read on an integer array is the whole point: a
+                            // plain word load, reported as I32 so the consumer stays in the integer
+                            // domain instead of converting back and forth through f64.
+                            if in_bounds {
+                                let access = format!("{}[{}]", static_name, idx_usize);
+                                return Ok((
+                                    access,
+                                    if is_int { RustType::I32 } else { RustType::F64 },
+                                ));
+                            }
+                            let const_len = self
+                                .cum_static_and_len(name.as_ref())
+                                .map(|(_, n)| n)
+                                .or_else(|| {
+                                    self.module_const_f64_arrays
+                                        .get(name.as_ref())
+                                        .map(|v| v.len())
+                                })
+                                .unwrap_or(0);
+                            // OUT-OF-RANGE STAYS f64. An unproven index still has to be able to
+                            // answer `NaN`, and there is no `i32` that means "absent" — picking a
+                            // sentinel here would silently turn a missing element into a real value.
+                            // So the bounds-checked form keeps today's exact semantics and only the
+                            // STORAGE narrows; the integer win is claimed above, where the index is
+                            // proven and no sentinel is reachable.
+                            let elem = if is_int {
+                                format!("{}[_i] as f64", static_name)
                             } else {
-                                let const_len = self
-                                    .cum_static_and_len(name.as_ref())
-                                    .map(|(_, n)| n)
-                                    .or_else(|| {
-                                        self.module_const_f64_arrays
-                                            .get(name.as_ref())
-                                            .map(|v| v.len())
-                                    })
-                                    .unwrap_or(0);
-                                if const_len > 0 {
-                                    format!(
-                                        "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ f64::NAN }} }}",
-                                        idx_usize,
-                                        const_len,
-                                        static_name
-                                    )
-                                } else {
-                                    format!(
-                                        "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
-                                        idx_usize,
-                                        static_name,
-                                        static_name
-                                    )
-                                }
+                                format!("{}[_i]", static_name)
+                            };
+                            let access = if const_len > 0 {
+                                format!(
+                                    "{{ let _i = {}; if _i < {} {{ {} }} else {{ f64::NAN }} }}",
+                                    idx_usize, const_len, elem
+                                )
+                            } else {
+                                format!(
+                                    "{{ let _i = {}; if _i < {}.len() {{ {} }} else {{ f64::NAN }} }}",
+                                    idx_usize, static_name, elem
+                                )
                             };
                             return Ok((access, RustType::F64));
                         }
