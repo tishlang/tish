@@ -748,3 +748,90 @@ fn a_called_no_param_no_return_module_array_writer_compiles() {
         }
     }
 }
+
+// ── #600: `let s: string = strArr[i]` moves out of the Vec ────────────────────────────────────────
+const STR_ELEM_BIND: &str = r#"
+let NAMES: string[] = ["alpha", "beta"]
+
+export function show(i: i32): string {
+  let name: string = NAMES[i]
+  return name
+}
+"#;
+
+#[test]
+fn binding_a_string_element_clones_instead_of_moving() {
+    let rust = compile_gba("str_elem_bind", STR_ELEM_BIND);
+    let bad = rust.lines().any(|l| {
+        let t = l.trim();
+        t.contains("= NAMES[") && !t.contains(".clone()") && !t.contains("&NAMES[")
+    });
+    assert!(
+        !bad,
+        "a string element read must clone — a bare index is a move out of the Vec (E0507):\n{}",
+        rust.lines().filter(|l| l.contains("NAMES[")).take(4).collect::<Vec<_>>().join("\n")
+    );
+}
+
+// ── #599: a written module-level `let x: i32` ────────────────────────────────────────────────────
+const MODULE_SCALAR_WRITE: &str = r#"
+let counter: i32 = 0
+
+function bump() { counter = counter + 1 }
+
+export function run(): i32 {
+  bump()
+  return counter
+}
+"#;
+
+#[test]
+fn a_written_module_scalar_reads_and_writes_through_the_same_cell() {
+    let rust = compile_gba("module_scalar_write", MODULE_SCALAR_WRITE);
+    // If reads go through a cell, writes must too. A bare `counter = <i32>` against a VmRef<i32>
+    // is E0308 — the two halves disagreeing is the bug.
+    for line in rust.lines() {
+        let t = line.trim();
+        if t.starts_with("counter = ") && !t.contains("vm_write") {
+            panic!(
+                "write must match the read's representation (#599):\n{}",
+                rust.lines().filter(|l| l.contains("counter")).take(6).collect::<Vec<_>>().join("\n")
+            );
+        }
+    }
+}
+
+// ── #597: a typed array passed to a function is COPIED, not aliased ───────────────────────────────
+//
+// `let reqs: i32[] = []` lowers to `Vec<i32>`, but a call site marshals a FRESH `Value::Array` from
+// its elements. The callee's pushes land in the copy and the caller's array stays empty — silently,
+// with no error at compile time or run time. An UNTYPED array passes the same `VmRef` and aliases
+// correctly, so adding an annotation changes program behaviour rather than just representation.
+//
+// The fix cannot live at the call site: building a `Value::Array` out of a `Vec<i32>` is a copy by
+// construction. An array that escapes into a boxed call has to stay boxed.
+const ARRAY_ESCAPES: &str = r#"
+function fill(out) {
+  out.push(1)
+}
+
+export function run(): i32 {
+  let reqs: i32[] = []
+  fill(reqs)
+  return reqs.length
+}
+"#;
+
+#[test]
+fn a_typed_array_passed_to_a_function_is_not_copied() {
+    let rust = compile_gba("array_escapes", ARRAY_ESCAPES);
+    let copied = rust.lines().find(|l| {
+        l.contains("Value::Array(VmRef::new(") && l.contains("reqs") && l.contains(".iter()")
+    });
+    assert!(
+        copied.is_none(),
+        "a typed array passed to a fn was marshalled as a fresh copy — the callee's writes are \
+         silently lost (#597):\n  {}",
+        copied.unwrap_or("")
+    );
+}

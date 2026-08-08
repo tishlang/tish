@@ -1102,6 +1102,9 @@ pub(crate) struct Codegen {
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
     /// for direct indexing from native fns (fasta `codes`/`probs`).
     module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
+    /// #597: names passed DIRECTLY as a call argument (`fill(reqs)`). A typed array in this set must
+    /// not lower to a native `Vec` — see the note at the `VarDecl` typing site.
+    arrays_passed_to_calls: std::collections::HashSet<String>,
     /// The STATIC names from `module_const_f64_arrays` whose every element is an exact integer in
     /// `i32` range, so the hoist emits `[i32; N]` instead of `[f64; N]`.
     ///
@@ -1396,6 +1399,7 @@ impl Codegen {
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
+            arrays_passed_to_calls: std::collections::HashSet::new(),
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
             map_instance_locals: std::collections::HashSet::new(),
@@ -3194,6 +3198,15 @@ impl Codegen {
                 &program.statements,
                 &self.module_const_f64_cum,
             );
+            // #597: which annotated arrays escape into a call, and so must stay boxed to preserve
+            // aliasing. Collected once over the whole program — an array declared here can be
+            // passed to a fn declared anywhere.
+            {
+                let mut array_names: Vec<String> = Vec::new();
+                Self::collect_annotated_array_names(&program.statements, &mut array_names);
+                self.arrays_passed_to_calls =
+                    Self::collect_escaping_array_names(&program.statements, &array_names);
+            }
             // Pick the integer representation where the values allow it. GBA only: off-target the
             // `f64` layout is free and eligibility must stay byte-identical to before.
             //
@@ -4131,9 +4144,26 @@ impl Codegen {
                 // `emit_int32_operand` (a `>>> 0` result is u32 reinterpreted to i32; signed
                 // bitwise ops yield i32 directly) — so store the i32 with NO `f64` round-trip.
                 if rust_type == RustType::I32 {
+                    // #599: A CAPTURED i32 IS A CELL, AND THE WRITE HAS TO SAY SO. Reads of a
+                    // wrapped scalar already go through `vm_read(&x)`; every store below used to
+                    // emit a bare `x = <i32>`, so the two halves disagreed and the crate failed with
+                    // `expected VmRef<i32>, found i32`. Net effect was that a mutable module-level
+                    // typed scalar could not be used at all on GBA — every counter had to move into
+                    // a function body or hide in a one-element `i32[]`.
+                    //
+                    // The narrow-int branch below has always done this; the i32 branch is the one
+                    // that was missed, across all three of its store shapes.
+                    let is_refcell = self.refcell_wrapped_vars.contains(name.as_ref());
+                    let store = |escaped: &str, val: String| {
+                        if is_refcell {
+                            format!("{{ let _t = {}; *{}.borrow_mut() = _t; }}", val, escaped)
+                        } else {
+                            format!("{} = {}", escaped, val)
+                        }
+                    };
                     if let Some(int_code) = self.emit_int32_operand(value)? {
                         let escaped = Self::escape_ident(name.as_ref());
-                        return Ok(format!("{} = ({}) as i32", escaped, int_code));
+                        return Ok(store(&escaped, format!("({}) as i32", int_code)));
                     }
                     let (val_code, val_ty) = self.emit_typed_expr(value)?;
                     // An RHS that is ALREADY an integer stores straight into the register. `d = d + 1`
@@ -4142,7 +4172,7 @@ impl Codegen {
                     // out of it was the whole cost of incrementing an annotated counter.
                     let escaped_int = Self::escape_ident(name.as_ref());
                     if val_ty.is_integer_scalar() {
-                        return Ok(format!("{} = ({}) as i32", escaped_int, val_code));
+                        return Ok(store(&escaped_int, format!("({}) as i32", val_code)));
                     }
                     // Defensive: gate guarantees `Some`, but if a future RHS shape slips through,
                     // fall back to a sound f64-narrowed store rather than miscompiling.
@@ -4152,11 +4182,7 @@ impl Codegen {
                         val_code
                     };
                     let escaped = Self::escape_ident(name.as_ref());
-                    return Ok(format!(
-                        "{} = {}",
-                        escaped,
-                        RustType::I32.from_value_expr(&v)
-                    ));
+                    return Ok(store(&escaped, RustType::I32.from_value_expr(&v)));
                 }
                 // String self-append `s = s + rhs` -> in-place push_str (amortized O(1)). The
                 // general path boxes via `ops::add(Value::String(s.clone()), ...)` which clones
@@ -5806,6 +5832,34 @@ impl Codegen {
                         crate::types::RustType::from_annotation_with_aliases(t, &self.type_aliases)
                     })
                     .unwrap_or(RustType::Value);
+
+                // #597: AN ARRAY THAT ESCAPES INTO A BOXED CALL STAYS BOXED. A native `Vec<T>`
+                // handed to a `value_call` is marshalled by BUILDING A FRESH `Value::Array` from
+                // its elements — a copy by construction — so the callee's `push`es land in the copy
+                // and the caller's array silently keeps its old contents. Nothing reports it: not
+                // the compiler, not the runtime. An UNTYPED array passes the same `VmRef` and
+                // aliases correctly, which means adding an annotation changed program BEHAVIOUR
+                // rather than just representation.
+                //
+                // The call site cannot fix this — boxing a `Vec<i32>` into a `Value::Array` is a
+                // copy however it is spelled. So the decision has to be made here, at the
+                // declaration: if the array is ever passed as a call argument, keep it boxed.
+                //
+                // Same rule the read-only param analysis already applies from the other side
+                // (`arr_param_readonly_fns` refuses an owned copy when a param is mutated, escapes
+                // or is forwarded). Conservative on purpose: an array that never escapes is
+                // untouched and keeps its native lowering.
+                // GBA ONLY. The reporter checked the other backends: `tish run` and a native
+                // `tish build` both alias correctly and print the expected result, so this is a
+                // TARGET divergence rather than a language-wide one. Narrowing off-target would
+                // deopt host code to fix a bug host code does not have, and one host test
+                // (`escaping_array_keeps_oob_safe_lowering`) pins the native store it would remove.
+                if self.emit_mode == crate::NativeEmitMode::Gba
+                    && matches!(rust_type, RustType::Vec(_))
+                    && self.arrays_passed_to_calls.contains(name.as_ref())
+                {
+                    rust_type = RustType::Value;
+                }
 
                 // M5 native-fn body: `let r = genRandom(1)` without a `: number` annotation.
                 if self.native_fn_body_emit && rust_type == RustType::Value {
@@ -14093,13 +14147,22 @@ impl Codegen {
         // so a RHS that reads the same cell (`a[i] += x`, `a[i] = a[j]`) releases its shared borrow
         // first (no overlapping lock → no deadlock), then store into the real element through the cell.
         if wrapped {
-            let needs_resize =
-                matches!(elem_type.as_ref(), RustType::F64 | RustType::Bool) && !in_bounds;
+            // #611: I32 GROWS TOO. A boxed array absorbs `a[i] = v` past the end by growing; a
+            // typed one used to fall through to a bare element store, so the same source line
+            // behaved differently depending only on whether the annotation was present — the write
+            // was lost with no error at compile time or run time. That silent divergence between
+            // the typed and boxed forms is the worst of the available options, so the typed form
+            // now matches the boxed one. Pad is `0`, which is what the READ path already answers
+            // for an out-of-range `i32` element (`.get(i).copied().unwrap_or(0)`).
+            let needs_resize = matches!(
+                elem_type.as_ref(),
+                RustType::F64 | RustType::Bool | RustType::I32
+            ) && !in_bounds;
             let store = if needs_resize {
-                let pad = if matches!(elem_type.as_ref(), RustType::F64) {
-                    "f64::NAN"
-                } else {
-                    "false"
+                let pad = match elem_type.as_ref() {
+                    RustType::F64 => "f64::NAN",
+                    RustType::I32 => "0",
+                    _ => "false",
                 };
                 format!(
                     "let __i = {idx}; let __v = {val}; let mut __g = {esc}.borrow_mut(); if __i >= __g.len() {{ __g.resize(__i + 1, {pad}); }} __g[__i] = __v;",
@@ -14125,16 +14188,22 @@ impl Codegen {
                     format!("{{ {}[{}] = {}; Value::Null }}", esc_obj, idx_usize, native_val)
                 }
             }
-            RustType::F64 | RustType::Bool => {
-                let pad = if matches!(elem_type.as_ref(), RustType::F64) {
-                    "f64::NAN"
-                } else {
-                    "false"
+            // #611: same grow-to-index rule on the unwrapped path — see the note above.
+            RustType::F64 | RustType::Bool | RustType::I32 => {
+                let pad = match elem_type.as_ref() {
+                    RustType::F64 => "f64::NAN",
+                    RustType::I32 => "0",
+                    _ => "false",
                 };
-                format!(
-                    "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}; Value::Null }}",
+                let store = format!(
+                    "{{ let _idx = {}; if _idx >= {}.len() {{ {}.resize(_idx + 1, {}); }} {}[_idx] = {}",
                     idx_usize, esc_obj, esc_obj, pad, esc_obj, native_val
-                )
+                );
+                if side_effect_only {
+                    format!("{} }}", store)
+                } else {
+                    format!("{}; Value::Null }}", store)
+                }
             }
             _ if side_effect_only => {
                 format!("{}[{}] = {}", esc_obj, idx_usize, native_val)
@@ -18374,6 +18443,151 @@ impl Codegen {
             }
         });
         ok
+    }
+
+    /// #597: every `let x: T[]` name in the program, at any nesting depth. These are the candidates
+    /// whose escape has to be checked before they may lower to a native `Vec`.
+    fn collect_annotated_array_names(stmts: &[Statement], out: &mut Vec<String>) {
+        for s in stmts {
+            Self::collect_annotated_array_names_stmt(s, out);
+        }
+    }
+
+    fn collect_annotated_array_names_stmt(s: &Statement, out: &mut Vec<String>) {
+        match s {
+            Statement::VarDecl {
+                name,
+                type_ann: Some(t),
+                ..
+            } => {
+                if matches!(crate::types::RustType::from_annotation(t), RustType::Vec(_)) {
+                    out.push(name.to_string());
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    Self::collect_annotated_array_names_stmt(s, out);
+                }
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_annotated_array_names_stmt(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::collect_annotated_array_names_stmt(e, out);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::ForOf { body, .. }
+            | Statement::ForIn { body, .. }
+            | Statement::FunDecl { body, .. } => {
+                Self::collect_annotated_array_names_stmt(body, out);
+            }
+            Statement::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_annotated_array_names_stmt(i, out);
+                }
+                Self::collect_annotated_array_names_stmt(body, out);
+            }
+            Statement::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                for (_, stmts) in cases {
+                    for s in stmts {
+                        Self::collect_annotated_array_names_stmt(s, out);
+                    }
+                }
+                if let Some(stmts) = default_body {
+                    for s in stmts {
+                        Self::collect_annotated_array_names_stmt(s, out);
+                    }
+                }
+            }
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                Self::collect_annotated_array_names_stmt(body, out);
+                if let Some(c) = catch_body {
+                    Self::collect_annotated_array_names_stmt(c, out);
+                }
+                if let Some(f) = finally_body {
+                    Self::collect_annotated_array_names_stmt(f, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// #597: array names that ESCAPE — handed to a call as a bare argument, or otherwise used as a
+    /// whole value rather than indexed.
+    ///
+    /// Reuses `scan_param_use`, the same analysis the read-only param path already trusts for this
+    /// exact hazard: its `forwarded` flag is documented as "the callee could mutate the array, and a
+    /// write to the caller's array would be lost on the owned copy". That is #597 from the other
+    /// side, so the answer should come from one analysis rather than a second, subtly-different one.
+    ///
+    /// Over-approximating only costs an array its native lowering. Under-approximating brings back a
+    /// silently wrong result, so the bias is deliberate.
+    fn collect_escaping_array_names(stmts: &[Statement], names: &[String]) -> std::collections::HashSet<String> {
+        // `for_each_stmt_expr` deliberately does NOT descend into `FunDecl` bodies, so the forwarding
+        // call is normally invisible to it — the array is declared inside a function and passed
+        // inside that same function, which is exactly the reported shape. Gather nested bodies as
+        // additional roots first.
+        fn add_roots<'a>(s: &'a Statement, roots: &mut Vec<&'a Statement>) {
+            roots.push(s);
+            match s {
+                Statement::FunDecl { body, .. }
+                | Statement::While { body, .. }
+                | Statement::DoWhile { body, .. }
+                | Statement::ForOf { body, .. }
+                | Statement::ForIn { body, .. }
+                | Statement::For { body, .. } => add_roots(body, roots),
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    for s in statements {
+                        add_roots(s, roots);
+                    }
+                }
+                Statement::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    add_roots(then_branch, roots);
+                    if let Some(e) = else_branch {
+                        add_roots(e, roots);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut roots: Vec<&Statement> = Vec::new();
+        for s in stmts {
+            add_roots(s, &mut roots);
+        }
+        let mut out = std::collections::HashSet::new();
+        for n in names {
+            let mut f = ParamUse::default();
+            for s in &roots {
+                Self::for_each_stmt_expr(s, &mut |e| Self::scan_param_use(e, n, false, &mut f));
+            }
+            // `forwarded` ONLY, not `escaped`. `escaped` covers any whole-value use — including
+            // `return arr`, which hands ownership out and does not create the aliasing hazard this
+            // is about. Using it deopted arrays that are legitimately native
+            // (`numeric_returning_fn_keeps_pushed_array_native`). #597 is specifically "passed as a
+            // call argument", which is what `forwarded` means.
+            if f.forwarded {
+                out.insert(n.clone());
+            }
+        }
+        out
     }
 
     fn for_each_expr_root(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
@@ -25185,6 +25399,19 @@ impl Codegen {
                                     // `borrow()` guard a non-Copy element must be cloned OUT (it can't be
                                     // moved from the borrow); a plain local keeps the direct place.
                                     _ if idx_wrapped => format!("{}[{}].clone()", esc_obj, idx_ref),
+                                    // #600: a STRING element is cloned even unwrapped. `let s: string =
+                                    // NAMES[i]` binds the element, and binding a non-Copy value out of a
+                                    // `Vec` is a move — `error[E0507]: cannot move out of index`. The
+                                    // obvious spelling was the one that did not compile, with indexing
+                                    // straight into a call as the only working form.
+                                    //
+                                    // Scoped to String deliberately. The struct case (#571) looks
+                                    // identical but must NOT clone here: `states[id].timer` projects a
+                                    // field out of the place, and cloning would copy the whole struct on
+                                    // every field read — the O(n)-per-read footgun #558 exists about.
+                                    // A string is already copied at every boxed boundary, so the clone
+                                    // costs nothing that was not already being paid.
+                                    RustType::String => format!("{}[{}].clone()", esc_obj, idx_ref),
                                     _ => format!("{}[{}]", esc_obj, idx_ref),
                                 };
                                 // #567: wrap the wrapped-Vec read in a block that pre-binds the index
