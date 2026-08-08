@@ -18218,34 +18218,73 @@ impl Codegen {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 Self::walk_stmts_for_global_disqualifiers(statements, g, bad);
             }
+            // Conditions are visited, not just bodies. This walker had the same blind spot the
+            // module-const one did: `while (i < X.length)` put a disqualifying use somewhere the
+            // walk never reached, so the global was hoisted anyway and the emitted program
+            // referenced a name that no longer existed. Latent here only because a scalar is rarely
+            // spelled that way — the defect is identical.
             Statement::If {
+                cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
+                Self::walk_expr_for_global_disqualifiers(cond, g, bad);
                 Self::walk_stmt_for_global_disqualifiers(then_branch, g, bad);
                 if let Some(eb) = else_branch {
                     Self::walk_stmt_for_global_disqualifiers(eb, g, bad);
                 }
             }
-            Statement::While { body, .. }
-            | Statement::DoWhile { body, .. }
-            | Statement::For { body, .. }
-            | Statement::ForOf { body, .. }
-            | Statement::ForIn { body, .. } => {
+            Statement::While { cond, body, .. } | Statement::DoWhile { body, cond, .. } => {
+                Self::walk_expr_for_global_disqualifiers(cond, g, bad);
+                Self::walk_stmt_for_global_disqualifiers(body, g, bad);
+            }
+            Statement::For {
+                init,
+                cond,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::walk_stmt_for_global_disqualifiers(i, g, bad);
+                }
+                if let Some(c) = cond {
+                    Self::walk_expr_for_global_disqualifiers(c, g, bad);
+                }
+                if let Some(u) = update {
+                    Self::walk_expr_for_global_disqualifiers(u, g, bad);
+                }
+                Self::walk_stmt_for_global_disqualifiers(body, g, bad);
+            }
+            Statement::ForOf { iterable, body, .. }
+            | Statement::ForIn {
+                object: iterable,
+                body,
+                ..
+            } => {
+                Self::walk_expr_for_global_disqualifiers(iterable, g, bad);
                 Self::walk_stmt_for_global_disqualifiers(body, g, bad);
             }
             Statement::Switch {
+                expr,
                 cases,
                 default_body,
                 ..
             } => {
-                for (_, stmts) in cases {
+                Self::walk_expr_for_global_disqualifiers(expr, g, bad);
+                for (case_expr, stmts) in cases {
+                    if let Some(e) = case_expr {
+                        Self::walk_expr_for_global_disqualifiers(e, g, bad);
+                    }
                     Self::walk_stmts_for_global_disqualifiers(stmts, g, bad);
                 }
                 if let Some(d) = default_body {
                     Self::walk_stmts_for_global_disqualifiers(d, g, bad);
                 }
+            }
+            Statement::Throw { value, .. } => {
+                Self::walk_expr_for_global_disqualifiers(value, g, bad);
             }
             Statement::Try {
                 body,
