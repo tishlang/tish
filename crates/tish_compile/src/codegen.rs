@@ -17120,13 +17120,34 @@ impl Codegen {
         if literal_decls.is_empty() {
             return None;
         }
-        // A binding needs moving when some statement ABOVE its declaration mentions it. Function
-        // bodies are what make this legal, so those are exactly what is scanned.
+        // A NAME DECLARED MORE THAN ONCE AT MODULE LEVEL IS NEVER MOVED. An earlier mention of such
+        // a name refers to the EARLIER binding, not forward to this one, so hoisting this
+        // declaration over it silently changes which value the earlier code sees. That is a wrong
+        // ANSWER, not a build break: tests/core/js_compat_gaps.tish declares `text` twice — a string
+        // at the top and a different string further down — and moving the second above the first
+        // made an intervening `slice` read the wrong source, printing `hello 123 world 45` where
+        // `.mdx` was expected.
+        let mut decl_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for s in stmts {
+            if let Statement::VarDecl { name, .. } = s {
+                *decl_counts.entry(name.as_ref()).or_insert(0) += 1;
+            }
+        }
+        // A binding needs moving when a FUNCTION BODY above its declaration mentions it. Deferred
+        // execution is what makes a forward reference legal — the body does not run until called.
+        //
+        // Straight-line code above the declaration is deliberately NOT counted: there the mention
+        // either refers to a previous binding of the name or is a genuine use-before-init, and in
+        // neither case may the declaration be moved over it.
         let mut needed: Vec<(usize, usize)> = Vec::new(); // (decl index, first referencing index)
         for (di, name) in &literal_decls {
+            if decl_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                continue;
+            }
             let mut first = None;
             for (i, s) in stmts.iter().enumerate().take(*di) {
-                if Self::stmt_mentions_ident(s, name) {
+                if matches!(s, Statement::FunDecl { .. }) && Self::stmt_mentions_ident(s, name) {
                     first = Some(i);
                     break;
                 }
@@ -17580,17 +17601,28 @@ impl Codegen {
                 //
                 // Nor does the exemption extend to a member READ such as `X.length`, which lowers to
                 // a bare `X.len()` — one of the two shapes that broke the ROMs.
+                // ALLOWLIST, NOT DENYLIST. This started as "any method call except the fuseable
+                // HOFs", which is allow-by-default — and every MUTATING method walked straight
+                // through it. `arr2.unshift(1, 2)` hoisted its receiver into a `const` and then
+                // tried to mutate it, so the local vanished and rustc reported
+                // `cannot find value arr2` (tests/core/array_methods.tish, under
+                // TISH_PACKED_ARRAYS=1). `push`/`pop`/`splice`/`sort`/`reverse`/`fill` are the same
+                // shape.
+                //
+                // So only methods PROVEN to route the receiver through the `Value` bridge are
+                // exempt. `join` is the one this pass actually needs
+                // (tests/core/template_literals.tish emits
+                // `array_join(&Value::NumberArray(…Packed(G_NUMS…)))`, where the local name does not
+                // survive). Anything else — mutators, the HOFs that lower to a native iterator chain
+                // over the bare local, and any method added later — disqualifies the hoist, which is
+                // the safe direction: it costs an optimisation, not a build.
                 let member_call_on_g = matches!(
                     callee.as_ref(),
                     Expr::Member { object, prop, .. }
                         if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g)
-                            && !matches!(
+                            && matches!(
                                 prop,
-                                MemberProp::Name { name: m, .. } if matches!(
-                                    m.as_ref(),
-                                    "reduce" | "forEach" | "find" | "findIndex" | "some" | "every"
-                                        | "map" | "filter" | "reduceRight"
-                                )
+                                MemberProp::Name { name: m, .. } if m.as_ref() == "join"
                             )
                 );
                 if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
