@@ -1445,10 +1445,26 @@ fn collect_destructure_names(pattern: &DestructPattern, out: &mut HashSet<String
 
 /// Rename each module's non-exported top-level bindings whose name also occurs as a top-level
 /// name in another module, isolating module-private declarations (#97).
-fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) {
+///
+/// #587: this ALSO covers colliding EXPORTED names in non-entry modules, returning
+/// `renamed symbol -> original export name` per module so the export table can still be keyed by the
+/// name importers ask for. The original carve-out ("exported names stay stable so imports keep
+/// resolving") was stricter than necessary: `module_exports` is already an INDIRECTION from export
+/// name to source symbol, so the symbol is free to move as long as the key does not.
+///
+/// Leaving exported collisions alone was not merely a missed optimisation — it silently produced a
+/// wrong program. Two modules exporting `greet`, flattened into one scope, emit two
+/// `function greet` declarations; JS function declarations HOIST, so the second overwrote the first
+/// before `const _greet = greet` ran, and a barrel that re-wrapped its own import recursed until the
+/// stack blew.
+///
+/// The ENTRY module is deliberately excluded: its exports are the bundle's public surface, so
+/// renaming them would change the API the caller sees.
+fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<HashMap<String, String>> {
     let n = modules.len();
+    let mut export_renames: Vec<HashMap<String, String>> = vec![HashMap::new(); n];
     if n < 2 {
-        return; // a single module cannot collide with another
+        return export_renames; // a single module cannot collide with another
     }
     let mut decls: Vec<HashSet<String>> = vec![HashSet::new(); n];
     let mut exported: Vec<HashSet<String>> = vec![HashSet::new(); n];
@@ -1471,13 +1487,35 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) {
             *count.entry(name.as_str()).or_insert(0) += 1;
         }
     }
+    // #587: for EXPORTED names the question is different, and `occupancy` answers the wrong one.
+    // It counts import bindings, so a dep's exported `greet` looks like it collides with the
+    // importer's binding of that same `greet` — but those are one thing, not two, and renaming on
+    // that basis breaks nothing yet churns every ordinary import. A real collision is another module
+    // DECLARING the name, so exported renames key off declarations only.
+    let mut decl_count: HashMap<&str, usize> = HashMap::new();
+    for d in &decls {
+        for name in d {
+            *decl_count.entry(name.as_str()).or_insert(0) += 1;
+        }
+    }
     for (i, m) in modules.iter_mut().enumerate() {
+        let is_entry = i + 1 == n; // the entry module is last — its exports are the public surface
         let mut renames: HashMap<String, Arc<str>> = HashMap::new();
         for name in &decls[i] {
-            if exported[i].contains(name) {
-                continue; // exported names stay stable so imports keep resolving
+            if count.get(name.as_str()).copied().unwrap_or(0) <= 1 {
+                continue; // no collision — leave it exactly as it is (zero blast radius)
             }
-            if count.get(name.as_str()).copied().unwrap_or(0) > 1 {
+            if exported[i].contains(name) {
+                // #587: an exported collision in a NON-ENTRY module is renamed too, and the new
+                // symbol is recorded so `module_exports` can still answer to the original name.
+                // Gated on DECLARATION count — see the note above.
+                if is_entry || decl_count.get(name.as_str()).copied().unwrap_or(0) <= 1 {
+                    continue;
+                }
+                let renamed = format!("{name}__m{i}");
+                export_renames[i].insert(renamed.clone(), name.clone());
+                renames.insert(name.clone(), Arc::from(renamed));
+            } else {
                 renames.insert(name.clone(), Arc::from(format!("{name}__m{i}")));
             }
         }
@@ -1491,6 +1529,7 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) {
             rewrite_stmt_scope(stmt, &mut active, true);
         }
     }
+    export_renames
 }
 
 /// Apply the rename for a *declared* name. At module top level the binding is the canonical
@@ -1896,7 +1935,7 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
     }
 
     // #97: isolate module-private top-level bindings before they are flattened together.
-    isolate_private_top_level_bindings(&mut modules);
+    let export_renames = isolate_private_top_level_bindings(&mut modules);
 
     let path_to_idx: HashMap<PathBuf, usize> = modules
         .iter()
@@ -1916,7 +1955,14 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                             }
                             _ => continue,
                         };
-                        module_exports[idx].insert(name.clone(), name);
+                        // #587: if this symbol was renamed for an exported collision, the export
+                        // table must still answer to the name importers ask for — key by the
+                        // ORIGINAL, point at the renamed symbol.
+                        let key = export_renames[idx]
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_else(|| name.clone());
+                        module_exports[idx].insert(key, name);
                     }
                     ExportDeclaration::Default(_) => {
                         let default_name = format!("__default_{}", idx);
