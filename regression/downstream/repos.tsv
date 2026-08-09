@@ -64,3 +64,30 @@ tish-tailwind	local:~/Projects/tish-audio/tish-tailwind	.	tish	bash -c 'f=$(find
 dune-server	local:~/Projects/dune/dune-ide	.	tish	TISH_HTTP_BACKEND=hyper tish build --target native --feature http,http-hyper,fs,process,ws,pty -o /tmp/_dune_server apps/dune-server/dune-server.tish	pass
 spider3-tish	git:https://github.com/schlopai/spider-gwen-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/dist/*"); exit $rc'	pass
 spacekinematics	git:https://github.com/spacedevin/solar-system-webgpu.git@main	.	tish	bash -c 'rc=0; while IFS= read -r f; do tish build --target js "$f" -o /tmp/_s.js >/tmp/_s.err 2>&1 || { echo "FAIL: $f"; head -2 /tmp/_s.err; rc=1; }; done < <(find . -name "*.tish" -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/sgp4-wasm/*"); exit $rc'	pass
+#
+# ── ADDED: non-GBA target coverage. The GBA work changes shared codegen (module-const hoisting,
+# array lowering, i32 stores), so the suite needs consumers that exercise the paths GBA does NOT:
+# the INTERPRETER (`tish run`), the JS backend, and a NATIVE build with a real feature set. Each row
+# below was picked for the target it covers, not just for being written in tish.
+#
+# tishdoc-parse: `tish run` over a golden-file test suite — the only downstream row that exercises
+# the INTERPRETER end to end, which is where a semantic divergence would show up first.
+# xfail: its parse suite passes, then `golden_note.tish` dies with `Uncaught FAIL title`. Confirmed
+# IDENTICAL on tish 3.3.0 (b9c39feaa), so it is a pre-existing break in that repo, not a regression
+# — recorded as xfail rather than dropped, so the row flags if it ever starts passing.
+tishdoc-parse	git:https://github.com/tishlang/tishdoc-parse.git@main	.	tish	npm test	xfail
+# scii: `tish build --target native` with http,timers,process,tty,fs — the widest native feature set
+# of any consumer here. On a feature branch, so local: (skipped in CI).
+# xfail: the COMPILER FRONTEND spins at 100% CPU indefinitely on this entry point — 40+ minutes with
+# no rustc ever spawned, so it is not a slow native build. Confirmed identical on 3.3.0, so it is a
+# pre-existing compiler hang, not a regression from the GBA work. It deserves its own issue; kept
+# here as xfail so the row flags the day it starts terminating.
+# The `timeout 240` is load-bearing, not caution: the runner does NOT cap a repo's command, and
+# this one never terminates, so without it a single xfail row eats the whole suite's budget and the
+# run looks hung rather than reporting.
+scii	local:~/Projects/scii	.	tish	bash -c 'timeout 240 tish build src/tui/interactive.tish -o /tmp/_scii --feature http,timers,process,tty,fs'	xfail
+# deck: the JS backend, on a real library build (transpile + exports append).
+deck	local:~/Projects/deck	.	tish	bash -c 'tish build src/index.tish -o /tmp/_deck.js --target js'	pass
+# tish-hub: DROPPED, not xfail. Its App.tish fails at PARSE — `Expected { }, * as name, or default
+# import` — so the repo uses an import syntax this tish does not accept, and the row would test the
+# parser's opinion rather than the JS backend it was added for. `deck` already covers the JS target.
