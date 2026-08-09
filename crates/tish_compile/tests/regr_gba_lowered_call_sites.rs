@@ -310,8 +310,14 @@ console.log(R.length)
 #[test]
 fn a_module_const_array_is_reachable_from_a_lowered_fn_on_gba() {
     let rust = compile_gba("const_array_gba", CONST_ARRAY_READ);
+    // Element type is deliberately NOT pinned here — this test is about REACHABILITY (#594), and an
+    // all-integer table is now expected to hoist as `[i32; 8]` on GBA. The representation itself is
+    // pinned by `an_integral_module_const_array_is_emitted_as_i32_on_gba`.
     assert!(
-        rust.contains("const G_TABLE: [f64; 8]") || rust.contains("const G_table: [f64; 8]"),
+        rust.contains("const G_TABLE: [i32; 8]")
+            || rust.contains("const G_TABLE: [f64; 8]")
+            || rust.contains("const G_table: [i32; 8]")
+            || rust.contains("const G_table: [f64; 8]"),
         "a module const numeric array should get a top-level `const` on GBA (#594):\n{}",
         rust.lines().filter(|l| l.contains("TABLE")).take(4).collect::<Vec<_>>().join("\n")
     );
@@ -484,4 +490,402 @@ console.log(R.length)
         "a Multi-declared module binding leaked into a lowered fn (E0425):\n  {}",
         offenders.join("\n  ")
     );
+}
+
+// ── #48/#52-follow-up: the module-const-array hoist was blind to closures ─────────────────────────
+//
+// `collect_module_const_f64_arrays` hoists a module-level numeric array to a top-level
+// `const G_X: [f64; N]` so a LOWERED fn can reach it (that reachability is the whole point of #594).
+// Admission is supposed to reject any array that is written, or used as a value/member, because a
+// `const` is neither mutable nor addressable. The admission walker checks all of that — but its
+// expression arm had no `ArrowFunction` case, so every use inside a CLOSURE fell into `_ => {}` and
+// was invisible. The sibling scalar pass (`walk_expr_for_global_disqualifiers`) has always had that
+// arm; this walker is a copy that lost it.
+//
+// Net effect once the pass was enabled on GBA: an array that a closure writes got hoisted anyway.
+// The read side renamed to `G_X`, the write side kept the boxed local, and the boxed local is
+// declared *after* the closure — so rustc reports `cannot find value` on a name the game never
+// misspelled. Reported against card-gba (queensblood/triad/gwent) and reproduced independently by
+// tish-gba `examples/hyrule` (`rangLive`, weapons.tish).
+//
+// The trigger needs all three ingredients: a module numeric array, a typed top-level fn that reads
+// it (that is what nominates it for hoisting), and a write from inside a closure.
+
+/// The reported repro, reduced. Before the fix this emitted `const G_A: [f64; 3]` plus a write
+/// through a bare `A`, and rustc rejected it with E0425.
+const CLOSURE_WRITE: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let bump = () => { A[0] = A[0] + 1 }
+  bump()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn module_array_written_in_closure_is_not_hoisted_to_const() {
+    let rust = compile_gba("closure_write", CLOSURE_WRITE);
+    // The array is written, so it must stay a runtime binding: no const hoist at all. Renaming the
+    // write site would not be enough — a `const` cannot be assigned through.
+    assert!(
+        !rust.contains("const G_A"),
+        "a module array written from a closure must not be hoisted to a const:\n{}",
+        rust
+    );
+    // And the generated program must not reference a hoisted name it never declared.
+    assert!(
+        !rust.contains("G_A["),
+        "no read may be renamed to a hoist that does not exist:\n{}",
+        rust
+    );
+}
+
+/// The second missed case from the same report: `.length` lowers to `.len()`, which is a member use
+/// the walker already rejects — it was just unreachable inside a closure. A hoist here emitted
+/// `A.len()` against a name not in scope.
+const CLOSURE_LENGTH: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let count = () => { return A.length }
+  return readA(0) + count()
+}
+"#;
+
+#[test]
+fn module_array_member_used_in_closure_is_not_hoisted_to_const() {
+    let rust = compile_gba("closure_length", CLOSURE_LENGTH);
+    assert!(
+        !rust.contains("const G_A"),
+        "a module array whose `.length` a closure reads must not be hoisted:\n{}",
+        rust
+    );
+}
+
+/// The win must survive: a read-only array indexed from a closure is still a legal hoist, because
+/// the Index arm deliberately does not count `X[i]` as a disqualifying use of `X`. Without this the
+/// fix would be a blanket "any closure mention disables hoisting" and would give back #594.
+const CLOSURE_READ_ONLY: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let pick = () => { return A[1] }
+  return readA(0) + pick()
+}
+"#;
+
+#[test]
+fn read_only_module_array_still_hoists_when_a_closure_indexes_it() {
+    let rust = compile_gba("closure_read_only", CLOSURE_READ_ONLY);
+    assert!(
+        rust.contains("G_A"),
+        "a read-only module array must still hoist — that reachability is #594:\n{}",
+        rust
+    );
+}
+
+// ── GBA representation: the hoist must not carry the host's f64 onto a CPU with no FPU ───────────
+//
+// ARM7TDMI has no hardware float. Hoisting `let A: i32[] = [1,2,3]` to `const G_A: [f64; 3]` cost
+// 8 bytes per element instead of 4, an `i32 -> f64 -> usize` round trip on every index, and an
+// `f64::NAN` out-of-range sentinel — while DISCARDING the element type the source had already
+// declared. These pin the integer representation.
+
+#[test]
+fn an_integral_module_const_array_is_emitted_as_i32_on_gba() {
+    let rust = compile_gba("repr_int", CLOSURE_READ_ONLY);
+    assert!(
+        rust.contains("const G_A: [i32; 3]"),
+        "an all-integer module const array must hoist as [i32; N], not [f64; N]:\n{}",
+        rust
+    );
+    assert!(
+        !rust.contains("const G_A: [f64; 3]"),
+        "the f64 representation must be gone:\n{}",
+        rust
+    );
+}
+
+/// Non-integral values still need f64 — the narrowing is value-driven, not blanket.
+const FRACTIONAL: &str = r#"
+let P: number[] = [0.25, 0.5, 0.25]
+
+function readP(i: i32): number { return P[i] }
+
+export function run(): number {
+  let pick = () => { return P[1] }
+  return readP(0) + pick()
+}
+"#;
+
+#[test]
+fn a_fractional_module_const_array_stays_f64() {
+    let rust = compile_gba("repr_frac", FRACTIONAL);
+    assert!(
+        rust.contains("const G_P: [f64; 3]"),
+        "a fractional array must keep f64 — narrowing it would change its values:\n{}",
+        rust
+    );
+}
+
+/// The out-of-range read still has to answer NaN. There is no `i32` meaning "absent", so the
+/// bounds-checked form widens rather than inventing a sentinel that would read as a real element.
+#[test]
+fn an_unproven_index_still_answers_nan() {
+    let rust = compile_gba("repr_int", CLOSURE_READ_ONLY);
+    if rust.contains("f64::NAN") {
+        assert!(
+            rust.contains("as f64"),
+            "an i32-backed out-of-range read must widen before yielding NaN:\n{}",
+            rust
+        );
+    }
+}
+
+/// The SECOND hole, found only because the first fix left queensblood at 4 errors instead of 12: the
+/// statement walker visited loop and branch BODIES but not their CONDITIONS. `.length` is a member
+/// use the walker already rejects — it was simply never reached in `while (i < X.length)`, which is
+/// how card-gba's `SB_FORCE`/`SB_PRE`/`TN_REWARD` (exported `i32[]` in qb-catalog.tish, consumed by
+/// qb-engine.tish:567 and main.tish:297) stayed eligible and hoisted.
+const COND_LENGTH: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  let i: i32 = 0
+  let n: i32 = 0
+  while (i < A.length) { n = n + readA(i); i = i + 1 }
+  return n
+}
+"#;
+
+#[test]
+fn a_use_in_a_loop_condition_disqualifies_the_hoist() {
+    let rust = compile_gba("cond_length", COND_LENGTH);
+    assert!(
+        !rust.contains("const G_A"),
+        "`.length` in a while-condition is a member use and must block the hoist:\n{}",
+        rust
+    );
+}
+
+/// Same shape, in an `if` condition — that arm had the identical omission.
+const IF_COND: &str = r#"
+let A: i32[] = [1, 2, 3]
+
+function readA(i: i32): i32 { return A[i] }
+
+export function run(): i32 {
+  if (A.length > 2) { return readA(0) }
+  return 0
+}
+"#;
+
+#[test]
+fn a_use_in_an_if_condition_disqualifies_the_hoist() {
+    let rust = compile_gba("if_cond", IF_COND);
+    assert!(
+        !rust.contains("const G_A"),
+        "`.length` in an if-condition must block the hoist:\n{}",
+        rust
+    );
+}
+
+// ── #594 residual, reported from tish-gba examples/hyrule ─────────────────────────────────────────
+//
+// Reported shape: a fn with NO PARAMS and NO RETURN that WRITES a module array, and IS CALLED. On
+// 3.3.0 that emitted the new `vm_read(&CELL)` module-scope capability without bringing the cell into
+// scope. Two facts from the report narrow it and are both encoded below:
+//   - the identical shape with NO callers compiles, because it is dead-code eliminated, so a repro
+//     MUST contain a call site;
+//   - inlining the body at the call site is a complete workaround.
+//
+// This is the `rangDone()` shape in hyrule's weapons.tish (`export function rangDone() { rangLive[0] = 0 }`),
+// which is the same `rangLive` E0425 that started this investigation.
+
+/// No params, no return, writes a module array, and — critically — is called.
+const WRITER_WITH_CALLER: &str = r#"
+let A: i32[] = [0, 0, 0]
+
+function readA(i: i32): i32 { return A[i] }
+
+function clearA() { A[0] = 0 }
+
+export function run(): i32 {
+  clearA()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn a_called_no_param_no_return_module_array_writer_compiles() {
+    let rust = compile_gba("writer_with_caller", WRITER_WITH_CALLER);
+    // The array is written, so it must NOT have been hoisted…
+    assert!(
+        !rust.contains("const G_A"),
+        "a written module array must not be hoisted:\n{}",
+        rust
+    );
+    // …and no lowered free fn may reference the boxed cell, which lives in `run()`. A free `fn`
+    // mentioning `A` is precisely the E0425 the report describes.
+    for (i, line) in rust.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("fn ") || t.starts_with("pub fn ") {
+            assert!(
+                !t.contains("clearA") || t.contains("_cell"),
+                "clearA must not be emitted as a free fn that cannot see module scope (line {}): {}",
+                i + 1,
+                t
+            );
+        }
+    }
+}
+
+// ── #600: `let s: string = strArr[i]` moves out of the Vec ────────────────────────────────────────
+const STR_ELEM_BIND: &str = r#"
+let NAMES: string[] = ["alpha", "beta"]
+
+export function show(i: i32): string {
+  let name: string = NAMES[i]
+  return name
+}
+"#;
+
+#[test]
+fn binding_a_string_element_clones_instead_of_moving() {
+    let rust = compile_gba("str_elem_bind", STR_ELEM_BIND);
+    let bad = rust.lines().any(|l| {
+        let t = l.trim();
+        t.contains("= NAMES[") && !t.contains(".clone()") && !t.contains("&NAMES[")
+    });
+    assert!(
+        !bad,
+        "a string element read must clone — a bare index is a move out of the Vec (E0507):\n{}",
+        rust.lines().filter(|l| l.contains("NAMES[")).take(4).collect::<Vec<_>>().join("\n")
+    );
+}
+
+// ── #599: a written module-level `let x: i32` ────────────────────────────────────────────────────
+const MODULE_SCALAR_WRITE: &str = r#"
+let counter: i32 = 0
+
+function bump() { counter = counter + 1 }
+
+export function run(): i32 {
+  bump()
+  return counter
+}
+"#;
+
+#[test]
+fn a_written_module_scalar_reads_and_writes_through_the_same_cell() {
+    let rust = compile_gba("module_scalar_write", MODULE_SCALAR_WRITE);
+    // If reads go through a cell, writes must too. A bare `counter = <i32>` against a VmRef<i32>
+    // is E0308 — the two halves disagreeing is the bug.
+    for line in rust.lines() {
+        let t = line.trim();
+        if t.starts_with("counter = ") && !t.contains("vm_write") {
+            panic!(
+                "write must match the read's representation (#599):\n{}",
+                rust.lines().filter(|l| l.contains("counter")).take(6).collect::<Vec<_>>().join("\n")
+            );
+        }
+    }
+}
+
+// ── #597: a typed array passed to a function is COPIED, not aliased ───────────────────────────────
+//
+// `let reqs: i32[] = []` lowers to `Vec<i32>`, but a call site marshals a FRESH `Value::Array` from
+// its elements. The callee's pushes land in the copy and the caller's array stays empty — silently,
+// with no error at compile time or run time. An UNTYPED array passes the same `VmRef` and aliases
+// correctly, so adding an annotation changes program behaviour rather than just representation.
+//
+// The fix cannot live at the call site: building a `Value::Array` out of a `Vec<i32>` is a copy by
+// construction. An array that escapes into a boxed call has to stay boxed.
+const ARRAY_ESCAPES: &str = r#"
+function fill(out) {
+  out.push(1)
+}
+
+export function run(): i32 {
+  let reqs: i32[] = []
+  fill(reqs)
+  return reqs.length
+}
+"#;
+
+#[test]
+fn a_typed_array_passed_to_a_function_is_not_copied() {
+    let rust = compile_gba("array_escapes", ARRAY_ESCAPES);
+    let copied = rust.lines().find(|l| {
+        l.contains("Value::Array(VmRef::new(") && l.contains("reqs") && l.contains(".iter()")
+    });
+    assert!(
+        copied.is_none(),
+        "a typed array passed to a fn was marshalled as a fresh copy — the callee's writes are \
+         silently lost (#597):\n  {}",
+        copied.unwrap_or("")
+    );
+}
+
+// ── #629: module bindings are emitted in SOURCE ORDER — a fn referencing a LATER binding breaks ───
+//
+// The variable is ORDER, nothing else. Module-level bindings are emitted into `run()` where they
+// appear, but the function values that capture them are emitted at their own source position, so a
+// function declared ABOVE its binding captures a name that is not in scope yet:
+//
+//     let rangDone = { Value::native(move |args| { … vm_read(&rangLive) … }) };   // use
+//     let rangLive = VmRef::new(vec![(0_f64) as i32]);                            // declaration
+//
+// This is legal tish — the function is not CALLED before the binding is initialised.
+//
+// The fixture pinned in 57d6aa1be for this got it wrong: it declared `let A` FIRST, so it passed
+// while the bug was live and proved nothing. Moving the declaration is the whole difference, which
+// is why the earlier reduction "reproduced" on neither compiler. Hits readers and writers alike.
+const FORWARD_REF: &str = r#"
+function readA(i: i32): i32 { return A[i] }
+function clearA() { A[0] = 0 }
+
+let A: i32[] = [0, 0, 0]
+
+export function run(): i32 {
+  clearA()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn a_fn_may_reference_a_module_binding_declared_after_it() {
+    let rust = compile_gba("forward_ref", FORWARD_REF);
+    // Find where `A` is DECLARED and where it is first USED. A use above the declaration is the bug.
+    let decl = rust
+        .lines()
+        .position(|l| {
+            let t = l.trim();
+            t.starts_with("let A = ") || t.starts_with("let A:") || t.starts_with("let mut A")
+        });
+    let first_use = rust.lines().position(|l| {
+        let t = l.trim();
+        (t.contains("vm_read(&A)") || t.contains("(&A)") || t.contains("A.borrow"))
+            && !t.starts_with("let A")
+    });
+    if let (Some(d), Some(u)) = (decl, first_use) {
+        assert!(
+            u > d,
+            "#629: `A` is used at line {} but only declared at line {} — use before declaration \
+             (E0425). Module bindings must be emitted ahead of the function values that capture \
+             them.\n{}",
+            u + 1,
+            d + 1,
+            rust.lines().skip(d.saturating_sub(6)).take(12).collect::<Vec<_>>().join("\n")
+        );
+    }
 }
