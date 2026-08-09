@@ -1,0 +1,23 @@
+// #549: `self`, `Self`, `super` and `crate` are ordinary identifiers in tish, and the interpreter
+// has always accepted them. The Rust backend raw-escaped every Rust keyword, but those four CANNOT
+// be raw identifiers — rustc rejects `r#self` outright — so the backend rejected valid source.
+//
+// Kept in tests/core so every backend (interp / vm / native / cranelift) has to agree on them.
+function f(self) { return self + 1 }
+console.log(f(41))
+
+// All four in one signature.
+function g(self, Self, super, crate) { return self + Self + super + crate }
+console.log(g(1, 2, 3, 4))
+
+// And as MUTABLE module bindings read and written from a function — the case that also exercises
+// the capture path, not just the parameter one.
+let self = 1
+let Self = 2
+function bump() { self = self + 10; return self }
+console.log(bump())
+console.log(self + Self)
+
+// As object keys and in a nested scope, so the rename cannot be position-dependent.
+let o = { self: 7, crate: 3 }
+console.log(o.self + o.crate)

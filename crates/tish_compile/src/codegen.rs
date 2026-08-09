@@ -2446,6 +2446,20 @@ impl Codegen {
             "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized",
             "virtual", "yield",
         ];
+        // #549: FOUR KEYWORDS CANNOT BE RAW IDENTIFIERS AT ALL. `r#self`, `r#Self`, `r#super` and
+        // `r#crate` are rejected by rustc outright ("`self` cannot be a raw identifier"), so the
+        // blanket `r#` below emitted a program that could not compile. These are ordinary names in
+        // tish and the interpreter accepts them, which made this a backend divergence that REJECTED
+        // VALID SOURCE rather than merely lowering it differently.
+        //
+        // They are renamed instead. The suffix is deliberately not a bare `_`: `self_` is a name a
+        // program could plausibly use itself, and colliding with it would trade a compile error for
+        // a silent capture of the wrong binding. `__tish_kw_` cannot be written in tish source,
+        // because a leading double underscore is reserved by the compiler for generated temporaries.
+        const NON_RAW_KEYWORDS: &[&str] = &["self", "Self", "super", "crate"];
+        if NON_RAW_KEYWORDS.contains(&name) {
+            return Cow::Owned(format!("__tish_kw_{}", name));
+        }
         if RUST_KEYWORDS.contains(&name) {
             Cow::Owned(format!("r#{}", name))
         } else {
