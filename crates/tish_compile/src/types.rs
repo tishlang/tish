@@ -512,8 +512,21 @@ impl RustType {
                 "match &{} {{ Value::String(s) => s.to_string(), _ => panic!(\"expected string\") }}",
                 value_expr
             ),
+            // #610: A NUMBER REACHING A BOOL BOUNDARY MUST NOT SHIP A PANIC. This arm accepted only
+            // `Value::Bool`, so passing `1` where a typed extern — or any bool-typed boundary —
+            // declares `bool` compiled clean, emitted no coercion, and panicked on the first call.
+            // The failure is latent until that exact line runs, which is how tish-gba's space-goo
+            // shipped it.
+            //
+            // Numbers coerce as `n != 0`. This does NOT reintroduce loose equality: `bool === 1` is
+            // still false, because that is a question about the COMPARISON operator. This is a
+            // boundary CONVERSION — the signature has already said `bool`, the way an `as` cast
+            // would — and a total conversion there beats a guaranteed abort.
+            //
+            // Anything genuinely unconvertible still panics, so a string or object reaching a bool
+            // parameter stays exactly as loud as before.
             RustType::Bool => format!(
-                "match &{} {{ Value::Bool(b) => *b, _ => panic!(\"expected boolean\") }}",
+                "match &{} {{ Value::Bool(b) => *b, Value::Number(n) => *n != 0.0, _ => panic!(\"expected boolean\") }}",
                 value_expr
             ),
             RustType::Unit => "()".to_string(),

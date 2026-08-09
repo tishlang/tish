@@ -1,0 +1,24 @@
+// #610: a NUMBER reaching a bool-typed boundary used to compile clean and then panic at runtime
+// ("expected boolean"), because the Value->bool conversion accepted only Value::Bool. The failure
+// was latent until that exact line ran, which is how tish-gba's space-goo shipped it.
+//
+// Numbers coerce as `n != 0`. This is a boundary CONVERSION, not a comparison — tish still has no
+// loose equality, and `bool === 1` remains false (asserted below so the two cannot drift).
+function pick(flag: boolean): number { return flag ? 10 : 20 }
+
+let one = 1
+console.log(pick(one))
+
+let zero = 0
+console.log(pick(zero))
+
+// Negative is nonzero, so it is true — not "positive means true".
+let neg = 0 - 3
+console.log(pick(neg))
+
+// Actual booleans are unaffected.
+console.log(pick(true))
+console.log(pick(false))
+
+// The language's no-loose-equality stance is unchanged: this stays false.
+console.log(true === 1)
