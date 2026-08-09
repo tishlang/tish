@@ -3201,7 +3201,12 @@ impl Codegen {
             // #597: which annotated arrays escape into a call, and so must stay boxed to preserve
             // aliasing. Collected once over the whole program — an array declared here can be
             // passed to a fn declared anywhere.
-            {
+            //
+            // GATED ON GBA, and not only because the RESULT is GBA-only: this scan runs
+            // `scan_param_use` over the whole program once per annotated array, so it is
+            // O(arrays x program). Off-target that is pure waste — the set is never read — and it
+            // would be a silent compile-time tax on every host build.
+            if self.emit_mode == crate::NativeEmitMode::Gba {
                 let mut array_names: Vec<String> = Vec::new();
                 Self::collect_annotated_array_names(&program.statements, &mut array_names);
                 self.arrays_passed_to_calls =
@@ -3718,7 +3723,25 @@ impl Codegen {
         if self.is_async {
             self.async_context_stack.push(true); // run() body is async Rust context
         }
-        self.emit_statements_with_folds(&program.statements)?;
+        // #629: A FUNCTION MAY REFERENCE A MODULE BINDING DECLARED BELOW IT. Module bindings are
+        // emitted into `run()` in source order, but a function VALUE is emitted where it appears and
+        // captures by name — so `function readA() { return A[i] }` above `let A = [...]` emitted a
+        // capture of `A` five lines before `let A`, and rustc rejected the program:
+        //
+        //     let rangDone = { Value::native(move |args| { … vm_read(&rangLive) … }) };  // use
+        //     let rangLive = VmRef::new(vec![(0_f64) as i32]);                           // decl
+        //
+        // That is legal tish — the function is not CALLED before the binding is initialised — and
+        // only the ORDER differs; moving the `let` above the functions compiles. It took hyrule's
+        // whole ROM down (`rangDone` at weapons.tish:28, `rangLive` at :46).
+        //
+        // Reordered here rather than at the capture site because the capture is not wrong; its
+        // position is. Restricted to LITERAL initialisers on purpose: hoisting `let x = f()` would
+        // move a call, changing when its side effects run and possibly reading state the statements
+        // above it establish. A literal cannot observe or disturb anything, so moving it is not
+        // visible to the program.
+        let reordered = Self::hoist_forward_referenced_module_bindings(&program.statements);
+        self.emit_statements_with_folds(reordered.as_deref().unwrap_or(&program.statements))?;
         if self.is_async {
             self.async_context_stack.pop();
         }
@@ -17073,6 +17096,84 @@ impl Codegen {
         self.native_fn_emit_name.is_some() || self.native_vec_ret.is_some()
     }
 
+    /// #629: move module-level `let`s with LITERAL initialisers ahead of any function declared
+    /// above them that references the name. Returns `None` when nothing needs moving, so the common
+    /// program keeps its exact statement slice and this costs one scan.
+    ///
+    /// Only bindings that are actually forward-referenced move, and only past the point where they
+    /// are first needed — the relative order of everything else is preserved.
+    fn hoist_forward_referenced_module_bindings(stmts: &[Statement]) -> Option<Vec<Statement>> {
+        // Names bound at module level by a literal `let`, with the index of their declaration.
+        let mut literal_decls: Vec<(usize, String)> = Vec::new();
+        for (i, s) in stmts.iter().enumerate() {
+            if let Statement::VarDecl {
+                name,
+                init: Some(e),
+                ..
+            } = s
+            {
+                if Self::is_literal_initialiser(e) {
+                    literal_decls.push((i, name.to_string()));
+                }
+            }
+        }
+        if literal_decls.is_empty() {
+            return None;
+        }
+        // A binding needs moving when some statement ABOVE its declaration mentions it. Function
+        // bodies are what make this legal, so those are exactly what is scanned.
+        let mut needed: Vec<(usize, usize)> = Vec::new(); // (decl index, first referencing index)
+        for (di, name) in &literal_decls {
+            let mut first = None;
+            for (i, s) in stmts.iter().enumerate().take(*di) {
+                if Self::stmt_mentions_ident(s, name) {
+                    first = Some(i);
+                    break;
+                }
+            }
+            if let Some(f) = first {
+                needed.push((*di, f));
+            }
+        }
+        if needed.is_empty() {
+            return None;
+        }
+        // Rebuild: each moved declaration is inserted immediately before the first statement that
+        // references it, keeping every other statement in place.
+        let mut out: Vec<Statement> = Vec::with_capacity(stmts.len());
+        let moved: std::collections::HashSet<usize> = needed.iter().map(|(d, _)| *d).collect();
+        for (i, s) in stmts.iter().enumerate() {
+            for (di, fi) in &needed {
+                if *fi == i {
+                    out.push(stmts[*di].clone());
+                }
+            }
+            if !moved.contains(&i) {
+                out.push(s.clone());
+            }
+        }
+        Some(out)
+    }
+
+    /// An initialiser that cannot observe or disturb program state, so moving it is invisible.
+    /// Deliberately narrow — array/object literals are included only when every element is itself
+    /// literal, so no call or property read comes along for the ride.
+    fn is_literal_initialiser(e: &Expr) -> bool {
+        match e {
+            Expr::Literal { .. } => true,
+            Expr::Unary { operand, .. } => Self::is_literal_initialiser(operand),
+            Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+                ArrayElement::Expr(e) => Self::is_literal_initialiser(e),
+                _ => false,
+            }),
+            Expr::Object { props, .. } => props.iter().all(|p| match p {
+                ObjectProp::KeyValue(_, v, _) => Self::is_literal_initialiser(v),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
     fn emit_statements_with_folds(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
         let mut i = 0;
         while i < statements.len() {
@@ -17461,18 +17562,36 @@ impl Codegen {
                     callee.as_ref(),
                     Expr::Ident { name, .. } if name.as_ref() == "cumulative"
                 );
-                // A METHOD CALL ON THE ARRAY IS SUPPORTED: `X.join(", ")` emits the object through
-                // the `Value` bridge (`NumArrayBacking::Packed(G_X…)`), so the local name does not
-                // survive. Disqualifying it — which the `Member` arm below would do — costs the
-                // hoist for no reason (tests/core/template_literals.tish).
+                // A METHOD CALL ON THE ARRAY IS SUPPORTED — but only the ones that go through the
+                // `Value` bridge. `X.join(", ")` emits the object as
+                // `NumArrayBacking::Packed(G_X…)`, so the local name does not survive and the hoist
+                // is fine (tests/core/template_literals.tish).
                 //
-                // This does NOT extend to a member READ such as `X.length`: that lowers to a bare
-                // `X.len()` with no rewrite, which is exactly one of the two shapes that broke the
-                // ROMs. The `Member` arm still rejects those.
+                // THE FUSEABLE HOFs ARE NOT. `X.map(...)`, `X.reduce(...)` and their siblings lower
+                // to a NATIVE iterator chain — `xs.iter().copied().map(...)` — which names the local
+                // directly and is NOT rewritten to the static. Exempting them hoisted an array whose
+                // every use then referenced a binding that no longer existed:
+                //
+                //     let mut sum: f64 = { … for b in xs.iter().copied() { … } … };
+                //     error[E0425]: cannot find value `xs` in this scope
+                //
+                // Caught by the perf gauntlet's `typed_array_hof` fixture on the NATIVE target —
+                // this walker is not GBA-gated, so a too-permissive exemption breaks the host.
+                //
+                // Nor does the exemption extend to a member READ such as `X.length`, which lowers to
+                // a bare `X.len()` — one of the two shapes that broke the ROMs.
                 let member_call_on_g = matches!(
                     callee.as_ref(),
-                    Expr::Member { object, .. }
+                    Expr::Member { object, prop, .. }
                         if matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g)
+                            && !matches!(
+                                prop,
+                                MemberProp::Name { name: m, .. } if matches!(
+                                    m.as_ref(),
+                                    "reduce" | "forEach" | "find" | "findIndex" | "some" | "every"
+                                        | "map" | "filter" | "reduceRight"
+                                )
+                            )
                 );
                 if matches!(callee.as_ref(), Expr::Ident { name, .. } if name.as_ref() == g) {
                     *bad = true;
@@ -17581,6 +17700,13 @@ impl Codegen {
                     Self::walk_expr_for_module_const_disqualifiers(e, g, bad);
                 }
             }
+            // Leaves, listed explicitly so they do NOT reach the fallback below. A literal cannot
+            // mention a binding, and there is one in nearly every expression in a real program —
+            // routing those through a whole-subtree ident scan turned this walk superlinear and hung
+            // the compiler outright (a `tish build` of `scii` spun at 100% CPU for 40+ minutes in the
+            // frontend, no rustc involved). The fallback is for shapes that might CONTAIN a
+            // reference, not for every constant in the file.
+            Expr::Literal { .. } => {}
             // CONSERVATIVE DEFAULT — see the statement walker. An expression shape this match does
             // not model (today: `Await`, `JsxElement`, and anything the AST gains later) disqualifies
             // if the name appears anywhere beneath it, rather than being waved through.

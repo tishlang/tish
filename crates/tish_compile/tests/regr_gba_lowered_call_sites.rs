@@ -835,3 +835,57 @@ fn a_typed_array_passed_to_a_function_is_not_copied() {
         copied.unwrap_or("")
     );
 }
+
+// ── #629: module bindings are emitted in SOURCE ORDER — a fn referencing a LATER binding breaks ───
+//
+// The variable is ORDER, nothing else. Module-level bindings are emitted into `run()` where they
+// appear, but the function values that capture them are emitted at their own source position, so a
+// function declared ABOVE its binding captures a name that is not in scope yet:
+//
+//     let rangDone = { Value::native(move |args| { … vm_read(&rangLive) … }) };   // use
+//     let rangLive = VmRef::new(vec![(0_f64) as i32]);                            // declaration
+//
+// This is legal tish — the function is not CALLED before the binding is initialised.
+//
+// The fixture pinned in 57d6aa1be for this got it wrong: it declared `let A` FIRST, so it passed
+// while the bug was live and proved nothing. Moving the declaration is the whole difference, which
+// is why the earlier reduction "reproduced" on neither compiler. Hits readers and writers alike.
+const FORWARD_REF: &str = r#"
+function readA(i: i32): i32 { return A[i] }
+function clearA() { A[0] = 0 }
+
+let A: i32[] = [0, 0, 0]
+
+export function run(): i32 {
+  clearA()
+  return readA(0)
+}
+"#;
+
+#[test]
+fn a_fn_may_reference_a_module_binding_declared_after_it() {
+    let rust = compile_gba("forward_ref", FORWARD_REF);
+    // Find where `A` is DECLARED and where it is first USED. A use above the declaration is the bug.
+    let decl = rust
+        .lines()
+        .position(|l| {
+            let t = l.trim();
+            t.starts_with("let A = ") || t.starts_with("let A:") || t.starts_with("let mut A")
+        });
+    let first_use = rust.lines().position(|l| {
+        let t = l.trim();
+        (t.contains("vm_read(&A)") || t.contains("(&A)") || t.contains("A.borrow"))
+            && !t.starts_with("let A")
+    });
+    if let (Some(d), Some(u)) = (decl, first_use) {
+        assert!(
+            u > d,
+            "#629: `A` is used at line {} but only declared at line {} — use before declaration \
+             (E0425). Module bindings must be emitted ahead of the function values that capture \
+             them.\n{}",
+            u + 1,
+            d + 1,
+            rust.lines().skip(d.saturating_sub(6)).take(12).collect::<Vec<_>>().join("\n")
+        );
+    }
+}
