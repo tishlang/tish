@@ -20706,6 +20706,14 @@ impl Codegen {
                 }
             }
         }
+        // #630: A NAME REMOVED HERE IS REJECTED FOR GOOD. `collect_bad_vec_callsites` is a
+        // SOUNDNESS verdict — the fn is called somewhere in a way the native-vec ABI cannot
+        // represent — and that fact is a property of the program, which does not change during this
+        // analysis. Re-admitting it later can only produce the same wrong answer.
+        //
+        // Recording it is also what makes the forwarding fixpoint below terminate; see the note
+        // there.
+        let mut rejected: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             let mut remove: Vec<String> = Vec::new();
             for s in &program.statements {
@@ -20717,6 +20725,7 @@ impl Codegen {
                 break;
             }
             for n in remove {
+                rejected.insert(n.clone());
                 sigs.remove(&n);
             }
             if sigs.is_empty() {
@@ -20752,6 +20761,22 @@ impl Codegen {
                     if Self::ann_is_simple(return_type.as_ref(), "fixed") {
                         continue;
                     }
+                    // #630: AND IT MUST NOT RE-ADD A NAME THE REMOVAL PASS ALREADY REJECTED. This is
+                    // what makes the analysis terminate. Without it the two fixpoints fight: the
+                    // forwarding pass admits `F`, the removal pass below proves `F` unsound and
+                    // drops it, `added` is true so the outer loop runs again, and `F` — re-evaluated
+                    // against a program that has not changed — is admitted again. Forever.
+                    //
+                    // The only exits were `!added` and `sigs.is_empty()`, and an oscillating pair
+                    // satisfies neither: measured on the reporter's project it sat at a steady
+                    // `sigs=3` for 200+ iterations at 100% CPU, with no cargo child and nothing
+                    // printed, which is why it read as a dead build rather than a slow one.
+                    //
+                    // With this guard every outer iteration must admit a name never admitted before,
+                    // so the loop is bounded by the number of top-level fns.
+                    if rejected.contains(name.as_ref()) {
+                        continue;
+                    }
                     if let Some(sig) = Self::infer_vec_fn_sig_forwarding(params, body, &sigs) {
                         let has_array_param = sig
                             .params
@@ -20778,6 +20803,7 @@ impl Codegen {
                     break;
                 }
                 for n in remove {
+                    rejected.insert(n.clone());
                     sigs.remove(&n);
                 }
                 if sigs.is_empty() {

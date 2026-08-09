@@ -79,12 +79,25 @@ tishdoc-parse	git:https://github.com/tishlang/tishdoc-parse.git@main	.	tish	npm 
 # scii: `tish build --target native` with http,timers,process,tty,fs — the widest native feature set
 # of any consumer here. On a feature branch, so local: (skipped in CI).
 # xfail: the COMPILER FRONTEND spins at 100% CPU indefinitely on this entry point — 40+ minutes with
-# no rustc ever spawned, so it is not a slow native build. Confirmed identical on 3.3.0, so it is a
-# pre-existing compiler hang, not a regression from the GBA work. It deserves its own issue; kept
-# here as xfail so the row flags the day it starts terminating.
-# The `timeout 240` is load-bearing, not caution: the runner does NOT cap a repo's command, and
-# this one never terminates, so without it a single xfail row eats the whole suite's budget and the
-# run looks hung rather than reporting.
+# no rustc ever spawned. That was #630 — `detect_native_vec_fns` livelocked: its forwarding fixpoint
+# re-admitted a fn its removal fixpoint had just rejected, so neither exit condition (`!added`,
+# `sigs.is_empty()`) was ever reached. FIXED in this branch: the analysis now completes and the build
+# reaches codegen.
+#
+# STILL xfail, for a DIFFERENT reason the hang was masking. Past the analysis, codegen fails with
+# `error[E0425]: cannot find value HELP_COLUMNS` — a cross-module forward reference: `export let
+# HELP_COLUMNS` in src/ui/view.tish is emitted after top-level code that reads it. That is #629's
+# class, not #630's, and it is not fixable by the module-statement reorder shipped for #629, which
+# deliberately refuses to move a declaration over STRAIGHT-LINE code (there a mention is either a
+# use-before-init or a reference to an earlier binding). It needs module-ordering work.
+#
+# Note this reproduces only with the LOCAL workspace lattish wired in, which is what the runner does
+# and what a plain `tish build` in the repo does not — so a direct build of the same entry point can
+# succeed while this row fails. Do not take a green local build as evidence for this row.
+#
+# The `timeout 240` STAYS, and is load-bearing rather than caution: the runner does not cap a repo's
+# command, so if the livelock ever returns, the row reports a failure instead of consuming the whole
+# suite's budget and making the run look hung — which is exactly how #630 first presented.
 scii	local:~/Projects/scii	.	tish	bash -c 'timeout 240 tish build src/tui/interactive.tish -o /tmp/_scii --feature http,timers,process,tty,fs'	xfail
 # deck: the JS backend, on a real library build (transpile + exports append).
 deck	local:~/Projects/deck	.	tish	bash -c 'tish build src/index.tish -o /tmp/_deck.js --target js'	pass
