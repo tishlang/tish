@@ -1,0 +1,26 @@
+// #637: a fn inlined at 2+ call sites emitted branches naming the ORIGINAL parameter, because the
+// `_inl<N>_<param>` substitution reaches a ternary's condition but not its branches. One call site
+// survived; from the second onward the program did not build:
+//
+//     error[E0425]: cannot find value `flag` in this scope
+//     error[E0614]: type `f64` cannot be dereferenced      (the inliner binds every param as f64,
+//                                                           then the emitter asks it for is_truthy)
+//
+// Ternaries are no longer inlined. In tests/core so every backend must agree on the results.
+function pick(flag: boolean): number { return flag ? 10 : 20 }
+let one = 1
+console.log(pick(one) + "," + pick(true))
+
+// Same shape without an annotation — this broke too, so the annotation was never the variable.
+function pick2(flag) { return flag ? 10 : 20 }
+console.log(pick2(1) + "," + pick2(0))
+
+// A comparison condition was NEVER inlined (Gt is not an arithmetic op), which is why it always
+// compiled. Kept here so a future widening of the inliner has to keep it working.
+function big(a, b) { return a > b ? a : b }
+let x = 3
+console.log(big(x, 5) + "," + big(9, 2))
+
+// Arithmetic inlining itself is untouched — this is the shape the optimisation exists for.
+function area(w, h) { return w * h + 1 }
+console.log(area(3, 4) + "," + area(5, 6))
