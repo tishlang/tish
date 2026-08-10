@@ -20178,16 +20178,27 @@ impl Codegen {
                 matches!(op, UnaryOp::Neg | UnaryOp::Pos)
                     && Self::inline_body_numeric(operand, params, self_name)
             }
-            Expr::Conditional {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::inline_body_numeric(cond, params, self_name)
-                    && Self::inline_body_numeric(then_branch, params, self_name)
-                    && Self::inline_body_numeric(else_branch, params, self_name)
-            }
+            // #637: A TERNARY IS NEVER INLINED. The substitution that rewrites a parameter to its
+            // `_inl<N>_<param>` temporary reaches the condition but NOT the branches, so an inlined
+            // ternary emits branches naming parameters that do not exist in the generated scope:
+            //
+            //     if Value::Bool((_inl0_a > _inl0_b)).is_truthy() { a } else { b }
+            //                     ^^^^^^^ substituted              ^     ^ not substituted
+            //     error[E0425]: cannot find value `a` in this scope
+            //
+            // The set this arm used to admit was exactly the broken one. `inline_body_numeric`
+            // accepts a bare param, so `flag ? 10 : 20` was inlined — and since the inliner binds
+            // every param as `f64`, the emitter then asked an `f64` for `.is_truthy()`
+            // (`error[E0614]: type f64 cannot be dereferenced`). A comparison cond such as
+            // `a > b ? a : b` was never admitted here, because `Gt` is not in the arithmetic op list
+            // above — which is why that shape compiled fine and only truthiness tests broke.
+            //
+            // So refusing outright REMOVES no working inline: every ternary this arm ever accepted
+            // produced code that did not build from the second call site onward. Widening it instead
+            // (admitting comparison conds) is what surfaced the branch-substitution gap, and fixing
+            // that belongs with the substitution machinery, not here. Ternaries fall back to the
+            // ordinary call: correct, and merely un-inlined.
+            Expr::Conditional { .. } => false,
             Expr::Call { callee, args, .. } => {
                 // Only 1-arg `Math.<intrinsic>` — never another fn (incl. self), to keep it a pure
                 // expression with no dispatch and no recursion.
