@@ -13278,8 +13278,28 @@ impl Codegen {
     }
 
     fn index_in_bounds(&self, index: &Expr, arr: &str) -> bool {
-        let Some(len) = self.vec_fixed_len.get(arr) else {
-            return false;
+        // #645: a PROMOTED module-const array knows its own length unconditionally — it is a
+        // `const G_X: [i32; N]`, fixed at emit time. `vec_fixed_len` is per-scope inference and is
+        // NOT populated for it in every body, so the SAME expression proved in bounds inside a
+        // function's native twin and failed inside its boxed closure — the twin got a direct
+        // integer read while the closure, which is the copy a boxed call actually runs, kept the
+        // bounds-checked `f64`/NaN form. Falling back to the static's own length makes the proof
+        // scope-independent, which is what a compile-time constant deserves.
+        let owned_len;
+        let len = match self.vec_fixed_len.get(arr) {
+            Some(l) => l,
+            None => match self
+                .module_const_f64_arrays
+                .get(arr)
+                .map(|v| v.len())
+                .filter(|n| *n > 0)
+            {
+                Some(n) => {
+                    owned_len = BoundKey::Const(n as i64);
+                    &owned_len
+                }
+                None => return false,
+            },
         };
         let Expr::Ident { name: idx, .. } = index else {
             if let Expr::Literal {
@@ -13293,6 +13313,32 @@ impl Codegen {
                     }
                 } else if Self::int_literal_value(*n) == Some(0) {
                     return true;
+                }
+            }
+            // #645: a MASK bounds its result exactly. For any i32 `x` and a non-negative literal
+            // mask `M`, `x & M` lies in `[0, M]` — the AND clears every bit above M's highest,
+            // including the sign bit, so a negative `x` cannot escape the range either. That makes
+            // `A[k & 63]` provably in bounds for a 64-element `A` without knowing anything about
+            // `k`.
+            //
+            // Worth the special case because it is the idiomatic way to index a power-of-two table,
+            // and without it such a read misses the proven-in-bounds path and falls to the
+            // bounds-checked form — which returns `f64` (it must be able to answer NaN), dragging
+            // an otherwise all-integer expression through an f64 round trip on EVERY element.
+            if let Expr::Binary { op: BinOp::BitAnd, left, right, .. } = index {
+                let mask_of = |e: &Expr| -> Option<i64> {
+                    if let Expr::Literal { value: Literal::Number(n), .. } = e {
+                        Self::int_literal_value(*n).filter(|v| *v >= 0)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(m) = mask_of(right).or_else(|| mask_of(left)) {
+                    if let BoundKey::Const(len) = len {
+                        if m < *len {
+                            return true;
+                        }
+                    }
                 }
             }
             return self.sub_index_in_bounds(index, arr);
@@ -25745,20 +25791,15 @@ impl Codegen {
                             name.as_ref(),
                         ) {
                             let in_bounds = self.index_in_bounds(index, name.as_ref());
-                            let (idx_code, idx_ty) = self.emit_typed_expr(index)?;
-                            let idx_usize = if idx_ty == RustType::F64 {
-                                format!("({}) as usize", idx_code)
-                            } else {
-                                let iv = if idx_ty.is_native() {
-                                    idx_ty.to_value_expr(&idx_code)
-                                } else {
-                                    idx_code
-                                };
-                                format!(
-                                    "{{ let _i = &{}; if let Value::Number(n) = _i {{ *n as usize }} else {{ panic!(\"array index must be a number\") }} }}",
-                                    iv
-                                )
-                            };
+                            // #645: use the SHARED index lowering. This site used to accept only
+                            // `F64` natively and push everything else — including a perfectly good
+                            // integer expression — through `Value::Number(..)` and back, or through
+                            // an `i32 -> f64 -> usize` cast. On a target with no FPU that cast is a
+                            // soft-float call PER ELEMENT, which is most of what made a promoted
+                            // array's read expensive. `emit_index_usize` already has the int-domain
+                            // shortcut (`(int).max(0) as usize`, where `.max(0)` reproduces f64's
+                            // saturate-to-zero for a negative index).
+                            let idx_usize = self.emit_index_usize(index)?;
                             let is_int = self.module_const_int_statics.contains(&static_name);
                             // The proven-in-bounds read on an integer array is the whole point: a
                             // plain word load, reported as I32 so the consumer stays in the integer
