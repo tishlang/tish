@@ -1067,7 +1067,11 @@ pub(crate) struct Codegen {
     native_ns_locals: std::collections::HashMap<String, String>,
     /// Typed native imports (`declare fun` + a native import): tish name -> its typed signature.
     /// A matching call emits a DIRECT `<crate>::name_typed(..)` instead of a boxed `value_call`.
-    extern_fns: std::collections::HashMap<String, ExternSig>,
+    /// #615: MULTIPLE signatures per name, dispatched on EXACT arity. An extern with optional
+    /// trailing args (`ui_text` 4-10, `ui_rect` 5 or 6) could previously be typed for one arity
+    /// only; every other call site stayed boxed. Additive by construction: an arity with no
+    /// declaration finds no match and keeps the boxed path bit-identically.
+    extern_fns: std::collections::HashMap<String, Vec<ExternSig>>,
     /// User tish functions whose declared return type is a native STRUCT (`function f(): Iface`).
     /// A call in a typed context coerces the boxed result to the native struct (a `Value::Struct`
     /// downcast on GBA), so `f().field` reads are native instead of `get_prop`. Name -> `RustType::Named`.
@@ -2989,11 +2993,33 @@ impl Codegen {
                 .as_ref()
                 .map(RustType::from_annotation)
                 .unwrap_or(RustType::Unit);
-            self.extern_fns.insert(
-                name.to_string(),
-                ExternSig { crate_name, symbol: export_name.clone(), params: ptys, ret },
-            );
+            // #615: one name may carry several arities. A REDECLARATION of an arity already seen
+            // replaces it (last wins), matching the previous single-map behaviour for the
+            // single-arity case exactly.
+            let sig = ExternSig { crate_name, symbol: export_name.clone(), params: ptys, ret };
+            let slot = self.extern_fns.entry(name.to_string()).or_default();
+            if let Some(existing) = slot.iter_mut().find(|e| e.params.len() == sig.params.len()) {
+                *existing = sig;
+            } else {
+                slot.push(sig);
+            }
         }
+    }
+
+    /// #615: the declared signature for `name` at EXACTLY `argc` arguments, plus the Rust symbol
+    /// suffix to call it by. A name with a single declaration keeps the historical `<symbol>_typed`
+    /// spelling, so every existing extension crate links unchanged; only a name that declares more
+    /// than one arity uses `<symbol>_typed_<arity>`, which is the new surface a crate opts into by
+    /// declaring the extra arities in the first place.
+    fn extern_sig_for_arity(&self, name: &str, argc: usize) -> Option<(ExternSig, String)> {
+        let sigs = self.extern_fns.get(name)?;
+        let sig = sigs.iter().find(|s| s.params.len() == argc)?.clone();
+        let suffix = if sigs.len() > 1 {
+            format!("_typed_{}", argc)
+        } else {
+            "_typed".to_string()
+        };
+        Some((sig, suffix))
     }
 
     /// Record every top-level `function f(...): Iface` whose return annotation resolves — via the type
@@ -9268,10 +9294,10 @@ impl Codegen {
                 // `value_call` dispatch through the namespace object. Falls through to the boxed path
                 // when the arg count/kind doesn't match (a dynamic/spread call stays correct).
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                    if let Some(sig) = self.extern_fns.get(fname.as_ref()).cloned() {
-                        if args.len() == sig.params.len()
-                            && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
-                        {
+                    if let Some((sig, suffix)) =
+                        self.extern_sig_for_arity(fname.as_ref(), args.len())
+                    {
+                        if args.iter().all(|a| matches!(a, CallArg::Expr(_))) {
                             let mut argc: Vec<String> = Vec::with_capacity(args.len());
                             for (a, ty) in args.iter().zip(sig.params.iter()) {
                                 if let CallArg::Expr(e) = a {
@@ -9279,9 +9305,10 @@ impl Codegen {
                                 }
                             }
                             let call = format!(
-                                "{}::{}_typed({})",
+                                "{}::{}{}({})",
                                 sig.crate_name,
                                 sig.symbol,
+                                suffix,
                                 argc.join(", ")
                             );
                             // This is a Value-producing context: a `void` extern yields `Null`; a
@@ -25852,9 +25879,10 @@ impl Codegen {
                 // dropping to `ops::*`. Only a native-returning extern is taken here; a `void`/`Value`
                 // one falls through to the boxed path (this is a value-position expression).
                 if let Expr::Ident { name: fname, .. } = callee.as_ref() {
-                    if let Some(sig) = self.extern_fns.get(fname.as_ref()).cloned() {
+                    if let Some((sig, suffix)) =
+                        self.extern_sig_for_arity(fname.as_ref(), args.len())
+                    {
                         if sig.ret.is_native()
-                            && args.len() == sig.params.len()
                             && args.iter().all(|a| matches!(a, CallArg::Expr(_)))
                         {
                             let mut argc: Vec<String> = Vec::with_capacity(args.len());
@@ -25864,9 +25892,10 @@ impl Codegen {
                                 }
                             }
                             let call = format!(
-                                "{}::{}_typed({})",
+                                "{}::{}{}({})",
                                 sig.crate_name,
                                 sig.symbol,
+                                suffix,
                                 argc.join(", ")
                             );
                             return Ok((call, sig.ret));
