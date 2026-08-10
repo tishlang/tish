@@ -12701,9 +12701,16 @@ impl Codegen {
     /// function that mixes the two. A function whose whole signature is `i32` has one convention
     /// and keeps the coercion at the boundary, where the caller does it once on an argument that is
     /// usually already an integer.
+    ///
+    /// #647: ZERO PARAMETERS QUALIFY. The rule above is about keeping ONE coercion convention
+    /// across a signature — and a signature with no parameters has nothing to be inconsistent
+    /// about, so the reason the rule exists cannot apply to it. Excluding it cost every niladic
+    /// accessor (`rCols()`, `rPocket()`, `atkLines()`) a boxed `value_call`: measured at 55 ticks
+    /// against ~0 for the identical body taking one argument. The body proof still runs, so a
+    /// zero-arg fn that touches something unlowerable is rejected on its body, as before — this
+    /// only stops rejecting it on its (empty) parameter list.
     fn fn_sig_all_i32(params: &[FunParam], return_type: &Option<TypeAnnotation>) -> bool {
         return_type.as_ref().is_some_and(Self::ann_is_i32)
-            && !params.is_empty()
             && params.iter().all(|p| {
                 matches!(p, FunParam::Simple(tp)
                     if tp.default.is_none()
