@@ -1,0 +1,55 @@
+// #563: two nested functions in the same outer function that both name a binding from an OUTER
+// function scope. That binding is a plain `Value` local in this frame, so the first `move` closure
+// MOVED it and the second failed with `error[E0382]: use of moved value`.
+//
+// ONE nested fn always compiled, which is why this read as "nested functions are broken" instead of
+// "the second one is" — so every case below has at least TWO.
+
+function present(s) { return s.length }
+
+// The reported shape: two nested fns sharing one module-level fn.
+function two() {
+  let t = 0
+  function a() { t = t + present("ab") }
+  function b() { t = t + present("xyz") }
+  a(); b()
+  return t
+}
+
+// Three nested fns sharing TWO outer fns — the clone must be per-closure, not once.
+function scale(n) { return n * 2 }
+function three() {
+  let t = 0
+  function a() { t = t + present("ab") + scale(1) }
+  function b() { t = t + present("z") + scale(2) }
+  function c() { t = t + present("wxyz") + scale(3) }
+  a(); b(); c()
+  return t
+}
+
+// Two frames deep: the innermost pair reaches a module fn through an intervening closure.
+function deep() {
+  let t = 0
+  function mid() {
+    function inner1() { t = t + present("aa") }
+    function inner2() { t = t + present("bbb") }
+    inner1(); inner2()
+  }
+  mid()
+  return t
+}
+
+// The captured fn is an outer LOCAL, not module-level — same hazard, different scope level.
+function localFn() {
+  let t = 0
+  function helper(n) { return n + 1 }
+  function p() { t = t + helper(3) }
+  function q() { t = t + helper(4) }
+  p(); q()
+  return t
+}
+
+console.log(two())
+console.log(three())
+console.log(deep())
+console.log(localFn())

@@ -7100,6 +7100,45 @@ impl Codegen {
                         sibling_escaped, sibling_escaped
                     ));
                 }
+                // #563: a fn from an OUTER function scope is not a sibling, so the `_ref`/`_cell`
+                // path above never fires for it — but the enclosing frame already materialized it
+                // as a plain `Value` local (module fns and imports arrive that way, via the
+                // `let f = (*f_ref.borrow()).clone();` prelude). A `move` closure therefore MOVES
+                // it, and the SECOND nested fn that names it fails:
+                //
+                //     error[E0382]: use of moved value: `uiRowText`
+                //
+                // One nested fn compiles fine, which is why this reads as "nested functions are
+                // broken" rather than "the second one is". Clone it in, exactly as the builtin list
+                // below does for `console`/`Math` — same hazard, same remedy; that list is just a
+                // hardcoded enumeration of the names that happened to hit it first.
+                //
+                // Scope-stack order matters: `.last()` is the current (sibling) scope and is
+                // already handled, and scope 0 is module level. Anything in between is an
+                // enclosing function's scope — those are the locals at risk.
+                let outer_scope_fns: Vec<String> = {
+                    let depth = self.function_scope_stack.len();
+                    let mut seen = std::collections::HashSet::new();
+                    let mut out = Vec::new();
+                    for scope in self.function_scope_stack.iter().take(depth.saturating_sub(1)) {
+                        for f in scope {
+                            if f.as_str() != name_raw
+                                && referenced.contains(f.as_str())
+                                && !sibling_fns.iter().any(|s| s == f)
+                                && !outer_vars.iter().any(|v| v == f)
+                                && !outer_params.iter().any(|p| p == f)
+                                && seen.insert(f.clone())
+                            {
+                                out.push(f.clone());
+                            }
+                        }
+                    }
+                    out
+                };
+                for f in &outer_scope_fns {
+                    let escaped = Self::escape_ident(f);
+                    self.writeln(&format!("let {} = {}.clone();", escaped, escaped));
+                }
                 // Clone outer parameters so they can be captured by the move closure
                 for outer_param in &outer_params {
                     let param_escaped = Self::escape_ident(outer_param);
