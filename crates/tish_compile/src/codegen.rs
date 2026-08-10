@@ -705,6 +705,28 @@ pub fn compile_with_native_modules(
 /// as warnings; `TISH_CHECK=error` also fails the build. Unset/`0` → no-op (default builds are
 /// unaffected). The checker is gradual (see `check.rs`): it never flags code it can't prove wrong.
 fn run_type_check(program: &Program) -> Result<(), CompileError> {
+    // #641: call arity is checked UNCONDITIONALLY, ahead of the opt-in gradual checker. It cannot
+    // sit behind `TISH_CHECK` — the case this exists for built clean and shipped, and a diagnostic
+    // nobody enables would not have caught it. It is also not "gradual": an omitted argument bound
+    // to a typed parameter arrives as `Value::Null` and cannot satisfy the typed prologue, so it is
+    // provably wrong on every backend rather than an unproven annotation.
+    //
+    // `TISH_ARITY=0` is the escape hatch, for bisecting a build against pre-#641 behaviour.
+    if std::env::var("TISH_ARITY").as_deref() != Ok("0") {
+        let arity = crate::check::check_call_arity(program);
+        if let Some(first) = arity.first() {
+            for d in &arity {
+                eprintln!(
+                    "tish error: {}:{}: {}",
+                    d.span.start.0, d.span.start.1, d.message
+                );
+            }
+            return Err(CompileError::new(
+                format!("call arity: {} error(s)", arity.len()),
+                Some(first.span),
+            ));
+        }
+    }
     let mode = std::env::var("TISH_CHECK").unwrap_or_default();
     if mode.is_empty() || mode == "0" {
         return Ok(());
@@ -15743,7 +15765,7 @@ impl Codegen {
     /// statements (blocks, if, loops, switch, try, return/throw). `f` is responsible for recursing
     /// into each expression's own subtree. Does NOT descend into nested fn-decl bodies (a different
     /// lexical scope; a captured loop var would be RefCell-bailed before reaching here).
-    fn for_each_stmt_expr(s: &Statement, f: &mut dyn FnMut(&Expr)) {
+    pub(crate) fn for_each_stmt_expr(s: &Statement, f: &mut dyn FnMut(&Expr)) {
         match s {
             Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
                 for st in statements {

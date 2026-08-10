@@ -12,7 +12,7 @@ mod types;
 
 pub use schemes::{set_active as set_scheme_registry, SchemeRegistry};
 
-pub use check::{check_program, TypeDiagnostic};
+pub use check::{check_call_arity, check_program, TypeDiagnostic};
 
 /// The native typed-codegen optimizations — numeric param inference, struct/aggregate inference,
 /// native (monomorphic) free fns, native-vec params, recursive-struct arena lowering, fused/native
