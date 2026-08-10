@@ -21377,7 +21377,23 @@ impl Codegen {
         //
         // This does not close #594's other half — a lowered fn that can actually SEE module state,
         // which needs those bindings emitted as statics on GBA too. It stops the miscompile.
-        if self.emit_mode == crate::NativeEmitMode::Gba {
+        // #633: THE SAME HOLE EXISTS OFF-GBA. The scoping above reasoned that off-target "the
+        // statics DO exist" — true only for what those passes actually cover: numeric arrays and
+        // numeric globals. A module binding of any OTHER shape (an array of ARRAYS, a string, an
+        // object) gets no top-level home on ANY target, stays a `let` in `run()`, and is just as
+        // unreachable from a free `fn name_nv` on host as on GBA:
+        //
+        //   let COLS = [[1,2,3],[4,5]]                       // array of arrays → no static
+        //   function widths(){ let o=[]; …COLS[i].length…; return o }
+        //   widths(); widths()                               // ≥2 call sites → not inlined
+        //
+        // compiles to `error[E0425]: cannot find value COLS in this scope`. One call site hides it
+        // (the fn is inlined and never lowered), which is why this surfaced as a cross-module
+        // ordering bug in a large program rather than as the two-line case it actually is.
+        //
+        // The carve-out is what differs per target, not the reachability rule — so run the rejection
+        // everywhere and let the per-target `remove` list below decide what still has a home.
+        {
             let mut module_bindings = Self::collect_module_level_binding_names(&program.statements);
             // …EXCEPT the ones that now have a top-level home. Since #594 a module const numeric
             // array is a `const` and a mutable numeric global is a `SingleCore` static, both

@@ -1,0 +1,45 @@
+// #633: a fn lowered to a native-vec free fn (`name_nv`) may not read a module binding that has no
+// top-level home. `COLS` is an array of ARRAYS, so neither the const-array hoist nor the numeric
+// -globals pass gives it a `static`; it stays a `let` inside `run()`, which no free `fn` can name.
+//
+// TWO call sites are load-bearing: with one, the fn is INLINED at its only call site and never
+// lowered, so the bug does not appear. That is why this surfaced in a large program (as an apparent
+// cross-module ordering fault) instead of in a two-line test.
+let COLS = [[1, 2, 3], [4, 5], [6, 7, 8, 9]]
+
+function widths() {
+  let out = []
+  let i = 0
+  while (i < COLS.length) {
+    out.push(COLS[i].length)
+    i = i + 1
+  }
+  return out
+}
+
+let a = widths()
+let b = widths()
+console.log(a.length)
+console.log(b[2])
+console.log(a[0])
+
+// A numeric module const. The rejection spares bindings that DO get a top-level home
+// (`module_const_f64_arrays` statics, numeric globals) — but `SCALE` gets none here: it is emitted
+// as `let SCALE: Vec<f64>` inside `run()`, so this fn is rejected too and falls back to the boxed
+// path. That is correct, not an over-restriction; what this case pins is that the fallback still
+// computes the right answer. The carve-out itself is exercised by the benchmarks (queens,
+// fannkuch, spectral_norm), which keep their `_nv` lowering because they name only params/locals.
+const SCALE = [2, 4, 8]
+function scaled(n) {
+  let out = []
+  let i = 0
+  while (i < SCALE.length) {
+    out.push(SCALE[i] * n)
+    i = i + 1
+  }
+  return out
+}
+let s1 = scaled(3)
+let s2 = scaled(10)
+console.log(s1[2])
+console.log(s2[0])
