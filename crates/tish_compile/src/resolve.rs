@@ -1231,6 +1231,29 @@ fn resolve_import_path(
             spec
         ));
     }
+    // #618: build-time package-variant selection. `package.json` may remap an import specifier to
+    // another module, which is tish's equivalent of a cargo feature swapping one implementation for
+    // another:
+    //
+    //     "tish": { "packageOverrides": { "./drop_tables": "./drop_tables_pocket" } }
+    //
+    // Applied to the SPECIFIER before any resolution, so it works for relative paths and package
+    // names alike, and the replacement is then resolved by the ordinary rules (relative to the
+    // importing file, as the original would have been). Matching is exact on the written
+    // specifier — no prefix or glob matching, so an override cannot silently capture an import the
+    // author did not mean to redirect.
+    //
+    // A remapped specifier is NOT re-checked against the override table: one substitution per
+    // import, so a table that maps A->B and B->A terminates instead of looping.
+    let overridden = {
+        let cfg = read_project_tish_config(project_root);
+        cfg.get("packageOverrides")
+            .and_then(|o| o.as_object())
+            .and_then(|o| o.get(spec))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let spec: &str = overridden.as_deref().unwrap_or(spec);
     if !spec.starts_with("./") && !spec.starts_with("../") {
         if let Some(path) = resolve_bare_spec(spec, from_dir, project_root) {
             return Ok(path);
