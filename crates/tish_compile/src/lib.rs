@@ -291,4 +291,36 @@ mod monomorphization_tests {
         assert!(rust.contains("value: f64"), "expected native f64 field; got:\n{}",
             rust.lines().filter(|l| l.contains("struct") || l.contains("value")).take(6).collect::<Vec<_>>().join("\n"));
     }
+
+    /// #614: a module-level binding demoted to boxed `Value` must NOT drag down a function-local
+    /// that merely shares its name. Both lowerings have to appear in one program — under the old
+    /// bare-name keying that was impossible, since one name got one verdict bundle-wide.
+    #[test]
+    fn module_demotion_does_not_box_a_same_named_local() {
+        let src = r#"
+let i = 0
+i = i + "x"
+function modern(n: number) {
+  let i = 0
+  let t = 0
+  while (i < n) { t = t + i * 2; i = i + 1 }
+  return t
+}
+console.log(i)
+console.log(modern(5))
+"#;
+        let rust = compile(&parse(src).unwrap()).unwrap();
+        // The module `i` really can hold a String (`i + "x"`), so it must stay boxed.
+        assert!(
+            rust.contains("let mut i = Value::Number(0_f64)"),
+            "module-level `i` must stay boxed; got:\n{}",
+            rust.lines().filter(|l| l.contains("let mut i")).collect::<Vec<_>>().join("\n")
+        );
+        // `modern`'s `i` is a different variable, provably numeric, and must lower natively.
+        assert!(
+            rust.contains("let mut i: f64 = 0_f64"),
+            "fn-local `i` must stay native f64; got:\n{}",
+            rust.lines().filter(|l| l.contains("let mut i")).collect::<Vec<_>>().join("\n")
+        );
+    }
 }

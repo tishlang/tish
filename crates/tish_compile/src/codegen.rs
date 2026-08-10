@@ -1234,7 +1234,22 @@ pub(crate) struct Codegen {
     /// once in `emit_program` (after type aliases + `native_fns`), consulted at `VarDecl` to force
     /// `RustType::Value`. This is the rust-AOT analogue of the VM array-JIT bailing to the
     /// interpreter on a non-numeric element. See `collect_demoted_numeric_locals`.
-    demoted_numeric_locals: std::collections::HashSet<String>,
+    ///
+    /// #614: keyed by `(declaring scope, name)`, NOT by bare name. The scope is the top-level fn
+    /// whose body declares the local, or `""` for a module-level binding. Flat keying meant one
+    /// boxed `i` anywhere in the bundle demoted every `i` in every module — with 44 of tish-gba's
+    /// 70 packages untyped, a legacy package silently de-optimized a fully-modernized one that
+    /// merely shared a loop-variable name (~40-60 cycles per boxed use against 2-4 native).
+    ///
+    /// Module-level bindings stay program-wide (scope `""`) ON PURPOSE: a module `let` can be
+    /// reassigned from inside any fn, so its demotion is genuinely a whole-program property.
+    /// Only FUNCTION-LOCAL names are scoped, and for those every reassignment necessarily lives
+    /// in the declaring fn (or a closure nested in it) — exactly the region analyzed.
+    demoted_numeric_locals: std::collections::HashSet<(String, String)>,
+    /// #614: the top-level fn currently being emitted (`""` at module level), used to key lookups
+    /// into `demoted_numeric_locals`. A stack because fn emission nests; the FIRST entry is the
+    /// top-level fn, which is the granularity the collector analyzes.
+    demote_scope_stack: Vec<String>,
     /// Top-level fns whose EVERY return is provably numeric → the native type a call to one yields.
     ///
     /// Without it a call is opaque, so a local assigned from one demotes to a boxed `Value` and
@@ -1434,6 +1449,7 @@ impl Codegen {
             aggregate_array_locals: std::collections::HashSet::new(),
             agg_cur_ret: None,
             demoted_numeric_locals: std::collections::HashSet::new(),
+            demote_scope_stack: Vec::new(),
             user_fn_ret: std::collections::HashMap::new(),
             int_range_locals: std::collections::HashMap::new(),
             diag_coord_indices: std::collections::HashSet::new(),
@@ -5937,9 +5953,26 @@ impl Codegen {
                 // `s = s + arr[i]`, JS string concat) must stay a boxed `Value` — a native-f64
                 // store would panic at the `from_value_expr(F64)` coercion. See
                 // `demoted_numeric_locals`.
-                if rust_type == RustType::F64 && self.demoted_numeric_locals.contains(name.as_ref())
-                {
-                    rust_type = RustType::Value;
+                // #614: look up (declaring scope, name). A module-level binding was decided
+                // program-wide under scope `""`; a function-local under its top-level fn. Both are
+                // checked because this same emission path serves module code and fn bodies, and a
+                // fn-local name may legitimately shadow a module one.
+                // #614: look up (declaring scope, name). A fn-local is keyed under its top-level
+                // fn; a module binding under `""`. Both are consulted because this same emission
+                // path serves module code and fn bodies.
+                // #614: key by the scope this declaration belongs to. No module fallback — the
+                // statement being emitted IS a declaration, so the variable is by definition owned
+                // by the current scope: inside a fn it is that fn's local (`scope` = the top-level
+                // fn), at module level `scope` is `""`, which is the module key itself. Consulting
+                // the module verdict for a fn-local is exactly the false positive this fixes.
+                if rust_type == RustType::F64 {
+                    let scope = self.demote_scope_stack.first().cloned().unwrap_or_default();
+                    if self
+                        .demoted_numeric_locals
+                        .contains(&(scope, name.to_string()))
+                    {
+                        rust_type = RustType::Value;
+                    }
                 }
 
                 // Native-vec call initializer: `let cum = cumulative(probs)` → `Vec<f64>`.
@@ -7454,9 +7487,12 @@ impl Codegen {
                         for v in &body_cell_vars {
                             self.refcell_wrapped_vars.insert(v.clone());
                         }
+                        // #614: this body's locals were analyzed under THIS fn's scope.
+                        self.demote_scope_stack.push(name_raw.to_string());
                         for s in statements {
                             self.emit_statement(s)?;
                         }
+                        self.demote_scope_stack.pop();
                         for v in &body_cell_vars {
                             self.refcell_wrapped_vars.remove(v);
                         }
@@ -7468,7 +7504,9 @@ impl Codegen {
                         self.outer_vars_stack.push(Vec::new());
                         self.rc_cell_storage_scopes
                             .push(std::collections::HashSet::new());
+                        self.demote_scope_stack.push(name_raw.to_string()); // #614
                         self.emit_statement(body)?;
+                        self.demote_scope_stack.pop();
                         self.function_scope_stack.pop();
                         self.outer_vars_stack.pop();
                         self.rc_cell_storage_scopes.pop();
@@ -12842,23 +12880,80 @@ impl Codegen {
         }
     }
 
-    fn collect_demoted_numeric_locals(&self, stmts: &[Statement]) -> HashSet<String> {
-        // 1. Flat env: every annotated local/param name → its native `RustType`.
+    fn collect_demoted_numeric_locals(&self, stmts: &[Statement]) -> HashSet<(String, String)> {
+        // #614: the analysis below is UNCHANGED — same env, same reassignment set, same fixpoint.
+        // What changed is the KEY. Previously a bare name, so one boxed `i` anywhere in the bundle
+        // demoted every `i` in every module (~40-60 cycles per boxed use against 2-4 native); with
+        // 44 of tish-gba's 70 packages untyped, a legacy package silently de-optimized a fully
+        // modernized one that merely shared a loop-variable name.
+        //
+        // Scope granularity is the TOP-LEVEL FN, or `""` for module level. Each fn is analyzed from
+        // its own `FunDecl` statement — not just its body — so params (including a REST param, whose
+        // `Vec<f64>` element type is what keeps `total` native in `typed_assign_conversion`) are
+        // collected exactly as the flat pass collected them. Nested fns fold into their enclosing
+        // top-level fn: still conservative, but bounded to one function instead of the whole bundle.
+        let mut out: HashSet<(String, String)> = HashSet::new();
+
+        // Module-level names keep the program-wide verdict: a module `let` is reassignable from
+        // inside any fn, so whether it can go non-numeric is genuinely a whole-program property.
+        let module_names: HashSet<String> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                Statement::VarDecl { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+
         let mut env: HashMap<String, RustType> = HashMap::new();
         Self::collect_annotated_types(stmts, &self.type_aliases, &mut env);
-        // 2. Every reassignment `(name, rhs)` anywhere in the program (incl. nested exprs/closures).
         let mut reassigns: Vec<(String, &Expr)> = Vec::new();
         Self::collect_reassignments_stmts(stmts, &mut reassigns);
-        // 3. Fixpoint: demote a `number` local whose any reassignment RHS isn't native `f64`.
+        for name in self.demote_fixpoint(&mut env, &reassigns, &module_names) {
+            out.insert((String::new(), name));
+        }
+
+        for s in stmts {
+            let Statement::FunDecl { name, .. } = s else {
+                continue;
+            };
+            let scope = name.to_string();
+            let one = std::slice::from_ref(s);
+            let mut fenv: HashMap<String, RustType> = HashMap::new();
+            Self::collect_annotated_types(one, &self.type_aliases, &mut fenv);
+            // Every name this fn declares — INCLUDING one that shadows a module binding. A
+            // shadowing local is a different variable, so it gets its own verdict here; leaving it
+            // out would drop it back onto the module's verdict, which is the very bug being fixed.
+            let local_names: HashSet<String> = fenv.keys().cloned().collect();
+            if local_names.is_empty() {
+                continue;
+            }
+            let mut freassigns: Vec<(String, &Expr)> = Vec::new();
+            Self::collect_reassignments_stmts(one, &mut freassigns);
+            for n in self.demote_fixpoint(&mut fenv, &freassigns, &local_names) {
+                out.insert((scope.clone(), n));
+            }
+        }
+        out
+    }
+
+    /// #614: the demotion fixpoint, factored out so the module scope and every function scope run
+    /// the IDENTICAL rule. Only names in `considered` may demote; `env` is updated in place so a
+    /// demoted name's later reads see `Value` — that feedback is what makes it a fixpoint.
+    fn demote_fixpoint(
+        &self,
+        env: &mut HashMap<String, RustType>,
+        reassigns: &[(String, &Expr)],
+        considered: &HashSet<String>,
+    ) -> HashSet<String> {
         let mut demoted: HashSet<String> = HashSet::new();
         loop {
             let mut changed = false;
-            for (name, rhs) in &reassigns {
-                if demoted.contains(name) {
+            for (name, rhs) in reassigns {
+                if demoted.contains(name) || !considered.contains(name) {
                     continue;
                 }
                 if env.get(name) == Some(&RustType::F64)
-                    && self.expr_native_type(rhs, &env) != RustType::F64
+                    && self.expr_native_type(rhs, env) != RustType::F64
                 {
                     demoted.insert(name.clone());
                     env.insert(name.clone(), RustType::Value);
