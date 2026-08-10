@@ -26832,7 +26832,12 @@ impl Codegen {
         let RustType::Vec(inner) = self.type_context.get_type(recv_name.as_ref()) else {
             return Ok(None);
         };
-        if *inner != RustType::F64 {
+        // #609: the element-type gate exists in TWO places — here and at the top of
+        // `try_native_vec_hof`. Widening only the inner one changes nothing, because this one
+        // returns first: the array is boxed whole into a `Value::Array` and handed to
+        // `tishlang_runtime::array_map`, which is the per-element `value_call` path this issue is
+        // about. Both must agree.
+        if *inner != RustType::F64 && *inner != RustType::I32 {
             return Ok(None);
         }
         let recv_code = Self::escape_ident(recv_name.as_ref()).into_owned();
@@ -26861,8 +26866,14 @@ impl Codegen {
         method: &str,
         args: &[CallArg],
     ) -> Result<Option<(String, RustType)>, CompileError> {
-        // Only numeric arrays for now: `.copied()` needs a `Copy` element.
-        if *elem != RustType::F64 {
+        // `.copied()` needs a `Copy` element, which both of these are.
+        //
+        // #609: `i32` joins `f64` here. On GBA every idiomatic array is `i32[]`, so restricting the
+        // fast path to `Vec<f64>` meant `.map/.filter/.some/.every` fell back to one boxed
+        // `value_call` PER ELEMENT on exactly the arrays the target guidance tells you to write.
+        //
+        // `reduce` is deliberately NOT extended — see its arm below.
+        if *elem != RustType::F64 && *elem != RustType::I32 {
             return Ok(None);
         }
         let Some(CallArg::Expr(Expr::ArrowFunction { params, body, .. })) = args.first() else {
@@ -26894,7 +26905,12 @@ impl Codegen {
             res
         };
         match method {
-            "reduce" => {
+            // #609 stops short here on purpose. The accumulator is typed `f64` (or `i64` for the
+            // integer-range form); with an `i32` element the body would mix an `i32` binding into
+            // that accumulator — `acc = acc + x` either fails to compile or silently changes
+            // overflow behaviour from f64's exact-integer range to i32 wrapping. That is a results
+            // question, not a speed one, so it wants its own change with its own tests.
+            "reduce" if *elem == RustType::F64 => {
                 if args.len() != 2 || params.len() != 2 {
                     return Ok(None);
                 }
@@ -26988,7 +27004,7 @@ impl Codegen {
                 let Some(x) = simple_name(&params[0]) else {
                     return Ok(None);
                 };
-                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                let (body_code, body_ty) = emit_with(self, &[(&x, elem.clone())])?;
                 if !body_ty.is_native() {
                     return Ok(None);
                 }
@@ -27008,17 +27024,21 @@ impl Codegen {
                 let Some(x) = simple_name(&params[0]) else {
                     return Ok(None);
                 };
-                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                let (body_code, body_ty) = emit_with(self, &[(&x, elem.clone())])?;
                 if body_ty != RustType::Bool {
                     return Ok(None);
                 }
                 let x_esc = Self::escape_ident(x.as_ref()).into_owned();
+                // A filter PRESERVES the element type — collecting to `Vec<f64>` from an `i32`
+                // receiver would not compile, and silently widening would change what the caller
+                // gets back.
                 Ok(Some((
                     format!(
-                        "{recv}.iter().copied().filter(|&{x}| {body}).collect::<Vec<f64>>()",
-                        recv = recv, x = x_esc, body = body_code
+                        "{recv}.iter().copied().filter(|&{x}| {body}).collect::<Vec<{ety}>>()",
+                        recv = recv, x = x_esc, body = body_code,
+                        ety = elem.to_rust_type_str()
                     ),
-                    RustType::Vec(Box::new(RustType::F64)),
+                    RustType::Vec(Box::new(elem.clone())),
                 )))
             }
             "some" | "every" => {
@@ -27028,7 +27048,7 @@ impl Codegen {
                 let Some(x) = simple_name(&params[0]) else {
                     return Ok(None);
                 };
-                let (body_code, body_ty) = emit_with(self, &[(&x, RustType::F64)])?;
+                let (body_code, body_ty) = emit_with(self, &[(&x, elem.clone())])?;
                 if body_ty != RustType::Bool {
                     return Ok(None);
                 }
