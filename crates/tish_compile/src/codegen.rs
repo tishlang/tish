@@ -25630,6 +25630,21 @@ impl Codegen {
                     // in (-2^53, 2^53) and `c` a positive integer literal → `(x as i64) % c` instead
                     // of `fmod`. Bit-identical (x is exactly an integer in f64; Rust `%` and `fmod`
                     // both truncate toward zero), and far faster — the fmod in LCG/hash recurrences.
+                    // #606: a mixed `fixed`/`f64` pair types as `Fixed` (or `Bool` for a
+                    // comparison), so the f64 side must be LIFTED before the operator — agb's
+                    // `Num<i32,8>` has no `f64` overload. `coerce_native_arg` owns the scaling, so
+                    // a value crossing here reads identically to one crossing a Value boundary or
+                    // the literal fold.
+                    let (l, r) = if lt == RustType::Fixed && rt == RustType::F64 {
+                        let rc = self.coerce_native_arg(&r, RustType::F64, RustType::Fixed);
+                        (l, rc)
+                    } else if lt == RustType::F64 && rt == RustType::Fixed {
+                        let lc = self.coerce_native_arg(&l, RustType::F64, RustType::Fixed);
+                        (lc, r)
+                    } else {
+                        (l, r)
+                    };
+
                     if matches!(op, BinOp::Mod) && result_ty == RustType::F64 {
                         if let Some(c) = Self::int_literal_value_of(right).filter(|&c| c > 0) {
                             if self.int_range(left, &self.int_range_locals).is_some() {

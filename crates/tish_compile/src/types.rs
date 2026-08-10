@@ -327,6 +327,27 @@ impl RustType {
                 | BinOp::StrictNe => Some(RustType::Bool),
                 _ => None,
             }
+        } else if (lhs == &RustType::Fixed && rhs == &RustType::F64)
+            || (lhs == &RustType::F64 && rhs == &RustType::Fixed)
+        {
+            // #606: a MIXED `fixed`/`f64` operand pair. Previously this fell through to `None`, so
+            // the whole expression dropped to the boxed `ops::*` path — and on an FPU-less
+            // ARM7TDMI that path also routes through SOFT-FLOAT f64, which is the expensive part.
+            //
+            // The f64 side is lifted to `Fixed` at the operator, with the SAME truncating semantics
+            // the literal fold already applies (`Fixed::from_raw((x * 256.0) as i32)`), so a mixed
+            // expression now agrees with the equivalent all-literal one instead of disagreeing with
+            // it. `%`/`**`/bitwise stay boxed, exactly as they do for `Fixed × Fixed`.
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => Some(RustType::Fixed),
+                BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::StrictEq
+                | BinOp::StrictNe => Some(RustType::Bool),
+                _ => None,
+            }
         } else if lhs == &RustType::Fixed && rhs == &RustType::Fixed {
             // agb `Num<i32,8>` overloads `+ - * /` (Mul/Div apply the Q24.8 shift
             // correction) and `PartialOrd`/`PartialEq`, so these lower to native
