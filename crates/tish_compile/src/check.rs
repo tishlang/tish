@@ -773,3 +773,181 @@ mod tests {
         assert_eq!(diags("fn f(a: number) {}\nf(someUnknown())"), Vec::<String>::new());
     }
 }
+
+// ── #641: call arity ────────────────────────────────────────────────────────────────────────────
+//
+// tish did not check arity at all. A call with too few arguments compiled, the missing parameter
+// became `Value::Null`, and what happened next depended on which lowering the CALLEE happened to
+// get — a property of the callee, not of the call:
+//
+//   boxed `Value::native` + typed params  ->  builds clean, PANICS at runtime the first time that
+//                                             path runs ("expected number", pointing at generated
+//                                             code, saying nothing about the call site)
+//   direct native `fn`   + typed params   ->  rustc E0061 against generated code
+//   interpreter          + typed params   ->  silently returns NaN / null
+//   untyped params                        ->  `null` arrives; a deliberate, widely-used idiom
+//
+// So the same mistake is a build error in one function and a shipped crash in the next.
+//
+// THE RULE, and why it is exactly this narrow: an omitted argument bound to a TYPED parameter can
+// never be correct, because `Value::Null` cannot satisfy a `Value::Number` prologue. That is a fact
+// about the lowering, not a style preference, so it can be a hard error without a policy debate.
+//
+// An omitted argument bound to an UNTYPED parameter stays legal, because it is an established
+// idiom in shipping code — `packages/shop.tish` has six such calls, `packages/ui.tish` one:
+//
+//     function renderTab(defer, stream) { if (present(defer) === 1) { … } }
+//     renderTab()                      // deliberate: "render now, no defer, no stream"
+//
+// A parameter with a DEFAULT imposes no minimum either: the default is what fills it. Rest params
+// impose none by definition.
+
+/// The minimum argument count a call to `params` must supply: one past the LAST parameter that is
+/// typed and has no default. A typed parameter at index 2 forces arity 3 even when 0 and 1 are
+/// untyped, because the call cannot skip a position to reach it.
+fn min_required_arity(params: &[FunParam]) -> usize {
+    let mut min = 0;
+    for (i, p) in params.iter().enumerate() {
+        if let FunParam::Simple(tp) = p {
+            if tp.type_ann.is_some() && tp.default.is_none() {
+                min = i + 1;
+            }
+        }
+    }
+    min
+}
+
+/// #641: report every call that supplies fewer arguments than a typed parameter requires. Runs
+/// unconditionally in the compile path — unlike [`check_program`], which is opt-in behind
+/// `TISH_CHECK` and would therefore never have caught the shipped case this exists for.
+pub fn check_call_arity(program: &Program) -> Vec<TypeDiagnostic> {
+    use std::collections::HashMap;
+
+    // name -> (minimum arity, declared parameter count). Nested and top-level fns alike; a later
+    // declaration of the same name wins, matching the runtime's own last-wins binding.
+    let mut sigs: HashMap<String, (usize, usize)> = HashMap::new();
+    fn collect(stmts: &[Statement], sigs: &mut HashMap<String, (usize, usize)>) {
+        for s in stmts {
+            if let Statement::FunDecl { name, params, rest_param, body, .. } = s {
+                // A rest param swallows any surplus, but the leading typed params still bind
+                // positionally, so the minimum is unchanged.
+                let _ = rest_param;
+                sigs.insert(name.to_string(), (min_required_arity(params), params.len()));
+                collect(std::slice::from_ref(body.as_ref()), sigs);
+            } else {
+                for_each_child_block(s, &mut |b| collect(b, sigs));
+            }
+        }
+    }
+    collect(&program.statements, &mut sigs);
+
+    let mut diags = Vec::new();
+    for s in &program.statements {
+        crate::codegen::Codegen::for_each_stmt_expr(s, &mut |root| {
+            walk_expr(root, &mut |e| {
+            let Expr::Call { callee, args, span } = e else { return };
+            let Expr::Ident { name, .. } = callee.as_ref() else { return };
+            let Some((min, declared)) = sigs.get(name.as_ref()).copied() else { return };
+            // A spread makes the count unknowable at compile time — say nothing rather than guess.
+            if args.iter().any(|a| matches!(a, CallArg::Spread(_))) {
+                return;
+            }
+            if args.len() < min {
+                diags.push(TypeDiagnostic {
+                    message: format!(
+                        "'{}' needs {} argument(s) but {} were supplied; parameter {} is typed, and \
+                         an omitted argument arrives as null, which a typed parameter cannot accept. \
+                         (An untyped parameter may be omitted — that idiom is unaffected.)",
+                        name,
+                        min,
+                        args.len(),
+                        min,
+                    ),
+                    span: *span,
+                });
+            }
+            let _ = declared;
+            });
+        });
+    }
+    diags
+}
+
+/// Visit `e` and every sub-expression. `for_each_stmt_expr` hands out only a statement's ROOT
+/// expression, so without this the checker never sees `paintTyped(1)` inside `log("x" +
+/// paintTyped(1))` — which is the shape the reported bug actually had.
+///
+/// The catch-all arm is deliberate: a variant not enumerated here yields a MISSED diagnostic, never
+/// a wrong one, so a future AST addition degrades this check quietly instead of breaking builds.
+fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    let mut go = |x: &Expr| walk_expr(x, f);
+    match e {
+        Expr::Binary { left, right, .. }
+        | Expr::NullishCoalesce { left, right, .. }
+        | Expr::Index { object: left, index: right, .. } => {
+            go(left);
+            go(right);
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf { operand, .. } | Expr::Await { operand, .. } => {
+            go(operand)
+        }
+        // The inc/dec forms name a variable rather than holding a sub-expression, so there is
+        // nothing to descend into.
+        Expr::Delete { target, .. } => go(target),
+        Expr::Member { object, .. } => go(object),
+        Expr::Call { callee, args, .. } | Expr::New { callee, args, .. } => {
+            go(callee);
+            for a in args {
+                match a {
+                    CallArg::Expr(x) | CallArg::Spread(x) => go(x),
+                }
+            }
+        }
+        Expr::Conditional { cond, then_branch, else_branch, .. } => {
+            go(cond);
+            go(then_branch);
+            go(else_branch);
+        }
+        Expr::Array { elements, .. } => {
+            for el in elements {
+                match el {
+                    tishlang_ast::ArrayElement::Expr(x)
+                    | tishlang_ast::ArrayElement::Spread(x) => go(x),
+                    _ => {}
+                }
+            }
+        }
+        Expr::Object { props, .. } => {
+            for pr in props {
+                match pr {
+                    tishlang_ast::ObjectProp::KeyValue(_, x, _) => go(x),
+                    tishlang_ast::ObjectProp::Spread(x) => go(x),
+                }
+            }
+        }
+        Expr::Assign { value, .. }
+        | Expr::CompoundAssign { value, .. }
+        | Expr::LogicalAssign { value, .. } => go(value),
+        Expr::MemberAssign { object, value, .. } => {
+            go(object);
+            go(value);
+        }
+        Expr::IndexAssign { object, index, value, .. } => {
+            go(object);
+            go(index);
+            go(value);
+        }
+        Expr::TemplateLiteral { exprs, .. } => {
+            for x in exprs {
+                go(x);
+            }
+        }
+        Expr::ArrowFunction { body, .. } => {
+            if let tishlang_ast::ArrowBody::Expr(x) = body {
+                go(x.as_ref());
+            }
+        }
+        _ => {}
+    }
+}
