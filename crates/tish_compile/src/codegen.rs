@@ -12912,18 +12912,43 @@ impl Codegen {
             out.insert((String::new(), name));
         }
 
+        // A fn's env must START from what MODULE scope makes visible to it. Without that, a body
+        // reading a module binding — `sum = (sum + codes[j]) % M`, where `codes` is a hoisted const
+        // f64 array — cannot type the RHS, wrongly demotes `sum` to `Value`, and the emitted code
+        // then adds an `f64` static to a `Value`: `error[E0369]: cannot add f64 to Value`. The flat
+        // pass had this information for free; scoping the KEY must not scope away the VISIBILITY.
+        //
+        // Module-only, and carrying the module verdicts just settled above: a demoted module binding
+        // reads as `Value` inside a fn too, which is exactly what its declaration will emit.
+        let mut module_env: HashMap<String, RustType> = HashMap::new();
+        for s in stmts {
+            if !matches!(s, Statement::FunDecl { .. }) {
+                Self::collect_annotated_types(std::slice::from_ref(s), &self.type_aliases, &mut module_env);
+            }
+        }
+        for (scope, n) in &out {
+            if scope.is_empty() {
+                module_env.insert(n.clone(), RustType::Value);
+            }
+        }
+
         for s in stmts {
             let Statement::FunDecl { name, .. } = s else {
                 continue;
             };
             let scope = name.to_string();
             let one = std::slice::from_ref(s);
-            let mut fenv: HashMap<String, RustType> = HashMap::new();
-            Self::collect_annotated_types(one, &self.type_aliases, &mut fenv);
-            // Every name this fn declares — INCLUDING one that shadows a module binding. A
-            // shadowing local is a different variable, so it gets its own verdict here; leaving it
-            // out would drop it back onto the module's verdict, which is the very bug being fixed.
-            let local_names: HashSet<String> = fenv.keys().cloned().collect();
+            // Module bindings first, then this fn's own declarations OVERLAY them — so a local that
+            // shadows a module name takes its own type, not the module one.
+            // What this fn itself declares — computed separately from the visibility env, because
+            // only these names may take a verdict under this scope. INCLUDES a name that shadows a
+            // module binding: a shadowing local is a different variable and gets its own verdict;
+            // leaving it out drops it back onto the module's verdict, which is the bug being fixed.
+            let mut own: HashMap<String, RustType> = HashMap::new();
+            Self::collect_annotated_types(one, &self.type_aliases, &mut own);
+            let local_names: HashSet<String> = own.keys().cloned().collect();
+            let mut fenv: HashMap<String, RustType> = module_env.clone();
+            fenv.extend(own);
             if local_names.is_empty() {
                 continue;
             }
