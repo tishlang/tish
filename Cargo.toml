@@ -33,6 +33,7 @@ members = [
     "crates/tish_lsp",
     "crates/tish_resolve",
     "crates/tishlang_cargo_bindgen",
+    "crates/tish_test",
 ]
 # Generated native-build projects (`tish build`) land under `target/` when TMPDIR points there;
 # never enroll anything beneath `target/` as a workspace member.

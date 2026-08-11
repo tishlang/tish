@@ -74,7 +74,7 @@ fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
         const SUBCOMMANDS: &[&str] =
-            &["run", "repl", "build", "compile-module", "resolve-id", "dump-ast"];
+            &["run", "repl", "test", "build", "compile-module", "resolve-id", "dump-ast"];
         let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
@@ -119,6 +119,91 @@ fn main() {
             argv.extend(a.script_args.iter().cloned());
             tishlang_core::set_process_argv(argv);
             run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env)
+        }
+        Some(Commands::Test(a)) => {
+            #[cfg(feature = "test-runner")]
+            {
+                use tishlang_test::{run_tests, TestOptions};
+                use tishlang_test::report::ReporterKind;
+
+                let reporter = match a.reporter.as_str() {
+                    "dots" => ReporterKind::Dots,
+                    _ => ReporterKind::Console,
+                };
+                let (roots, filters) = if a.filters.is_empty() {
+                    (vec![std::path::PathBuf::from(".")], Vec::new())
+                } else {
+                    // Path-like args that exist become discovery roots; others are substring filters.
+                    let mut roots = Vec::new();
+                    let mut filters = Vec::new();
+                    for f in &a.filters {
+                        let p = std::path::PathBuf::from(f);
+                        if p.exists() {
+                            roots.push(p);
+                        } else {
+                            filters.push(f.clone());
+                        }
+                    }
+                    if roots.is_empty() {
+                        roots.push(std::path::PathBuf::from("."));
+                    }
+                    (roots, filters)
+                };
+                let shard = a.shard.as_ref().and_then(|s| {
+                    let parts: Vec<_> = s.split('/').collect();
+                    if parts.len() == 2 {
+                        let i = parts[0].parse().ok()?;
+                        let n = parts[1].parse().ok()?;
+                        Some((i, n))
+                    } else {
+                        None
+                    }
+                });
+                let backend = a.backend.as_str();
+                if backend != "vm" && backend != "interp" {
+                    eprintln!(
+                        "error: unsupported --backend `{backend}` for tish test (use `vm` or `interp`; `--backend native` is not implemented yet)"
+                    );
+                    std::process::exit(2);
+                }
+                let opts = TestOptions {
+                    roots,
+                    filters,
+                    name_pattern: a.test_name_pattern.clone(),
+                    timeout_ms: a.timeout,
+                    bail: a.bail,
+                    retry: a.retry,
+                    update_snapshots: a.update_snapshots,
+                    reporter,
+                    junit_path: a.reporter_outfile.as_ref().map(std::path::PathBuf::from),
+                    only: a.only,
+                    backend: a.backend.clone(),
+                    no_optimize: a.no_optimize || no_opt_env,
+                    features: a.features.clone(),
+                    shard,
+                    randomize: a.randomize || a.seed.is_some(),
+                    seed: a.seed,
+                    rerun_each: a.rerun_each,
+                    tags: a.tags.clone(),
+                    preload: a.preload.iter().map(std::path::PathBuf::from).collect(),
+                    coverage: a.coverage || a.coverage_dir.is_some(),
+                    coverage_dir: a.coverage_dir.as_ref().map(std::path::PathBuf::from),
+                };
+                if a.watch {
+                    let code = tishlang_test::run_tests_watch(opts);
+                    std::process::exit(code);
+                }
+                let result = run_tests(opts);
+                std::process::exit(result.exit_code);
+            }
+            #[cfg(not(feature = "test-runner"))]
+            {
+                let _ = a;
+                Err(
+                    "tish test requires the test-runner feature (included in --features full)"
+                        .into(),
+                )
+            }
         }
         Some(Commands::Repl(a)) => run_repl(&a.backend, a.no_optimize || no_opt_env, &a.features),
         Some(Commands::Build(a)) => {

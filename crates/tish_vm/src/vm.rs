@@ -3686,20 +3686,14 @@ impl Vm {
                             return Err("LoadNativeExport: export_name constant out of bounds or not string".to_string());
                         }
                     };
-                    // Phase-2 item 11: consult externally registered native
-                    // modules (populated via `Vm::register_native_module`)
-                    // before falling through to the built-in lookup. Embedders
-                    // on the cranelift / llvm backends that want to expose
-                    // `cargo:…` Rust crates should register the module's
-                    // exports map before calling `vm.run(chunk)`.
-                    let from_registry: Option<Value> =
-                        if spec.starts_with("cargo:") || spec.starts_with("ffi:") {
-                            let regs = self.native_modules.borrow();
-                            regs.get(spec)
-                                .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())
-                        } else {
-                            None
-                        };
+                    // Consult modules registered via `Vm::register_native_module` before
+                    // built-in lookup (used by `tish test` for `tish:test` / `tish:assert`,
+                    // and by embedders for `cargo:` / `ffi:`).
+                    let from_registry: Option<Value> = {
+                        let regs = self.native_modules.borrow();
+                        regs.get(spec)
+                            .and_then(|m| m.borrow().get(&Arc::from(export_name)).cloned())
+                    };
                     let v = from_registry
                         .or_else(|| get_builtin_export(self.capabilities.as_ref(), spec, export_name))
                         .ok_or_else(|| {

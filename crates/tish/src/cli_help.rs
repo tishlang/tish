@@ -631,12 +631,91 @@ pub(crate) struct CompileModuleArgs {
     pub file: String,
 }
 
+#[derive(Parser)]
+pub(crate) struct TestArgs {
+    /// File or directory filters (paths / substrings). Omit to discover under the current directory.
+    #[arg(num_args = 0.., value_name = "FILTER", help_heading = "Arguments")]
+    pub filters: Vec<String>,
+    /// `vm` or `interp`.
+    #[arg(
+        long,
+        default_value = "vm",
+        value_name = "NAME",
+        help_heading = "Options"
+    )]
+    pub backend: String,
+    /// Restrict which platform APIs tests may use (omit = all capabilities compiled into this `tish`).
+    #[arg(
+        long = "feature",
+        value_name = "NAME",
+        action = clap::ArgAction::Append,
+        help_heading = "Options"
+    )]
+    pub features: Vec<String>,
+    /// Disable AST and bytecode optimizations.
+    #[arg(long, help_heading = "Options")]
+    pub no_optimize: bool,
+    /// Only run tests whose full name matches this regex.
+    #[arg(short = 't', long = "test-name-pattern", value_name = "REGEX", help_heading = "Options")]
+    pub test_name_pattern: Option<String>,
+    /// Per-test timeout in milliseconds (default 5000).
+    #[arg(long, default_value = "5000", value_name = "MS", help_heading = "Options")]
+    pub timeout: u64,
+    /// Update snapshot files on mismatch (`-u`).
+    #[arg(short = 'u', long = "update-snapshots", help_heading = "Options")]
+    pub update_snapshots: bool,
+    /// Stop after the first failing test file / suite.
+    #[arg(long, help_heading = "Options")]
+    pub bail: bool,
+    /// Retry failed tests this many times.
+    #[arg(long, default_value = "0", value_name = "N", help_heading = "Options")]
+    pub retry: u32,
+    /// Only run tests marked `.only`.
+    #[arg(long, help_heading = "Options")]
+    pub only: bool,
+    /// Reporter: `console` (default) or `dots`.
+    #[arg(long, default_value = "console", value_name = "NAME", help_heading = "Options")]
+    pub reporter: String,
+    /// Write a JUnit XML report to this path.
+    #[arg(long = "reporter-outfile", value_name = "PATH", help_heading = "Options")]
+    pub reporter_outfile: Option<String>,
+    /// Re-run tests when files under discovery roots change (requires notify).
+    #[arg(long, help_heading = "Options")]
+    pub watch: bool,
+    /// Shuffle test file order.
+    #[arg(long, help_heading = "Options")]
+    pub randomize: bool,
+    /// Seed for `--randomize` (implies randomize).
+    #[arg(long, value_name = "N", help_heading = "Options")]
+    pub seed: Option<u64>,
+    /// Run the suite this many times (`--rerun-each`).
+    #[arg(long = "rerun-each", default_value = "1", value_name = "N", help_heading = "Options")]
+    pub rerun_each: u32,
+    /// Shard files as `i/n` (1-based index).
+    #[arg(long, value_name = "I/N", help_heading = "Options")]
+    pub shard: Option<String>,
+    /// Only run tests that include this tag (repeatable).
+    #[arg(long = "tag", value_name = "TAG", action = clap::ArgAction::Append, help_heading = "Options")]
+    pub tags: Vec<String>,
+    /// Preload module paths (evaluated before each test file).
+    #[arg(long = "preload", value_name = "FILE", action = clap::ArgAction::Append, help_heading = "Options")]
+    pub preload: Vec<String>,
+    /// Collect line coverage (AST instrumentation; works with `--backend vm` and `interp`).
+    #[arg(long, help_heading = "Options")]
+    pub coverage: bool,
+    /// Write `lcov.info` under this directory (implies `--coverage`). Default: `coverage/`.
+    #[arg(long = "coverage-dir", value_name = "DIR", help_heading = "Options")]
+    pub coverage_dir: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Run a Tish file (interpret)
     Run(RunArgs),
     /// Interactive REPL
     Repl(ReplArgs),
+    /// Run tests (`*.test.tish`, `*.spec.tish`, …)
+    Test(TestArgs),
     /// Build native binary, wasm, wasi, or JavaScript output
     Build(BuildArgs),
     /// Compile a single `.tish` module to one ES module (for Vite dev / HMR); prints to stdout

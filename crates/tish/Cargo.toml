@@ -25,7 +25,7 @@ path = "src/main.rs"
 default = ["full", "fast-alloc"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
 # Includes `pg` so `tish run` can resolve `import … from '@tishlang/pg'` (`cargo:tish_pg`) on the bytecode VM.
-full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "pg"]
+full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "pg", "test-runner"]
 # Fast allocator (mimalloc) as the process `#[global_allocator]`. tish's object/array/string workloads
 # are allocation-bound (a sampling profile of object-heavy code spends ~14%+ in system malloc/free);
 # mimalloc is markedly faster for the many-small-allocations pattern — the same reason JSC ships bmalloc.
@@ -33,6 +33,8 @@ full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "pg"]
 fast-alloc = ["dep:mimalloc"]
 # Opt-out: build without Postgres (`cargo build -p tishlang --no-default-features --features http,...`).
 pg = ["dep:tishlang_pg"]
+# Native `tish test` runner (`tish:test` / `tish:assert`).
+test-runner = ["dep:tishlang_test"]
 # Individual capability flags
 http    = ["tishlang_eval/http",    "tishlang_runtime/http",    "tishlang_compile/http",    "tishlang_vm/http"]
 timers  = ["tishlang_eval/timers",  "tishlang_compile/timers",  "tishlang_vm/timers"]
@@ -58,6 +60,7 @@ tishlang_wasm = { path = "../tish_wasm", version = ">=0.1" }
 tishlang_runtime = { path = "../tish_runtime", version = ">=0.1" }
 tishlang_core = { path = "../tish_core", version = ">=0.1" }
 tishlang_js_to_tish = { path = "../js_to_tish", version = ">=0.1" }
+tishlang_test = { path = "../tish_test", optional = true, features = ["runner", "fs", "regex", "promise", "watch"] }
 clap = { version = "4.6.0", features = ["derive", "color"] }
 serde_json = "1"
 tishlang_pg = { path = "../tish_pg", version = ">=0.1", optional = true }

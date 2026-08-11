@@ -1,0 +1,84 @@
+// Ambient types for `tish:test` / `node:test` (Bun/Jest-shaped runner API).
+//
+// @tish-source describe crates/tish_test/src/module.rs
+// @tish-source expect crates/tish_test/src/expect.rs
+// @tish-source mock crates/tish_test/src/mocks.rs
+
+declare module "tish:test" {
+  type TestFn = (...args: any[]) => any
+  type DescribeFn = (name: string, fn: () => void) => void
+  type ItFn = (name: string, fn?: TestFn) => void
+  type ItOptsFn = (name: string, opts: Record<string, any>, fn: TestFn) => void
+  type EachFn = (table: any[]) => (name: string, fn: TestFn) => void
+
+  export const describe: DescribeFn & {
+    skip: DescribeFn
+    only: DescribeFn
+    each: EachFn
+  }
+  export const suite: typeof describe
+  export const test: (ItFn & ItOptsFn) & {
+    skip: ItFn & ItOptsFn
+    only: ItFn & ItOptsFn
+    todo: (name: string) => void
+    failing: ItFn & ItOptsFn
+    skipIf: (cond: any) => ItFn
+    each: EachFn
+  }
+  export const it: typeof test
+
+  export function beforeAll(fn: TestFn): void
+  export function afterAll(fn: TestFn): void
+  export function beforeEach(fn: TestFn): void
+  export function afterEach(fn: TestFn): void
+  export function before(fn: TestFn): void
+  export function after(fn: TestFn): void
+
+  interface ExpectMatchers {
+    not: ExpectMatchers
+    toBe(expected: any): void
+    toEqual(expected: any): void
+    toStrictEqual(expected: any): void
+    toBeNull(): void
+    toBeTruthy(): void
+    toBeFalsy(): void
+    toBeDefined(): void
+    toBeUndefined(): void
+    toBeGreaterThan(expected: number): void
+    toBeGreaterThanOrEqual(expected: number): void
+    toBeLessThan(expected: number): void
+    toBeLessThanOrEqual(expected: number): void
+    toBeCloseTo(expected: number, numDigits?: number): void
+    toContain(item: any): void
+    toMatch(pattern: any): void
+    toMatchObject(expected: any): void
+    toThrow(expected?: any): void
+    toHaveLength(expected: number): void
+    toMatchSnapshot(hint?: string): void
+    toHaveBeenCalled(): void
+    toHaveBeenCalledTimes(n: number): void
+    toHaveBeenCalledWith(...args: any[]): void
+    toHaveBeenLastCalledWith(...args: any[]): void
+  }
+
+  export function expect(actual: any): ExpectMatchers
+  export namespace expect {
+    function any(ctor: any): any
+    function anything(): any
+    function objectContaining(sample: any): any
+    function arrayContaining(sample: any): any
+    function stringMatching(sample: any): any
+  }
+
+  export function mock(fn?: TestFn): any
+  export function spyOn(obj: any, method: string): any
+  export function clearAllMocks(): void
+  export function restoreAllMocks(): void
+
+  const _default: typeof test
+  export default _default
+}
+
+declare module "node:test" {
+  export * from "tish:test"
+}

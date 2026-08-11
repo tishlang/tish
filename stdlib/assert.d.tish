@@ -1,0 +1,52 @@
+// Ambient types for `tish:assert` / `node:assert` / `node:assert/strict`.
+//
+// @tish-source assert crates/tish_test/src/assert.rs 323
+
+declare module "tish:assert" {
+  interface Assert {
+    (value: any, message?: string): void
+    ok(value: any, message?: string): void
+    equal(actual: any, expected: any, message?: string): void
+    notEqual(actual: any, expected: any, message?: string): void
+    strictEqual(actual: any, expected: any, message?: string): void
+    notStrictEqual(actual: any, expected: any, message?: string): void
+    deepEqual(actual: any, expected: any, message?: string): void
+    notDeepEqual(actual: any, expected: any, message?: string): void
+    deepStrictEqual(actual: any, expected: any, message?: string): void
+    notDeepStrictEqual(actual: any, expected: any, message?: string): void
+    partialDeepStrictEqual(actual: any, expected: any, message?: string): void
+    match(string: string, regexp: any, message?: string): void
+    doesNotMatch(string: string, regexp: any, message?: string): void
+    throws(fn: () => any, error?: any, message?: string): void
+    doesNotThrow(fn: () => any, message?: string): void
+    fail(message?: string): void
+    ifError(value: any): void
+  }
+
+  export const assert: Assert
+  export default assert
+}
+
+declare module "node:assert" {
+  export * from "tish:assert"
+  import assert from "tish:assert"
+  export default assert
+}
+
+declare module "node:assert/strict" {
+  export * from "tish:assert"
+  import assert from "tish:assert"
+  export default assert
+}
+
+declare module "assert" {
+  export * from "tish:assert"
+  import assert from "tish:assert"
+  export default assert
+}
+
+declare module "assert/strict" {
+  export * from "tish:assert"
+  import assert from "tish:assert"
+  export default assert
+}

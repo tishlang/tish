@@ -194,6 +194,18 @@ tish resolve-id ./Button --importer /app/App.tish --platform macos --surface web
 
 ---
 
+## Testing
+
+```bash
+tish test                      # discover *.test.tish / *.spec.tish under .
+tish test ./my-pkg             # directory root
+tish test -t "adds" --bail     # name pattern + stop on fail
+```
+
+Import the Bun/Jest-shaped API from **`tish:test`** (`describe` / `it` / `expect` / hooks). Use Node assert via **`tish:assert`** or **`node:assert/strict`** (default import supported). **`tish test` runs on the Tish VM/interpreter — it does not execute JavaScript.** Details and CLI flags: [testing.md](./testing.md). Host-wiring audit and semantics-vs-JS-emit split: [test.md](./test.md). Stdlib stubs `stdlib/test.d.tish` / `stdlib/assert.d.tish` are documentation-shaped and not wired into LSP/check yet.
+
+---
+
 ## Platform module resolution
 
 Relative imports such as `import { Button } from "./Button"` resolve to the first existing file in a platform/surface cascade (same rules in `tish build`, `compile-module`, and `tish resolve-id` for Vite):
