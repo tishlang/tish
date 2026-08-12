@@ -40,6 +40,7 @@ impl Sandbox {
             .args(args)
             .current_dir(&self.dir)
             .env_remove("CI")
+            .env_remove("GITHUB_ACTIONS")
             .output()
             .expect("spawn tish test")
     }
@@ -48,6 +49,20 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Sandbox {
+    /// Same as `run`, but with `GITHUB_ACTIONS` set so the annotation path is exercised.
+    fn run_in_gha(&self, args: &[&str]) -> Output {
+        Command::new(PathBuf::from(env!("CARGO_BIN_EXE_tish")))
+            .arg("test")
+            .args(args)
+            .current_dir(&self.dir)
+            .env_remove("CI")
+            .env("GITHUB_ACTIONS", "true")
+            .output()
+            .expect("spawn tish test")
     }
 }
 
@@ -481,6 +496,40 @@ test("fails", () => { expect(1).toBe(2) })
     assert!(
         !text.contains("{generatedMessage:") && !text.contains("{code: ERR_ASSERTION"),
         "raw object dump leaked into the report:\n{text}"
+    );
+}
+
+/// GitHub Actions annotations are what a reviewer sees inline on the diff, so they carry the
+/// same readable formatting as the console — and must be percent-escaped, since GitHub ends the
+/// command at the first newline and would otherwise truncate the annotation and leak the rest.
+#[test]
+fn github_annotations_are_formatted_and_escaped() {
+    let sb = Sandbox::new("gha");
+    sb.write(
+        "f.test.tish",
+        r#"import { test, expect } from "tish:test"
+test("fails", () => { expect(1).toBe(2) })
+"#,
+    );
+    let out = sb.run_in_gha(&[]);
+    assert_failed(&out, "the test fails");
+    let text = combined(&out);
+    let annotation = text
+        .lines()
+        .find(|l| l.starts_with("::error "))
+        .unwrap_or_else(|| panic!("no annotation emitted:\n{text}"))
+        .to_string();
+    assert!(
+        annotation.contains("AssertionError: expect(received).toBe(expected)"),
+        "annotation was not formatted:\n{annotation}"
+    );
+    assert!(
+        !annotation.contains("{generatedMessage:") && !annotation.contains("{code: ERR_ASSERTION"),
+        "raw object dump leaked into the annotation:\n{annotation}"
+    );
+    assert!(
+        annotation.contains("%0A"),
+        "multi-line annotation was not percent-escaped (GitHub truncates at the first newline):\n{annotation}"
     );
 }
 

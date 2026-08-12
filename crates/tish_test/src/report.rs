@@ -161,7 +161,7 @@ impl ConsoleReporter {
 /// `Value::to_display_string` on an `AssertionError` yields the whole object literal
 /// (`{code: …, message: expect(…)…, actual: …}`) with the useful part buried mid-line. Pull the
 /// message out and lead with it.
-fn format_failure(msg: &str) -> String {
+pub(crate) fn format_failure(msg: &str) -> String {
     let trimmed = msg.trim();
     if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
         return msg.to_string();
@@ -180,6 +180,19 @@ fn format_failure(msg: &str) -> String {
         }
     }
     out
+}
+
+/// Render a failure as a GitHub Actions annotation message.
+///
+/// Annotations are what a reviewer sees inline on the diff, so they get the same readable
+/// formatting as the console. GitHub also terminates the command at the first newline, so a
+/// multi-line message must be percent-escaped or the annotation is truncated to its first line
+/// and the rest leaks into the log as noise.
+pub(crate) fn gh_annotation(msg: &str) -> String {
+    format_failure(msg)
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
 }
 
 /// Read `<key>: <value>` out of a displayed object literal. Values run to the next `, <key>: `

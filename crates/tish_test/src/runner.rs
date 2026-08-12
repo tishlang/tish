@@ -9,7 +9,8 @@ use tishlang_core::{has_pending_throw, take_pending_throw, value_call, Value};
 use crate::isolation::reset_between_files;
 use crate::registry::{only_mode, SuiteNode, TestCase, TestMode};
 use crate::report::{
-    write_junit_xml, ConsoleReporter, ReporterKind, RunSummary, TestResultRecord, TestStatus,
+    gh_annotation, write_junit_xml, ConsoleReporter, ReporterKind, RunSummary, TestResultRecord,
+    TestStatus,
 };
 use crate::snapshots::{set_ci_mode, set_current_file, set_current_test, set_update_snapshots};
 
@@ -266,7 +267,9 @@ fn run_suite_inner(
             if std::env::var_os("GITHUB_ACTIONS").is_some() {
                 eprintln!(
                     "::error file={},title={}::{}",
-                    test.file, test.full_name, msg
+                    test.file,
+                    test.full_name,
+                    gh_annotation(&msg)
                 );
             }
             let rec = TestResultRecord {
@@ -627,7 +630,7 @@ fn run_tests_once(opts: &TestOptions) -> TestRunResult {
                     let had_collect_errors = !loaded.collect_errors.is_empty();
                     for err in &loaded.collect_errors {
                         if gh {
-                            eprintln!("::error file={}::{}", file.display(), err);
+                            eprintln!("::error file={}::{}", file.display(), gh_annotation(err));
                         }
                         let rec = TestResultRecord {
                             full_name: format!("{} (collection error)", file.display()),
@@ -646,7 +649,7 @@ fn run_tests_once(opts: &TestOptions) -> TestRunResult {
                 }
                 Err(e) => {
                     if gh {
-                        eprintln!("::error file={}::{}", file.display(), e);
+                        eprintln!("::error file={}::{}", file.display(), gh_annotation(&e));
                     }
                     let rec = TestResultRecord {
                         full_name: file.display().to_string(),
