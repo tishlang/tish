@@ -7129,11 +7129,24 @@ impl Codegen {
 
                 // Rebind outer vars to Rc<RefCell<>> with _cell suffix.
                 // If outer scope already has the var as RefCell, just clone it.
+                //
+                // #654: a READ-ONLY outer var is never assigned anywhere in the defining scope
+                // (that is exactly what keeps it out of `rc_cell_storage`), so the cell can never
+                // change and the indirection buys nothing — it cost a `VmRef` allocation per
+                // closure plus a `RefCell` borrow on EVERY call, to re-fetch a value that was
+                // already fixed. Snapshot it by value instead. This is invisible in the source: a
+                // fn that mentions six named constants was measurably slower than one that inlined
+                // the same six literals, which pushed authors toward magic numbers.
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     if self.rc_cell_storage_contains(outer_var) {
                         self.writeln(&format!(
                             "let {}_cell = {}.clone();",
+                            var_escaped, var_escaped
+                        ));
+                    } else if read_only_outer_vars.contains(outer_var) {
+                        self.writeln(&format!(
+                            "let {}_capt = {}.clone();",
                             var_escaped, var_escaped
                         ));
                     } else {
@@ -7146,12 +7159,20 @@ impl Codegen {
 
                 self.writeln(&format!("let {} = {{", name_str));
                 self.indent += 1;
-                // Clone RefCell for outer vars so closure can capture
+                // Clone RefCell for outer vars so closure can capture (#654: read-only vars carry
+                // their snapshot in instead — no cell exists for them).
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
+                    let suffix = if !self.rc_cell_storage_contains(outer_var)
+                        && read_only_outer_vars.contains(outer_var)
+                    {
+                        "capt"
+                    } else {
+                        "cell"
+                    };
                     self.writeln(&format!(
-                        "let {}_cell = {}_cell.clone();",
-                        var_escaped, var_escaped
+                        "let {}_{} = {}_{}.clone();",
+                        var_escaped, suffix, var_escaped, suffix
                     ));
                 }
                 // Clone the cell so the closure can reference the function recursively
@@ -7328,11 +7349,13 @@ impl Codegen {
                         var_escaped, var_escaped
                     ));
                 }
-                // Read-only outer vars: Value binding from borrow (avoids param-shadow issues)
+                // Read-only outer vars: bind from the captured snapshot (#654 — no cell, no borrow).
+                // `read_only_outer_vars` already excludes everything in `rc_cell_storage`, so every
+                // name here was given a `_capt` snapshot above.
                 for outer_var in &read_only_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     self.writeln(&format!(
-                        "let {} = (*{}_cell.borrow()).clone();",
+                        "let {} = {}_capt.clone();",
                         var_escaped, var_escaped
                     ));
                 }
