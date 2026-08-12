@@ -1,0 +1,62 @@
+# Gate for `tish test` — the native test runner (`crates/tish_test`).
+#
+# The runner's failure mode is exiting 0 while tests are broken, missing, or never run, which no
+# other job would notice: a green `tish test` is exactly what a silently-empty run looks like. The
+# regression suite in `crates/tish/tests/test_runner.rs` pins each of those cases against the real
+# binary, and the dogfood step then runs the runner over its own fixtures end to end.
+name: Test runner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-runner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runner:
+    name: tish test regression suite
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Fleet-safe target-cpu (#223): the default `native` SIGILLs on the virtualized fleet.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Unit tests (tish_test crate)
+        run: cargo test -p tishlang_test --all-features
+
+      - name: Regression suite (drives the real `tish test` binary)
+        run: cargo test -p tishlang --features full --test test_runner
+
+      - name: Dogfood — the runner runs its own fixture suite
+        run: |
+          set -euo pipefail
+          cargo build -p tishlang --bin tish --features full
+          ./target/debug/tish test tests/runner --reporter dots
+
+      - name: Dogfood — coverage path executes
+        run: ./target/debug/tish test tests/runner --coverage --coverage-dir target/runner-coverage
+
+      - name: Formatting
+        run: cargo fmt -p tishlang_test -- --check
+
+      - name: Clippy
+        run: cargo clippy -p tishlang_test --all-targets --all-features --no-deps -- -D warnings

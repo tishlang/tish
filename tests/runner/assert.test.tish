@@ -1,0 +1,105 @@
+// Dogfood suite for the Node-mirrored `tish:assert` surface.
+//
+// Divergences from Node are deliberate and pinned here: `equal` / `deepEqual` are the strict
+// forms (tish has no loose `==`), and `null` stands in for `undefined`.
+
+import { test, describe, expect } from "tish:test"
+import assert from "node:assert/strict"
+import { ok, strictEqual, deepStrictEqual } from "tish:assert"
+
+describe("callable assert", () => {
+  test("assert(value) is assert.ok", () => {
+    assert(true)
+    assert(1, "a truthy number")
+  })
+
+  test("named imports work alongside the default", () => {
+    ok(true)
+    strictEqual(1, 1)
+    deepStrictEqual({ a: 1 }, { a: 1 })
+  })
+})
+
+describe("equality", () => {
+  test("strictEqual / notStrictEqual", () => {
+    assert.strictEqual("a", "a")
+    assert.notStrictEqual("a", "b")
+  })
+
+  test("equal and deepEqual are the STRICT forms — tish has no loose ==", () => {
+    assert.equal(1, 1)
+    assert.notEqual(1, 2)
+    assert.deepEqual({ a: 1 }, { a: 1 })
+    assert.notDeepEqual({ a: 1 }, { a: 2 })
+  })
+
+  test("deepStrictEqual walks nested structures", () => {
+    assert.deepStrictEqual({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] })
+    assert.notDeepStrictEqual({ a: 1 }, { a: 1, b: 2 })
+  })
+
+  test("partialDeepStrictEqual checks a subset", () => {
+    assert.partialDeepStrictEqual({ a: 1, b: 2 }, { a: 1 })
+  })
+
+  test("NaN equals NaN, as in Node", () => {
+    assert.deepStrictEqual(0 / 0, 0 / 0)
+  })
+})
+
+describe("regex", () => {
+  test("match / doesNotMatch", () => {
+    assert.match("hello world", /world/)
+    assert.doesNotMatch("hello world", /goodbye/)
+  })
+})
+
+describe("throwing", () => {
+  test("throws requires the error to match when a pattern is given", () => {
+    assert.throws(() => { throw "Boom" })
+    assert.throws(() => { throw "Boom" }, /Boom/)
+    assert.throws(() => { throw "Boom" }, "Boom")
+  })
+
+  test("a non-matching pattern is itself a failure", () => {
+    // Proven by catching the assertion failure with `expect`.
+    expect(() => {
+      assert.throws(() => { throw "Boom" }, /NotThis/)
+    }).toThrow()
+  })
+
+  test("doesNotThrow", () => {
+    assert.doesNotThrow(() => { return 1 })
+  })
+
+  test("throws matches an Error-shaped object field-by-field", () => {
+    assert.throws(
+      () => { throw { name: "TypeError", message: "bad input" } },
+      { name: "TypeError" },
+    )
+  })
+})
+
+describe("rejection", () => {
+  test("rejects accepts a promise", () => {
+    assert.rejects(Promise.reject("nope"))
+  })
+
+  test("rejects accepts a function returning a promise (the Node form)", () => {
+    assert.rejects(async () => { throw "nope" })
+  })
+
+  test("doesNotReject on a clean async fn", () => {
+    assert.doesNotReject(async () => { return 1 })
+  })
+})
+
+describe("misc", () => {
+  test("fail always throws", () => {
+    expect(() => { assert.fail("boom") }).toThrow("boom")
+  })
+
+  test("ifError passes for null", () => {
+    assert.ifError(null)
+  })
+})

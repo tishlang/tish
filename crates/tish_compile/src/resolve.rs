@@ -81,13 +81,22 @@ const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("encoding", "tish:encoding"),
     ("crypto", "tish:crypto"),
     ("zip", "tish:zip"),
+    ("test", "tish:test"),
+    ("assert", "tish:assert"),
+    ("assert/strict", "tish:assert"),
 ];
 
 /// Normalize built-in spec to canonical form. Handles the Node `node:` prefix
-/// (`node:fs` -> `tish:fs`, `node:fs/promises` -> `tish:fs/promises`) and bare aliases.
+/// (`node:fs` -> `tish:fs`, `node:fs/promises` -> `tish:fs/promises`,
+/// `node:test` -> `tish:test`, `node:assert` / `node:assert/strict` -> `tish:assert`)
+/// and bare aliases.
 pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
     // Strip a leading `node:` so `node:fs` resolves the same as `fs`.
     let spec = spec.strip_prefix("node:").unwrap_or(spec);
+    // `node:assert/strict` (and bare `assert/strict`) → `tish:assert`.
+    if spec == "assert/strict" {
+        return Some("tish:assert".to_string());
+    }
     if spec.starts_with("tish:") {
         return Some(spec.to_string());
     }
@@ -97,7 +106,7 @@ pub fn normalize_builtin_spec(spec: &str) -> Option<String> {
         .map(|(_, canonical)| (*canonical).to_string())
 }
 
-/// Built-in modules that come from tishlang_runtime, not from package.json.
+/// Built-in modules that come from tishlang_runtime / tishlang_test, not from package.json.
 pub fn is_builtin_native_spec(spec: &str) -> bool {
     let spec = spec.strip_prefix("node:").unwrap_or(spec);
     matches!(
@@ -114,10 +123,12 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
             | "tish:encoding"
             | "tish:crypto"
             | "tish:zip"
+            | "tish:test"
+            | "tish:assert"
     ) || matches!(
         spec,
         "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty" | "pty" | "net"
-            | "encoding" | "crypto" | "zip"
+            | "encoding" | "crypto" | "zip" | "test" | "assert" | "assert/strict"
     )
 }
 
@@ -1031,7 +1042,7 @@ fn load_module_recursive(
 /// resolution for `import … from "@scope/pkg"` is interop, and the native-vs-merged axis is the one
 /// piece tish adds on top, keyed off the native markers rather than mere presence of `tish.module`.
 pub fn is_native_import(spec: &str) -> bool {
-    // A leading `node:` (node:fs, node:fs/promises) resolves the same as the bare form.
+    // A leading `node:` (node:fs, node:fs/promises, node:assert/strict) resolves like the bare form.
     let spec = spec.strip_prefix("node:").unwrap_or(spec);
     spec.starts_with("tish:")
         || spec.starts_with("cargo:")
@@ -1039,7 +1050,7 @@ pub fn is_native_import(spec: &str) -> bool {
         || matches!(
             spec,
             "fs" | "fs/promises" | "http" | "timers" | "process" | "ws" | "tty" | "net" | "encoding"
-                | "crypto" | "zip"
+                | "crypto" | "zip" | "test" | "assert" | "assert/strict"
         )
 }
 
@@ -2110,13 +2121,35 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                                         from.as_ref()
                                     ));
                                 }
-                                ImportSpecifier::Default { name, .. } => {
-                                    return Err(format!(
-                                        "Default import '{}' not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
-                                        name.as_ref(),
-                                        from.as_ref(),
-                                        from.as_ref()
-                                    ));
+                                ImportSpecifier::Default { name, name_span } => {
+                                    // Only `tish:assert` (and aliases) expose a callable default.
+                                    // Other natives still require named imports.
+                                    if canonical_spec != "tish:assert" {
+                                        return Err(format!(
+                                            "Default import '{}' not supported for native module '{}'. Use named import, e.g. import {{ egui }} from '{}'",
+                                            name.as_ref(),
+                                            from.as_ref(),
+                                            from.as_ref()
+                                        ));
+                                    }
+                                    let init = Expr::NativeModuleLoad {
+                                        spec: Arc::from(canonical_spec.clone()),
+                                        export_name: Arc::from("default"),
+                                        span: *span,
+                                    };
+                                    merge_push(
+                                        &mut statements,
+                                        &mut statement_sources,
+                                        Statement::VarDecl {
+                                            name: name.clone(),
+                                            name_span: *name_span,
+                                            mutable: false,
+                                            type_ann: None,
+                                            init: Some(init),
+                                            span: *span,
+                                        },
+                                        src_path.clone(),
+                                    );
                                 }
                             }
                         }

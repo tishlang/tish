@@ -1,0 +1,58 @@
+// Ambient declarations for `tish:assert` / `node:assert` / `node:assert/strict`.
+//
+// Flat `declare let` form, matching `builtins.d.tish` — `declare module` is not parsed.
+// `assert` is both callable (`assert(value, message?)`) and a namespace of methods, and is
+// available as the module's default export as well as a named one.
+//
+// Divergences from Node, both deliberate:
+//   * `equal` / `notEqual` / `deepEqual` / `notDeepEqual` are the STRICT forms. Tish has no
+//     loose `==`, so there is nothing for the non-strict variants to mean.
+//   * `null` stands in for `undefined` throughout (`ifError(null)` passes).
+//
+// @tish-source assert crates/tish_test/src/assert.rs
+// @tish-source assert.throws crates/tish_test/src/assert.rs
+// @tish-source assert.rejects crates/tish_test/src/assert.rs
+
+declare let assert: {
+  ok: AnyFn
+  equal: AnyFn
+  notEqual: AnyFn
+  strictEqual: AnyFn
+  notStrictEqual: AnyFn
+  deepEqual: AnyFn
+  notDeepEqual: AnyFn
+  deepStrictEqual: AnyFn
+  notDeepStrictEqual: AnyFn
+  partialDeepStrictEqual: AnyFn
+  match: AnyFn
+  doesNotMatch: AnyFn
+  // `throws(fn, error?, message?)` — `error` is a validator (string substring, regex, or an
+  // `Error`-shaped object whose listed fields must all match), not the failure message.
+  throws: AnyFn
+  doesNotThrow: AnyFn
+  // `rejects` / `doesNotReject` accept a promise OR a function returning one, as in Node.
+  rejects: AnyFn
+  doesNotReject: AnyFn
+  fail: AnyFn
+  ifError: AnyFn
+  AssertionError: AnyFn
+}
+
+// Named exports mirroring the methods above, for `import { strictEqual } from "tish:assert"`.
+declare let ok: AnyFn
+declare let equal: AnyFn
+declare let notEqual: AnyFn
+declare let strictEqual: AnyFn
+declare let notStrictEqual: AnyFn
+declare let deepEqual: AnyFn
+declare let notDeepEqual: AnyFn
+declare let deepStrictEqual: AnyFn
+declare let notDeepStrictEqual: AnyFn
+declare let partialDeepStrictEqual: AnyFn
+declare let doesNotMatch: AnyFn
+declare let throws: AnyFn
+declare let doesNotThrow: AnyFn
+declare let rejects: AnyFn
+declare let doesNotReject: AnyFn
+declare let fail: AnyFn
+declare let ifError: AnyFn

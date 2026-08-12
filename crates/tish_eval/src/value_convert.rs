@@ -187,6 +187,16 @@ pub fn eval_to_core(v: &Value) -> Result<CoreValue, String> {
         }
         Value::Symbol(s) => Ok(CoreValue::Symbol(Arc::clone(s))),
         Value::Opaque(o) => Ok(CoreValue::Opaque(Arc::clone(o))),
+        // A core function that came IN through `core_to_eval` round-trips back out unchanged.
+        Value::CoreFn(f) => Ok(CoreValue::Function(f.clone())),
+        // Interpreter closures carry an AST body plus a scope that only the `Evaluator` can
+        // resolve, and they do not outlive it. Say so instead of printing a discriminant.
+        Value::Function { .. } | Value::Native(_) => Err(
+            "Cannot pass an interpreter function to a native module: interpreter closures are \
+             bound to the evaluator and cannot be invoked from native code. Use the default \
+             (VM) backend."
+                .to_string(),
+        ),
         _ => Err(format!(
             "Cannot pass {:?} to native function (unsupported type)",
             std::mem::discriminant(v)

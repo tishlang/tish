@@ -1,0 +1,79 @@
+// Ambient declarations for `tish:test` (Bun/Jest-shaped runner API).
+//
+// Flat `declare let` form, matching `builtins.d.tish` — `declare module` is not parsed, so the
+// earlier module-wrapped version of this file was inert (`tish run stdlib/test.d.tish` failed
+// to parse it). These names are the exports of `import { … } from "tish:test"`.
+//
+// @tish-source describe crates/tish_test/src/module.rs
+// @tish-source test crates/tish_test/src/module.rs
+// @tish-source expect crates/tish_test/src/expect.rs
+// @tish-source mock crates/tish_test/src/mocks.rs
+
+// --- suites ---
+// `describe(name, body)`; `.skip` / `.only` / `.each(table)(name, body)`.
+// `.only` narrows the run to that suite and everything nested beneath it.
+declare let describe: {
+  skip: AnyFn
+  only: AnyFn
+  each: AnyFn
+}
+declare let suite: {
+  skip: AnyFn
+  only: AnyFn
+  each: AnyFn
+}
+
+// --- cases ---
+// `test(name, body)` or `test(name, { timeout, tags }, body)`.
+// `.failing` inverts the result; `.skipIf(cond)` returns a `test` that may be skipped.
+declare let test: {
+  skip: AnyFn
+  only: AnyFn
+  todo: AnyFn
+  failing: AnyFn
+  skipIf: AnyFn
+  each: AnyFn
+}
+declare let it: {
+  skip: AnyFn
+  only: AnyFn
+  todo: AnyFn
+  failing: AnyFn
+  skipIf: AnyFn
+  each: AnyFn
+}
+
+// --- hooks ---
+// `before` / `after` are aliases for `beforeAll` / `afterAll`.
+declare let beforeAll: AnyFn
+declare let afterAll: AnyFn
+declare let beforeEach: AnyFn
+declare let afterEach: AnyFn
+declare let before: AnyFn
+declare let after: AnyFn
+
+// --- matchers ---
+// `expect(value)` returns the matcher object; every matcher is also reachable under `.not`
+// except `toMatchSnapshot`. `expect.assertions(n)` / `expect.hasAssertions()` declare how many
+// `expect(...)` calls the current test must make.
+//
+// Tish has no `undefined`: `toBeUndefined()` and `toBeNull()` both test for `null`, and
+// `toBeDefined()` fails on `null`.
+declare let expect: {
+  any: AnyFn
+  anything: AnyFn
+  objectContaining: AnyFn
+  arrayContaining: AnyFn
+  stringMatching: AnyFn
+  assertions: AnyFn
+  hasAssertions: AnyFn
+}
+
+// --- doubles ---
+// `mock(fn?)` returns a callable with `.mock.calls`, `.mockClear()`, `.mockReset()`,
+// `.mockImplementation(fn)`, `.mockReturnValue(v)`, `.mockResolvedValue(v)`.
+// `spyOn(obj, "method")` replaces a method and is undone by `restoreAllMocks()`.
+declare let mock: AnyFn
+declare let spyOn: AnyFn
+declare let clearAllMocks: AnyFn
+declare let restoreAllMocks: AnyFn

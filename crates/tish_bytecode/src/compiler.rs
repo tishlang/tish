@@ -1521,6 +1521,27 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Compile a function/arrow body **without** the outermost block's `EnterBlock`/`ExitBlock`.
+    ///
+    /// A function body's top-level block is the frame's own scope: its bindings live in the
+    /// frame-local map that is created fresh per call and dropped when the call returns, so there
+    /// is nothing for `ExitBlock` to restore or hide. Emitting it is not merely wasted work — it is
+    /// actively wrong. `ExitBlock` REMOVES the block's names from that map, and closures capture
+    /// the map **by reference**, so any closure that outlived the call lost its captures
+    /// ("Undefined variable"). An explicit `return` masked the bug by jumping over the teardown.
+    /// See tests/core/parity_block_scope_capture.tish (#247).
+    fn compile_fn_body(&mut self, body: &Statement) -> Result<(), CompileError> {
+        if let Statement::Block { statements, .. } = body {
+            self.enter_block_scope();
+            for stmt in statements {
+                self.compile_statement(stmt)?;
+            }
+            self.exit_block_scope();
+            return Ok(());
+        }
+        self.compile_statement(body)
+    }
+
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         self.mark_line(stmt.span());
         match stmt {
@@ -1999,7 +2020,7 @@ impl<'a> Compiler<'a> {
                 if let Some(map) = simple_slots {
                     inner_comp.slot_ctx = Some(map);
                     inner_comp.emit_param_defaults_prologue(params)?;
-                    inner_comp.compile_statement(body)?;
+                    inner_comp.compile_fn_body(body)?;
                 } else if let Some(cap) = captured {
                     // Params (all uncaptured — gated) → slots 0..n (matching the VM's param binding);
                     // uncaptured body `let`s get fresh slots via the scope-aware allocator; captured
@@ -2011,7 +2032,7 @@ impl<'a> Compiler<'a> {
                         inner_comp.declare_slot(p);
                     }
                     inner_comp.emit_param_defaults_prologue(params)?;
-                    inner_comp.compile_statement(body)?;
+                    inner_comp.compile_fn_body(body)?;
                     general_frame_slots = Some(inner_comp.next_slot);
                 } else {
                     inner_comp.scope = vec![param_names
@@ -2021,7 +2042,7 @@ impl<'a> Compiler<'a> {
                     inner_comp
                         .emit_param_destructure_prologue(&param_names[..formal_len], &slots)?;
                     inner_comp.emit_param_defaults_prologue(params)?;
-                    inner_comp.compile_statement(body)?;
+                    inner_comp.compile_fn_body(body)?;
                 }
                 inner_comp.emit(Opcode::LoadConst);
                 let idx = inner_comp.constant_idx(Constant::Null);
@@ -2769,7 +2790,7 @@ impl<'a> Compiler<'a> {
                         inner_comp.emit(Opcode::Return);
                     }
                     ArrowBody::Block(s) => {
-                        inner_comp.compile_statement(s)?;
+                        inner_comp.compile_fn_body(s)?;
                         let idx = inner_comp.constant_idx(Constant::Null);
                         inner_comp.emit(Opcode::LoadConst);
                         inner_comp.chunk.write_u16(idx);

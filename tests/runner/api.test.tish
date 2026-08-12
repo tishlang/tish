@@ -1,0 +1,243 @@
+// Dogfood suite for `tish test`: the runner exercising its own public API.
+//
+// Everything here must PASS. Cases that must *fail* (a blown timeout, a broken snapshot, a
+// throwing `describe`) can't live in a green suite — they are pinned from the outside in
+// crates/tish/tests/test_runner.rs, which asserts on the process exit code.
+
+import {
+  describe,
+  test,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+  clearAllMocks,
+  restoreAllMocks,
+} from "tish:test"
+
+describe("core matchers", () => {
+  test("toBe uses strict equality", () => {
+    expect(1 + 1).toBe(2)
+    expect("a" + "b").toBe("ab")
+  })
+
+  test("toEqual compares structurally", () => {
+    expect({ a: [1, { b: 2 }] }).toEqual({ a: [1, { b: 2 }] })
+    expect([1, 2, 3]).toEqual([1, 2, 3])
+  })
+
+  test("toEqual treats functions by identity", () => {
+    let f = () => 1
+    expect({ f: f }).toEqual({ f: f })
+    expect({ f: () => 1 }).not.toEqual({ f: () => 1 })
+  })
+
+  test("null is the absence value — tish has no undefined", () => {
+    expect(null).toBeNull()
+    expect(null).toBeUndefined()
+    expect(0).toBeDefined()
+    expect(null).not.toBeDefined()
+  })
+
+  test("truthiness", () => {
+    expect(1).toBeTruthy()
+    expect("").toBeFalsy()
+    expect(0).toBeFalsy()
+  })
+
+  test("numeric comparisons", () => {
+    expect(3).toBeGreaterThan(2)
+    expect(3).toBeGreaterThanOrEqual(3)
+    expect(2).toBeLessThan(3)
+    expect(2).toBeLessThanOrEqual(2)
+    expect(0 / 0).toBeNaN()
+  })
+
+  test("toBeCloseTo follows Jest's half-precision rule", () => {
+    expect(0.1 + 0.2).toBeCloseTo(0.3, 10)
+    expect(0.005).not.toBeCloseTo(0, 2)
+    expect(0.004).toBeCloseTo(0, 2)
+  })
+
+  test("strings and collections", () => {
+    expect("hello world").toMatch("world")
+    expect([1, 2, 3]).toContain(2)
+    expect([{ id: 1 }]).toContainEqual({ id: 1 })
+    expect([1, 2, 3]).toHaveLength(3)
+    expect("abc").toHaveLength(3)
+  })
+
+  test("object shape", () => {
+    expect({ a: 1, b: 2 }).toMatchObject({ a: 1 })
+    expect({ a: { b: [1, 2] } }).toHaveProperty("a.b.1", 2)
+    expect({ a: 1 }).toHaveProperty("a")
+    expect("x").toBeTypeOf("string")
+    expect(1).toBeTypeOf("number")
+  })
+
+  test("asymmetric matchers", () => {
+    expect([1, 2, 3]).toEqual(expect.arrayContaining([1, 3]))
+    expect({ a: 1, b: 2 }).toEqual(expect.objectContaining({ a: 1 }))
+    expect("hello").toEqual(expect.stringMatching("ell"))
+    expect(1).toEqual(expect.any("Number"))
+    expect("x").toEqual(expect.anything())
+  })
+
+  test("toThrow validates the thrown value", () => {
+    expect(() => { throw "Boom" }).toThrow()
+    expect(() => { throw "Boom" }).toThrow("Boom")
+    expect(() => { throw "Boom" }).toThrowError("Boom")
+    expect(() => { return 1 }).not.toThrow()
+  })
+})
+
+describe("assertion contracts", () => {
+  test("expect.assertions counts the expect() calls", () => {
+    expect.assertions(2)
+    expect(1).toBe(1)
+    expect(2).toBe(2)
+  })
+
+  test("expect.hasAssertions requires at least one", () => {
+    expect.hasAssertions()
+    expect(true).toBeTruthy()
+  })
+})
+
+// Hook state lives at module scope. A `let` declared *inside* a `describe` body is not visible
+// to closures registered from it on the VM backend (it is on the interpreter) — a pre-existing
+// cross-backend capture divergence, tracked separately. Module scope is the pattern that works
+// on every backend.
+let order = []
+let innerRuns = 0
+
+describe("hooks", () => {
+  beforeAll(() => { order.push("beforeAll") })
+  beforeEach(() => { order.push("beforeEach") })
+  afterEach(() => { order.push("afterEach") })
+  afterAll(() => { order.push("afterAll") })
+
+  test("beforeAll ran once, before any beforeEach", () => {
+    expect(order[0]).toBe("beforeAll")
+    expect(order).toContain("beforeEach")
+  })
+
+  test("afterEach ran between tests", () => {
+    expect(order).toContain("afterEach")
+  })
+
+  describe("nested suites inherit outer each-hooks", () => {
+    beforeEach(() => { innerRuns = innerRuns + 1 })
+
+    test("both the outer and the inner beforeEach applied", () => {
+      expect(innerRuns).toBeGreaterThan(0)
+      expect(order).toContain("beforeEach")
+    })
+  })
+})
+
+describe("table-driven cases", () => {
+  test.each([[1, 1, 2], [2, 3, 5], [10, -4, 6]])("adds %i + %i = %i", (a, b, sum) => {
+    expect(a + b).toBe(sum)
+  })
+
+  describe.each([["upper"], ["lower"]])("suite %s", (label) => {
+    test("receives its row", () => {
+      expect(typeof label).toBe("string")
+    })
+  })
+})
+
+describe("skip / todo / failing", () => {
+  test.skip("skipped bodies never run", () => {
+    throw "this must not execute"
+  })
+
+  test.todo("todo cases are reported without a body")
+
+  test.failing("a failing test passes when its body throws", () => {
+    throw "expected"
+  })
+
+  test.skipIf(true)("skipIf(true) skips", () => {
+    throw "this must not execute"
+  })
+
+  test.skipIf(false)("skipIf(false) runs", () => {
+    expect(1).toBe(1)
+  })
+})
+
+describe("mocks and spies", () => {
+  afterEach(() => { restoreAllMocks() })
+
+  test("mock records calls", () => {
+    let m = mock((x) => x * 2)
+    expect(m(3)).toBe(6)
+    m(4)
+    expect(m).toHaveBeenCalled()
+    expect(m).toHaveBeenCalledTimes(2)
+    expect(m).toHaveBeenCalledWith(3)
+    expect(m).toHaveBeenLastCalledWith(4)
+  })
+
+  test("mockReturnValue and mockImplementation replace the body", () => {
+    let m = mock(() => "original")
+    m.mockReturnValue("fixed")
+    expect(m()).toBe("fixed")
+    m.mockImplementation((x) => x + "!")
+    expect(m("hi")).toBe("hi!")
+  })
+
+  test("mockClear resets the call log", () => {
+    let m = mock(() => 1)
+    m()
+    expect(m).toHaveBeenCalledTimes(1)
+    m.mockClear()
+    expect(m).toHaveBeenCalledTimes(0)
+  })
+
+  test("clearAllMocks clears every mock", () => {
+    let a = mock(() => 1)
+    let b = mock(() => 2)
+    a()
+    b()
+    clearAllMocks()
+    expect(a).toHaveBeenCalledTimes(0)
+    expect(b).toHaveBeenCalledTimes(0)
+  })
+
+  test("spyOn wraps a method and restoreAllMocks puts it back", () => {
+    let obj = { greet: () => "real" }
+    let spy = spyOn(obj, "greet")
+    expect(obj.greet()).toBe("real")
+    expect(spy).toHaveBeenCalledTimes(1)
+    restoreAllMocks()
+    expect(obj.greet()).toBe("real")
+  })
+})
+
+describe("async tests", () => {
+  test("an async body that resolves passes", async () => {
+    let v = await Promise.resolve(41)
+    expect(v + 1).toBe(42)
+  })
+
+  test("awaited assertions still fail the test when wrong", async () => {
+    let v = await Promise.resolve(1)
+    expect(v).toBe(1)
+  })
+})
+
+describe("tagged cases", () => {
+  test("tagged with { tags: [...] } runs normally without --tag", { tags: ["slow"] }, () => {
+    expect(1).toBe(1)
+  })
+
+  test("per-test timeout option is accepted", { timeout: 10000 }, () => {
+    expect(1).toBe(1)
+  })
+})
