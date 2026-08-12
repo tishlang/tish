@@ -40,12 +40,16 @@ fn type_name_of(v: &Value) -> &'static str {
 }
 
 /// Jest-style asymmetric matchers (`expect.any`, `objectContaining`, …) on the expected side.
-fn asymmetric_match(actual: &Value, expected: &Value, seen: &mut HashSet<(usize, usize)>) -> Option<bool> {
+fn asymmetric_match(
+    actual: &Value,
+    expected: &Value,
+    seen: &mut HashSet<(usize, usize)>,
+) -> Option<bool> {
     let Value::Object(e) = expected else {
         return None;
     };
     let eb = e.borrow();
-    let Some(Value::String(kind)) = eb.strings.get("$$typeof") else {
+    let Some(Value::String(kind)) = eb.strings.get(crate::expect::ASYMMETRIC_KEY) else {
         return None;
     };
     Some(match kind.as_str() {
@@ -65,7 +69,14 @@ fn asymmetric_match(actual: &Value, expected: &Value, seen: &mut HashSet<(usize,
             partial_deep_strict_equal(actual, &sample)
         }
         "arrayContaining" => {
-            let sample = eb.strings.get("sample").cloned().unwrap_or(Value::Null);
+            // The sample needs the same packed-array materialization as `actual`; a numeric
+            // literal like `[1, 2]` can arrive as a `NumberArray`.
+            let sample = eb
+                .strings
+                .get("sample")
+                .cloned()
+                .unwrap_or(Value::Null)
+                .coerce_number_array();
             let Value::Array(want) = sample else {
                 return Some(false);
             };
@@ -172,7 +183,10 @@ fn deep_strict_equal_inner(a: &Value, b: &Value, seen: &mut HashSet<(usize, usiz
             let yb = y.borrow();
             xb.source == yb.source && format!("{}", xb.flags) == format!("{}", yb.flags)
         }
-        (Value::Function(_), Value::Function(_)) => false,
+        // Jest compares functions by identity: `expect(fn).toEqual(fn)` passes, two distinct
+        // functions never do. Returning false unconditionally failed the identity case.
+        (Value::Function(x), Value::Function(y)) => std::sync::Arc::ptr_eq(x, y),
+        (Value::Opaque(x), Value::Opaque(y)) => std::sync::Arc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -233,10 +247,7 @@ mod tests {
             &Value::Number(f64::NAN),
             &Value::Number(f64::NAN)
         ));
-        assert!(!deep_strict_equal(
-            &Value::Number(1.0),
-            &Value::Number(2.0)
-        ));
+        assert!(!deep_strict_equal(&Value::Number(1.0), &Value::Number(2.0)));
     }
 
     #[test]

@@ -22,16 +22,104 @@ fn is_truthy(v: &Value) -> bool {
     }
 }
 
+/// Can `value_call` actually invoke this? Objects are callable only via a `__call` member.
+pub(crate) fn is_callable(v: &Value) -> bool {
+    match v {
+        Value::Function(_) => true,
+        Value::Object(o) => o.borrow().strings.contains_key("__call"),
+        _ => false,
+    }
+}
+
+/// Human-readable text for a thrown value: `Error`-shaped objects report their `message`.
+fn error_text(err: &Value) -> String {
+    if let Value::Object(o) = err {
+        if let Some(Value::String(m)) = o.borrow().strings.get("message") {
+            return m.to_string();
+        }
+    }
+    err.to_display_string()
+}
+
+/// Does a thrown value satisfy `expected` (string substring, regex, `Error`-shaped object,
+/// or a deep-equal value)? Node/Jest semantics — the previous version accepted *any* throw.
+pub(crate) fn error_matches(err: &Value, expected: &Value) -> bool {
+    match expected {
+        Value::String(pat) => error_text(err).contains(pat.as_str()),
+        #[cfg(feature = "regex")]
+        Value::RegExp(re) => re.borrow_mut().test(&error_text(err)),
+        // `{ message, name, … }` — every listed field must match.
+        Value::Object(o) if !o.borrow().strings.contains_key(ASYMMETRIC_KEY) => {
+            let want = o.borrow();
+            if want.strings.is_empty() {
+                return deep_strict_equal(err, expected);
+            }
+            let Value::Object(got) = err else {
+                return false;
+            };
+            let got = got.borrow();
+            want.strings.iter().all(|(k, wv)| match got.strings.get(k) {
+                Some(gv) => deep_strict_equal(gv, wv),
+                None => false,
+            })
+        }
+        _ => deep_strict_equal(err, expected),
+    }
+}
+
+fn describe_error_matcher(expected: &Value) -> String {
+    match expected {
+        Value::String(s) => format!("a message containing {:?}", s.as_str()),
+        _ => expected.to_display_string(),
+    }
+}
+
+fn type_of_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Symbol(_) => "symbol",
+        Value::Function(_) => "function",
+        _ => "object",
+    }
+}
+
+/// Resolve a `toHaveProperty` path (`"a.b.0"` or `["a", "b", 0]`) to its value.
+fn property_at(root: &Value, path: &Value) -> Option<Value> {
+    let segments: Vec<String> = match path {
+        Value::Array(a) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
+        other => other
+            .to_display_string()
+            .split('.')
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let mut cur = root.clone();
+    for seg in segments {
+        cur = match &cur {
+            Value::Object(o) => o.borrow().strings.get(seg.as_str())?.clone(),
+            Value::Array(a) => {
+                let idx: usize = seg.parse().ok()?;
+                a.borrow().get(idx)?.clone()
+            }
+            Value::NumberArray(a) => {
+                let idx: usize = seg.parse().ok()?;
+                a.borrow().to_values().get(idx)?.clone()
+            }
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
 fn length_of(v: &Value) -> Option<f64> {
     match v {
         Value::Array(a) => Some(a.borrow().len() as f64),
         Value::NumberArray(a) => Some(a.borrow().len() as f64),
         Value::String(s) => Some(s.chars().count() as f64),
-        Value::Object(o) => o
-            .borrow()
-            .strings
-            .get("length")
-            .and_then(|x| x.as_number()),
+        Value::Object(o) => o.borrow().strings.get("length").and_then(|x| x.as_number()),
         _ => None,
     }
 }
@@ -77,6 +165,9 @@ fn mock_calls(meta: &Value) -> Vec<Value> {
     }
 }
 
+// `!(a > b)` and friends are deliberate: they are TRUE when either side is NaN, which is what
+// these matchers must report. `partial_cmp` would silently pass an incomparable pair.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn matcher_object(actual: Value) -> Value {
     let actual_be = actual.clone();
     let actual_eq = actual.clone();
@@ -160,6 +251,19 @@ fn matcher_object(actual: Value) -> Value {
     m.insert(
         Arc::from("toThrow"),
         Value::native(move |args: &[Value]| {
+            // A non-callable would make `value_call` set a pending throw, which used to read
+            // as "the code threw" and pass. Reject it up front instead.
+            if !is_callable(&actual_throw) {
+                return fail(
+                    format!(
+                        "expect(received).toThrow()\n\nReceived value is not a function: {}",
+                        actual_throw.to_display_string()
+                    ),
+                    actual_throw.clone(),
+                    None,
+                    "toThrow",
+                );
+            }
             let _ = take_pending_throw();
             let _ = value_call(&actual_throw, &[]);
             if !has_pending_throw() {
@@ -172,13 +276,12 @@ fn matcher_object(actual: Value) -> Value {
             }
             let err = take_pending_throw().unwrap_or(Value::Null);
             if let Some(expected) = args.first() {
-                let msg = err.to_display_string();
-                let exp = expected.to_display_string();
-                if !msg.contains(&exp) && !deep_strict_equal(&err, expected) {
+                if !error_matches(&err, expected) {
                     return fail(
                         format!(
                             "expect(received).toThrow(expected)\n\nExpected: {}\nReceived: {}",
-                            exp, msg
+                            describe_error_matcher(expected),
+                            error_text(&err)
                         ),
                         err,
                         Some(expected.clone()),
@@ -295,11 +398,19 @@ fn matcher_object(actual: Value) -> Value {
             Value::Null
         }),
     );
+    // Tish has no `undefined`; `null` is the absence value, so these mirror `toBeNull`.
+    // Always-passing / always-failing versions were traps: ported Node suites got no signal.
     m.insert(
         Arc::from("toBeDefined"),
         Value::native(move |_args: &[Value]| {
-            // Tish has no `undefined`; every value is defined.
-            let _ = &actual_defined;
+            if matches!(actual_defined, Value::Null) {
+                return fail(
+                    "expect(received).toBeDefined()\n\nReceived: null".into(),
+                    actual_defined.clone(),
+                    None,
+                    "toBeDefined",
+                );
+            }
             Value::Null
         }),
     );
@@ -307,15 +418,18 @@ fn matcher_object(actual: Value) -> Value {
     m.insert(
         Arc::from("toBeUndefined"),
         Value::native(move |_args: &[Value]| {
-            fail(
-                format!(
-                    "expect(received).toBeUndefined()\n\nTish has no undefined; received: {}",
-                    actual_undefined.to_display_string()
-                ),
-                actual_undefined.clone(),
-                None,
-                "toBeUndefined",
-            )
+            if !matches!(actual_undefined, Value::Null) {
+                return fail(
+                    format!(
+                        "expect(received).toBeUndefined()\n\nTish has no undefined; null is the absence value.\nReceived: {}",
+                        actual_undefined.to_display_string()
+                    ),
+                    actual_undefined.clone(),
+                    None,
+                    "toBeUndefined",
+                );
+            }
+            Value::Null
         }),
     );
     let actual_close = actual.clone();
@@ -325,7 +439,8 @@ fn matcher_object(actual: Value) -> Value {
             let expected = args.first().and_then(|v| v.as_number()).unwrap_or(0.0);
             let digits = args.get(1).and_then(|v| v.as_number()).unwrap_or(2.0);
             let act = actual_close.as_number().unwrap_or(f64::NAN);
-            let prec = 10f64.powf(-digits.max(0.0));
+            // Jest/Bun: |a - b| < 10^-digits / 2. The un-halved form accepted values Jest rejects.
+            let prec = 10f64.powf(-digits.max(0.0)) / 2.0;
             if !((act - expected).abs() < prec) {
                 return fail(
                     format!(
@@ -588,6 +703,109 @@ fn matcher_object(actual: Value) -> Value {
             crate::snapshots::match_snapshot(&actual_snap, hint.as_deref())
         }),
     );
+    let actual_nan = actual.clone();
+    m.insert(
+        Arc::from("toBeNaN"),
+        Value::native(move |_args: &[Value]| {
+            if !matches!(actual_nan, Value::Number(n) if n.is_nan()) {
+                return fail(
+                    format!(
+                        "expect(received).toBeNaN()\n\nReceived: {}",
+                        actual_nan.to_display_string()
+                    ),
+                    actual_nan.clone(),
+                    None,
+                    "toBeNaN",
+                );
+            }
+            Value::Null
+        }),
+    );
+    let actual_typeof = actual.clone();
+    m.insert(
+        Arc::from("toBeTypeOf"),
+        Value::native(move |args: &[Value]| {
+            let want = args
+                .first()
+                .map(|v| v.to_display_string())
+                .unwrap_or_default();
+            let got = type_of_name(&actual_typeof);
+            if got != want {
+                return fail(
+                    format!("expect(received).toBeTypeOf({want:?})\n\nReceived type: {got}"),
+                    actual_typeof.clone(),
+                    None,
+                    "toBeTypeOf",
+                );
+            }
+            Value::Null
+        }),
+    );
+    let actual_prop = actual.clone();
+    m.insert(
+        Arc::from("toHaveProperty"),
+        Value::native(move |args: &[Value]| {
+            let path = args.first().cloned().unwrap_or(Value::Null);
+            let Some(found) = property_at(&actual_prop, &path) else {
+                return fail(
+                    format!(
+                        "expect(received).toHaveProperty({})\n\nProperty not found on: {}",
+                        path.to_display_string(),
+                        actual_prop.to_display_string()
+                    ),
+                    actual_prop.clone(),
+                    None,
+                    "toHaveProperty",
+                );
+            };
+            if let Some(expected) = args.get(1) {
+                if !deep_strict_equal(&found, expected) {
+                    return fail(
+                        format!(
+                            "expect(received).toHaveProperty({}, expected)\n\nExpected: {}\nReceived: {}",
+                            path.to_display_string(),
+                            expected.to_display_string(),
+                            found.to_display_string()
+                        ),
+                        found,
+                        Some(expected.clone()),
+                        "toHaveProperty",
+                    );
+                }
+            }
+            Value::Null
+        }),
+    );
+    let actual_contain_eq = actual.clone();
+    m.insert(
+        Arc::from("toContainEqual"),
+        Value::native(move |args: &[Value]| {
+            let item = args.first().cloned().unwrap_or(Value::Null);
+            let items = match actual_contain_eq.clone().coerce_number_array() {
+                Value::Array(a) => a.borrow().clone(),
+                _ => Vec::new(),
+            };
+            if !items.iter().any(|v| deep_strict_equal(v, &item)) {
+                return fail(
+                    format!(
+                        "expect(received).toContainEqual(expected)\n\nExpected to contain: {}\nReceived: {}",
+                        item.to_display_string(),
+                        actual_contain_eq.to_display_string()
+                    ),
+                    actual_contain_eq.clone(),
+                    Some(item),
+                    "toContainEqual",
+                );
+            }
+            Value::Null
+        }),
+    );
+
+    // `toThrowError` is Jest's alias for `toThrow`.
+    if let Some(t) = m.get("toThrow").cloned() {
+        m.insert(Arc::from("toThrowError"), t);
+    }
+
     attach_not(&mut m, actual);
     Value::object(m)
 }
@@ -597,7 +815,9 @@ fn attach_not(m: &mut ObjectMap, actual: Value) {
     let mut not_map = ObjectMap::default();
     let keys: Vec<Arc<str>> = m.keys().cloned().collect();
     for key in keys {
-        if key.as_ref() == "not" {
+        // `.not.toMatchSnapshot()` would write (or diff-invert) a snapshot; Jest has no such
+        // matcher either.
+        if key.as_ref() == "not" || key.as_ref() == "toMatchSnapshot" {
             continue;
         }
         let Some(matcher) = m.get(key.as_ref()).cloned() else {
@@ -626,7 +846,40 @@ fn attach_not(m: &mut ObjectMap, actual: Value) {
     m.insert(Arc::from("not"), Value::object(not_map));
 }
 
+thread_local! {
+    static ASSERTIONS_MADE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// From `expect.assertions(n)`.
+    static ASSERTIONS_EXPECTED: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    /// From `expect.hasAssertions()` — "at least one".
+    static ASSERTIONS_AT_LEAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reset the per-test assertion counters. Called by the runner before each test body.
+pub fn begin_test_assertions() {
+    ASSERTIONS_MADE.with(|c| c.set(0));
+    ASSERTIONS_EXPECTED.with(|c| c.set(None));
+    ASSERTIONS_AT_LEAST.with(|c| c.set(false));
+}
+
+/// Verify an `expect.assertions(n)` / `expect.hasAssertions()` contract for the test that just ran.
+pub fn check_test_assertions() -> Result<(), String> {
+    let made = ASSERTIONS_MADE.with(|c| c.get());
+    if ASSERTIONS_AT_LEAST.with(|c| c.get()) && made == 0 {
+        return Err("expect.hasAssertions(): no assertions were made".to_string());
+    }
+    if let Some(want) = ASSERTIONS_EXPECTED.with(|c| c.get()) {
+        if made != want {
+            return Err(format!(
+                "expect.assertions({want}): {made} assertion(s) were made"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn expect_call(args: &[Value]) -> Value {
+    ASSERTIONS_MADE.with(|c| c.set(c.get() + 1));
     let actual = args.first().cloned().unwrap_or(Value::Null);
     matcher_object(actual)
 }
@@ -637,7 +890,7 @@ fn asymmetric_any(args: &[Value]) -> Value {
         .map(|v| v.to_display_string())
         .unwrap_or_else(|| "Object".into());
     let mut m = ObjectMap::default();
-    m.insert(Arc::from("$$typeof"), Value::String("any".into()));
+    m.insert(Arc::from(ASYMMETRIC_KEY), Value::String("any".into()));
     m.insert(Arc::from("typeName"), Value::String(type_name.into()));
     Value::object(m)
 }
@@ -646,7 +899,7 @@ fn asymmetric_object_containing(args: &[Value]) -> Value {
     let sample = args.first().cloned().unwrap_or(Value::Null);
     let mut m = ObjectMap::default();
     m.insert(
-        Arc::from("$$typeof"),
+        Arc::from(ASYMMETRIC_KEY),
         Value::String("objectContaining".into()),
     );
     m.insert(Arc::from("sample"), sample);
@@ -657,7 +910,7 @@ fn asymmetric_array_containing(args: &[Value]) -> Value {
     let sample = args.first().cloned().unwrap_or(Value::Null);
     let mut m = ObjectMap::default();
     m.insert(
-        Arc::from("$$typeof"),
+        Arc::from(ASYMMETRIC_KEY),
         Value::String("arrayContaining".into()),
     );
     m.insert(Arc::from("sample"), sample);
@@ -668,23 +921,43 @@ fn asymmetric_string_matching(args: &[Value]) -> Value {
     let sample = args.first().cloned().unwrap_or(Value::Null);
     let mut m = ObjectMap::default();
     m.insert(
-        Arc::from("$$typeof"),
+        Arc::from(ASYMMETRIC_KEY),
         Value::String("stringMatching".into()),
     );
     m.insert(Arc::from("sample"), sample);
     Value::object(m)
 }
 
+/// Marker key for `expect.any` / `objectContaining` / … Deliberately *not* React's `$$typeof`,
+/// which a plain user object may legitimately carry — treating those as matchers made them
+/// compare unequal to everything.
+pub(crate) const ASYMMETRIC_KEY: &str = "__tishAsymmetricMatcher";
+
 /// Build the callable `expect` object.
 pub fn expect_object() -> Value {
     let mut m = ObjectMap::default();
     m.insert(Arc::from("__call"), Value::native(expect_call));
+    m.insert(
+        Arc::from("assertions"),
+        Value::native(|args: &[Value]| {
+            let n = args.first().and_then(|v| v.as_number()).unwrap_or(0.0);
+            ASSERTIONS_EXPECTED.with(|c| c.set(Some(n.max(0.0) as usize)));
+            Value::Null
+        }),
+    );
+    m.insert(
+        Arc::from("hasAssertions"),
+        Value::native(|_args: &[Value]| {
+            ASSERTIONS_AT_LEAST.with(|c| c.set(true));
+            Value::Null
+        }),
+    );
     m.insert(Arc::from("any"), Value::native(asymmetric_any));
     m.insert(
         Arc::from("anything"),
         Value::native(|_args: &[Value]| {
             let mut o = ObjectMap::default();
-            o.insert(Arc::from("$$typeof"), Value::String("anything".into()));
+            o.insert(Arc::from(ASYMMETRIC_KEY), Value::String("anything".into()));
             Value::object(o)
         }),
     );

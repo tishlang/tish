@@ -4,7 +4,7 @@ use tishlang_core::{value_call, Arc, ObjectMap, Value};
 
 use crate::assert::assert_object;
 use crate::expect::expect_object;
-use crate::mocks::{clear_all_mocks, mock_native, restore_all_mocks, spy_on_native};
+use crate::mocks::{clear_all_mocks, mock, restore_all_mocks, spy_on};
 use crate::registry::{add_hook, add_test, push_describe, TestMode};
 
 fn name_and_fn(args: &[Value]) -> (String, Value) {
@@ -15,13 +15,6 @@ fn name_and_fn(args: &[Value]) -> (String, Value) {
                 ("<anonymous>".into(), args[0].clone())
             } else {
                 (args[0].to_display_string(), Value::Null)
-            }
-        }
-        2 => {
-            if matches!(args[1], Value::Function(_) | Value::Object(_)) {
-                (args[0].to_display_string(), args[1].clone())
-            } else {
-                (args[0].to_display_string(), args[1].clone())
             }
         }
         _ => {
@@ -62,11 +55,7 @@ fn tags_from_args(args: &[Value]) -> Vec<String> {
     };
     let b = o.borrow();
     match b.strings.get("tags") {
-        Some(Value::Array(a)) => a
-            .borrow()
-            .iter()
-            .map(|v| v.to_display_string())
-            .collect(),
+        Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
         Some(Value::String(s)) => vec![s.to_string()],
         _ => Vec::new(),
     }
@@ -129,8 +118,9 @@ fn make_test_call(mode: TestMode) -> Value {
         let (name, body) = name_and_fn(args);
         let timeout = timeout_from_args(args);
         let tags = tags_from_args(args);
-        // Parallel `test.concurrent` is deferred (single-threaded VM); ignore `{ concurrent: true }`.
-        add_test(&name, mode, body, timeout, tags, false);
+        // Parallel `test.concurrent` is deferred (single-threaded VM); `{ concurrent: true }`
+        // is accepted and ignored so Bun/Jest suites port without edits.
+        add_test(&name, mode, body, timeout, tags);
         Value::Null
     })
 }
@@ -154,7 +144,7 @@ fn make_each_call(mode: TestMode) -> Value {
                     let call_args = row_args(&row_for_call);
                     value_call(&body, &call_args)
                 });
-                add_test(&name, mode, wrapped, timeout, Vec::new(), false);
+                add_test(&name, mode, wrapped, timeout, Vec::new());
             }
             Value::Null
         })
@@ -200,7 +190,7 @@ fn test_object() -> Value {
                     .first()
                     .map(|v| v.to_display_string())
                     .unwrap_or_else(|| "<todo>".into());
-                add_test(&name, TestMode::Todo, Value::Null, None, Vec::new(), false);
+                add_test(&name, TestMode::Todo, Value::Null, None, Vec::new());
                 Value::Null
             }),
         );
@@ -299,10 +289,13 @@ pub fn test_module() -> ObjectMap {
     m.insert(Arc::from("afterEach"), hook("afterEach"));
     m.insert(Arc::from("before"), hook("before"));
     m.insert(Arc::from("after"), hook("after"));
-    m.insert(Arc::from("mock"), Value::native(mock_native));
-    m.insert(Arc::from("spyOn"), Value::native(spy_on_native));
+    m.insert(Arc::from("mock"), Value::native(mock));
+    m.insert(Arc::from("spyOn"), Value::native(spy_on));
     m.insert(Arc::from("clearAllMocks"), Value::native(clear_all_mocks));
-    m.insert(Arc::from("restoreAllMocks"), Value::native(restore_all_mocks));
+    m.insert(
+        Arc::from("restoreAllMocks"),
+        Value::native(restore_all_mocks),
+    );
     let default_test = m.get("test").cloned().unwrap_or(Value::Null);
     m.insert(Arc::from("default"), default_test);
     m
@@ -322,9 +315,4 @@ pub fn assert_module() -> ObjectMap {
     m.insert(Arc::from("assert"), assert.clone());
     m.insert(Arc::from("default"), assert);
     m
-}
-
-#[allow(dead_code)]
-pub fn call_value(v: &Value, args: &[Value]) -> Value {
-    value_call(v, args)
 }

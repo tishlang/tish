@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
-    static MOCKS: RefCell<Vec<MockHandle>> = RefCell::new(Vec::new());
+    static MOCKS: RefCell<Vec<MockHandle>> = const { RefCell::new(Vec::new()) };
 }
 
 struct MockHandle {
@@ -30,8 +30,7 @@ fn bump_calls(meta: &Value, args: &[Value]) {
     };
     let mut b = o.borrow_mut();
     if !b.strings.contains_key("calls") {
-        b.strings
-            .insert(Arc::from("calls"), empty_calls_array());
+        b.strings.insert(Arc::from("calls"), empty_calls_array());
     }
     if let Some(Value::Array(arr)) = b.strings.get("calls") {
         arr.borrow_mut()
@@ -61,10 +60,8 @@ fn make_mock_meta(impl_fn: Value) -> Value {
             Arc::from("mockClear"),
             Value::native(move |_args: &[Value]| {
                 let mut b = o_clear.borrow_mut();
-                b.strings
-                    .insert(Arc::from("calls"), empty_calls_array());
-                b.strings
-                    .insert(Arc::from("callCount"), Value::Number(0.0));
+                b.strings.insert(Arc::from("calls"), empty_calls_array());
+                b.strings.insert(Arc::from("callCount"), Value::Number(0.0));
                 Value::Null
             }),
         );
@@ -72,10 +69,8 @@ fn make_mock_meta(impl_fn: Value) -> Value {
             Arc::from("mockReset"),
             Value::native(move |_args: &[Value]| {
                 let mut b = o_reset.borrow_mut();
-                b.strings
-                    .insert(Arc::from("calls"), empty_calls_array());
-                b.strings
-                    .insert(Arc::from("callCount"), Value::Number(0.0));
+                b.strings.insert(Arc::from("calls"), empty_calls_array());
+                b.strings.insert(Arc::from("callCount"), Value::Number(0.0));
                 b.strings
                     .insert(Arc::from("implementation"), impl_reset.clone());
                 Value::Null
@@ -102,6 +97,63 @@ fn wrap_mock_fn(meta: Value) -> Value {
     })
 }
 
+/// Set `implementation` on a mock's metadata object.
+fn set_implementation(meta: &Value, f: Value) {
+    if let Value::Object(o) = meta {
+        o.borrow_mut()
+            .strings
+            .insert(Arc::from("implementation"), f);
+    }
+}
+
+/// Jest/Bun put `mockClear` / `mockImplementation` / `mockReturnValue` on the mock function
+/// itself, not on `.mock`. Attach both so either spelling works.
+fn attach_mock_controls(outer: &mut ObjectMap, meta: &Value) {
+    if let Value::Object(o) = meta {
+        for name in ["mockClear", "mockReset"] {
+            let existing = o.borrow().strings.get(name).cloned();
+            if let Some(f) = existing {
+                outer.insert(Arc::from(name), f);
+            }
+        }
+    }
+    let m_impl = meta.clone();
+    outer.insert(
+        Arc::from("mockImplementation"),
+        Value::native(move |args: &[Value]| {
+            set_implementation(&m_impl, args.first().cloned().unwrap_or(Value::Null));
+            Value::Null
+        }),
+    );
+    let m_once = meta.clone();
+    outer.insert(
+        Arc::from("mockImplementationOnce"),
+        Value::native(move |args: &[Value]| {
+            set_implementation(&m_once, args.first().cloned().unwrap_or(Value::Null));
+            Value::Null
+        }),
+    );
+    let m_ret = meta.clone();
+    outer.insert(
+        Arc::from("mockReturnValue"),
+        Value::native(move |args: &[Value]| {
+            let v = args.first().cloned().unwrap_or(Value::Null);
+            set_implementation(&m_ret, Value::native(move |_a: &[Value]| v.clone()));
+            Value::Null
+        }),
+    );
+    let m_res = meta.clone();
+    outer.insert(
+        Arc::from("mockResolvedValue"),
+        Value::native(move |args: &[Value]| {
+            let v = args.first().cloned().unwrap_or(Value::Null);
+            // No promise construction here: a resolved value is what `await` yields anyway.
+            set_implementation(&m_res, Value::native(move |_a: &[Value]| v.clone()));
+            Value::Null
+        }),
+    );
+}
+
 /// `mock(fn?)` — callable mock object with `.mock.calls` / `.mockClear`.
 pub fn mock(args: &[Value]) -> Value {
     let impl_fn = args
@@ -113,7 +165,7 @@ pub fn mock(args: &[Value]) -> Value {
     let mut outer = ObjectMap::default();
     outer.insert(Arc::from("__call"), call);
     outer.insert(Arc::from("mock"), meta.clone());
-    outer.insert(Arc::from("callCount"), Value::Number(0.0));
+    attach_mock_controls(&mut outer, &meta);
     let obj = Value::object(outer);
     MOCKS.with(|m| {
         m.borrow_mut().push(MockHandle {
@@ -145,7 +197,22 @@ pub fn spy_on(args: &[Value]) -> Value {
     let mut outer = ObjectMap::default();
     outer.insert(Arc::from("__call"), call);
     outer.insert(Arc::from("mock"), meta.clone());
+    attach_mock_controls(&mut outer, &meta);
     let spy = Value::object(outer);
+    if !matches!(target, Value::Object(_)) {
+        // Silently returning an unattached spy made the whole test a no-op.
+        tishlang_core::set_pending_throw(crate::assert::assertion_error(
+            format!(
+                "spyOn(target, {prop:?}): target is not an object ({})",
+                target.to_display_string()
+            ),
+            Some(target.clone()),
+            None,
+            "spyOn",
+            true,
+        ));
+        return Value::Null;
+    }
     if let Value::Object(o) = &target {
         o.borrow_mut()
             .strings
@@ -165,10 +232,8 @@ pub fn clear_all_mocks(_args: &[Value]) -> Value {
         for h in m.borrow().iter() {
             if let Value::Object(o) = &h.meta {
                 let mut b = o.borrow_mut();
-                b.strings
-                    .insert(Arc::from("calls"), empty_calls_array());
-                b.strings
-                    .insert(Arc::from("callCount"), Value::Number(0.0));
+                b.strings.insert(Arc::from("calls"), empty_calls_array());
+                b.strings.insert(Arc::from("callCount"), Value::Number(0.0));
             }
         }
     });
@@ -178,17 +243,22 @@ pub fn clear_all_mocks(_args: &[Value]) -> Value {
 pub fn restore_all_mocks(_args: &[Value]) -> Value {
     MOCKS.with(|m| {
         let mut list = m.borrow_mut();
-        for h in list.drain(..) {
-            if let Some((target, prop, original)) = h.restore {
-                if let Value::Object(o) = target {
-                    o.borrow_mut()
-                        .strings
-                        .insert(Arc::from(prop.as_str()), original);
-                }
+        // Restore newest-first: spying twice on one method must land back on the ORIGINAL,
+        // not on the first spy.
+        for h in list.drain(..).rev() {
+            if let Some((Value::Object(o), prop, original)) = h.restore {
+                o.borrow_mut()
+                    .strings
+                    .insert(Arc::from(prop.as_str()), original);
             }
         }
     });
     Value::Null
+}
+
+/// Drop all mock/spy handles between test files (restore spies first).
+pub fn reset_mock_registry() {
+    let _ = restore_all_mocks(&[]);
 }
 
 pub fn mock_native(args: &[Value]) -> Value {

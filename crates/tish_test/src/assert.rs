@@ -163,12 +163,7 @@ fn match_fn(args: &[Value]) -> Value {
                 string
             )
         });
-        return throw_err(
-            m,
-            Some(Value::String(string.into())),
-            Some(regexp),
-            "match",
-        );
+        return throw_err(m, Some(Value::String(string.into())), Some(regexp), "match");
     }
     Value::Null
 }
@@ -211,23 +206,67 @@ fn regexp_test(re: &Value, s: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Node's `assert.throws(fn[, error][, message])`: `error` is a validator (regex / message
+/// substring / `Error`-shaped object), `message` is the failure text.
+fn split_error_and_message(args: &[Value]) -> (Option<Value>, Option<String>) {
+    match (args.get(1), args.get(2)) {
+        (Some(e), Some(m)) => (Some(e.clone()), Some(m.to_display_string())),
+        (Some(e), None) => (Some(e.clone()), None),
+        _ => (None, None),
+    }
+}
+
 fn throws(args: &[Value]) -> Value {
     let fn_v = args.first().cloned().unwrap_or(Value::Null);
+    let (expected, message) = split_error_and_message(args);
+    if !crate::expect::is_callable(&fn_v) {
+        return throw_err(
+            format!(
+                "assert.throws expects a function, got {}",
+                fn_v.to_display_string()
+            ),
+            Some(fn_v),
+            None,
+            "throws",
+        );
+    }
     let _ = take_pending_throw();
     let _ = value_call(&fn_v, &[]);
-    if has_pending_throw() {
-        let _ = take_pending_throw();
-        return Value::Null;
+    if !has_pending_throw() {
+        let msg = message.unwrap_or_else(|| "Missing expected exception".into());
+        return throw_err(msg, None, expected, "throws");
     }
-    let msg = args
-        .get(1)
-        .map(|m| m.to_display_string())
-        .unwrap_or_else(|| "Missing expected exception".into());
-    throw_err(msg, None, None, "throws")
+    let err = take_pending_throw().unwrap_or(Value::Null);
+    if let Some(expected) = expected {
+        // Previously the second argument was treated as the failure message, so ANY throw
+        // satisfied `assert.throws(fn, /pattern/)`. Validate it.
+        if !crate::expect::error_matches(&err, &expected) {
+            let msg = message.unwrap_or_else(|| {
+                format!(
+                    "The error did not match the expected pattern:\n+ actual: {}\n- expected: {}",
+                    err.to_display_string(),
+                    expected.to_display_string()
+                )
+            });
+            return throw_err(msg, Some(err), Some(expected), "throws");
+        }
+    }
+    Value::Null
 }
 
 fn does_not_throw(args: &[Value]) -> Value {
     let fn_v = args.first().cloned().unwrap_or(Value::Null);
+    if !crate::expect::is_callable(&fn_v) {
+        return throw_err(
+            format!(
+                "assert.doesNotThrow expects a function, got {}",
+                fn_v.to_display_string()
+            ),
+            Some(fn_v),
+            None,
+            "doesNotThrow",
+        );
+    }
     let _ = take_pending_throw();
     let _ = value_call(&fn_v, &[]);
     if has_pending_throw() {
@@ -241,23 +280,52 @@ fn does_not_throw(args: &[Value]) -> Value {
     Value::Null
 }
 
+/// Settle `assert.rejects` / `doesNotReject` input. Node accepts a promise **or a function
+/// returning one**; the function form used to be treated as an already-resolved value, so
+/// `assert.rejects(async () => { throw … })` never ran the body.
+#[cfg(feature = "promise")]
+fn settle_awaitable(v: Value) -> Result<Value, Value> {
+    let v = if crate::expect::is_callable(&v) {
+        let _ = take_pending_throw();
+        let produced = value_call(&v, &[]);
+        if has_pending_throw() {
+            // A synchronous throw from the function counts as a rejection, as it does in Node.
+            return Err(take_pending_throw().unwrap_or(Value::Null));
+        }
+        produced
+    } else {
+        v
+    };
+    match v {
+        Value::Promise(pr) => pr.block_until_settled(),
+        other => Ok(other),
+    }
+}
+
 fn rejects(args: &[Value]) -> Value {
     let p = args.first().cloned().unwrap_or(Value::Null);
     #[cfg(feature = "promise")]
     {
-        let _ = take_pending_throw();
-        let settled = match p {
-            Value::Promise(pr) => pr.block_until_settled(),
-            other => Ok(other),
-        };
-        match settled {
-            Err(_) => Value::Null,
+        let (expected, message) = split_error_and_message(args);
+        match settle_awaitable(p) {
+            Err(err) => {
+                if let Some(expected) = expected {
+                    if !crate::expect::error_matches(&err, &expected) {
+                        let msg = message.unwrap_or_else(|| {
+                            format!(
+                                "The rejection did not match the expected pattern:\n+ actual: {}\n- expected: {}",
+                                err.to_display_string(),
+                                expected.to_display_string()
+                            )
+                        });
+                        return throw_err(msg, Some(err), Some(expected), "rejects");
+                    }
+                }
+                Value::Null
+            }
             Ok(_) => {
-                let msg = args
-                    .get(1)
-                    .map(|m| m.to_display_string())
-                    .unwrap_or_else(|| "Missing expected rejection".into());
-                throw_err(msg, None, None, "rejects")
+                let msg = message.unwrap_or_else(|| "Missing expected rejection".into());
+                throw_err(msg, None, expected, "rejects")
             }
         }
     }
@@ -277,12 +345,7 @@ fn does_not_reject(args: &[Value]) -> Value {
     let p = args.first().cloned().unwrap_or(Value::Null);
     #[cfg(feature = "promise")]
     {
-        let _ = take_pending_throw();
-        let settled = match p {
-            Value::Promise(pr) => pr.block_until_settled(),
-            other => Ok(other),
-        };
-        match settled {
+        match settle_awaitable(p) {
             Ok(_) => Value::Null,
             Err(err) => {
                 let msg = args
@@ -342,8 +405,14 @@ pub fn assert_object() -> Value {
     m.insert(Arc::from("deepEqual"), Value::native(deep_strict));
     m.insert(Arc::from("notDeepEqual"), Value::native(not_deep_strict));
     m.insert(Arc::from("deepStrictEqual"), Value::native(deep_strict));
-    m.insert(Arc::from("notDeepStrictEqual"), Value::native(not_deep_strict));
-    m.insert(Arc::from("partialDeepStrictEqual"), Value::native(partial_deep));
+    m.insert(
+        Arc::from("notDeepStrictEqual"),
+        Value::native(not_deep_strict),
+    );
+    m.insert(
+        Arc::from("partialDeepStrictEqual"),
+        Value::native(partial_deep),
+    );
     m.insert(Arc::from("match"), Value::native(match_fn));
     m.insert(Arc::from("doesNotMatch"), Value::native(does_not_match));
     m.insert(Arc::from("throws"), Value::native(throws));

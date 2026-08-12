@@ -1,84 +1,79 @@
-// Ambient types for `tish:test` / `node:test` (Bun/Jest-shaped runner API).
+// Ambient declarations for `tish:test` (Bun/Jest-shaped runner API).
+//
+// Flat `declare let` form, matching `builtins.d.tish` — `declare module` is not parsed, so the
+// earlier module-wrapped version of this file was inert (`tish run stdlib/test.d.tish` failed
+// to parse it). These names are the exports of `import { … } from "tish:test"`.
 //
 // @tish-source describe crates/tish_test/src/module.rs
+// @tish-source test crates/tish_test/src/module.rs
 // @tish-source expect crates/tish_test/src/expect.rs
 // @tish-source mock crates/tish_test/src/mocks.rs
 
-declare module "tish:test" {
-  type TestFn = (...args: any[]) => any
-  type DescribeFn = (name: string, fn: () => void) => void
-  type ItFn = (name: string, fn?: TestFn) => void
-  type ItOptsFn = (name: string, opts: Record<string, any>, fn: TestFn) => void
-  type EachFn = (table: any[]) => (name: string, fn: TestFn) => void
-
-  export const describe: DescribeFn & {
-    skip: DescribeFn
-    only: DescribeFn
-    each: EachFn
-  }
-  export const suite: typeof describe
-  export const test: (ItFn & ItOptsFn) & {
-    skip: ItFn & ItOptsFn
-    only: ItFn & ItOptsFn
-    todo: (name: string) => void
-    failing: ItFn & ItOptsFn
-    skipIf: (cond: any) => ItFn
-    each: EachFn
-  }
-  export const it: typeof test
-
-  export function beforeAll(fn: TestFn): void
-  export function afterAll(fn: TestFn): void
-  export function beforeEach(fn: TestFn): void
-  export function afterEach(fn: TestFn): void
-  export function before(fn: TestFn): void
-  export function after(fn: TestFn): void
-
-  interface ExpectMatchers {
-    not: ExpectMatchers
-    toBe(expected: any): void
-    toEqual(expected: any): void
-    toStrictEqual(expected: any): void
-    toBeNull(): void
-    toBeTruthy(): void
-    toBeFalsy(): void
-    toBeDefined(): void
-    toBeUndefined(): void
-    toBeGreaterThan(expected: number): void
-    toBeGreaterThanOrEqual(expected: number): void
-    toBeLessThan(expected: number): void
-    toBeLessThanOrEqual(expected: number): void
-    toBeCloseTo(expected: number, numDigits?: number): void
-    toContain(item: any): void
-    toMatch(pattern: any): void
-    toMatchObject(expected: any): void
-    toThrow(expected?: any): void
-    toHaveLength(expected: number): void
-    toMatchSnapshot(hint?: string): void
-    toHaveBeenCalled(): void
-    toHaveBeenCalledTimes(n: number): void
-    toHaveBeenCalledWith(...args: any[]): void
-    toHaveBeenLastCalledWith(...args: any[]): void
-  }
-
-  export function expect(actual: any): ExpectMatchers
-  export namespace expect {
-    function any(ctor: any): any
-    function anything(): any
-    function objectContaining(sample: any): any
-    function arrayContaining(sample: any): any
-    function stringMatching(sample: any): any
-  }
-
-  export function mock(fn?: TestFn): any
-  export function spyOn(obj: any, method: string): any
-  export function clearAllMocks(): void
-  export function restoreAllMocks(): void
-
-  const _default: typeof test
-  export default _default
+// --- suites ---
+// `describe(name, body)`; `.skip` / `.only` / `.each(table)(name, body)`.
+// `.only` narrows the run to that suite and everything nested beneath it.
+declare let describe: {
+  skip: AnyFn
+  only: AnyFn
+  each: AnyFn
+}
+declare let suite: {
+  skip: AnyFn
+  only: AnyFn
+  each: AnyFn
 }
 
-declare module "node:test" {
-  export * from "tish:test"
+// --- cases ---
+// `test(name, body)` or `test(name, { timeout, tags }, body)`.
+// `.failing` inverts the result; `.skipIf(cond)` returns a `test` that may be skipped.
+declare let test: {
+  skip: AnyFn
+  only: AnyFn
+  todo: AnyFn
+  failing: AnyFn
+  skipIf: AnyFn
+  each: AnyFn
 }
+declare let it: {
+  skip: AnyFn
+  only: AnyFn
+  todo: AnyFn
+  failing: AnyFn
+  skipIf: AnyFn
+  each: AnyFn
+}
+
+// --- hooks ---
+// `before` / `after` are aliases for `beforeAll` / `afterAll`.
+declare let beforeAll: AnyFn
+declare let afterAll: AnyFn
+declare let beforeEach: AnyFn
+declare let afterEach: AnyFn
+declare let before: AnyFn
+declare let after: AnyFn
+
+// --- matchers ---
+// `expect(value)` returns the matcher object; every matcher is also reachable under `.not`
+// except `toMatchSnapshot`. `expect.assertions(n)` / `expect.hasAssertions()` declare how many
+// `expect(...)` calls the current test must make.
+//
+// Tish has no `undefined`: `toBeUndefined()` and `toBeNull()` both test for `null`, and
+// `toBeDefined()` fails on `null`.
+declare let expect: {
+  any: AnyFn
+  anything: AnyFn
+  objectContaining: AnyFn
+  arrayContaining: AnyFn
+  stringMatching: AnyFn
+  assertions: AnyFn
+  hasAssertions: AnyFn
+}
+
+// --- doubles ---
+// `mock(fn?)` returns a callable with `.mock.calls`, `.mockClear()`, `.mockReset()`,
+// `.mockImplementation(fn)`, `.mockReturnValue(v)`, `.mockResolvedValue(v)`.
+// `spyOn(obj, "method")` replaces a method and is undone by `restoreAllMocks()`.
+declare let mock: AnyFn
+declare let spyOn: AnyFn
+declare let clearAllMocks: AnyFn
+declare let restoreAllMocks: AnyFn

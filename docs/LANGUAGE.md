@@ -202,7 +202,7 @@ tish test ./my-pkg             # directory root
 tish test -t "adds" --bail     # name pattern + stop on fail
 ```
 
-Import the Bun/Jest-shaped API from **`tish:test`** (`describe` / `it` / `expect` / hooks). Use Node assert via **`tish:assert`** or **`node:assert/strict`** (default import supported). **`tish test` runs on the Tish VM/interpreter — it does not execute JavaScript.** Details and CLI flags: [testing.md](./testing.md). Host-wiring audit and semantics-vs-JS-emit split: [test.md](./test.md). Stdlib stubs `stdlib/test.d.tish` / `stdlib/assert.d.tish` are documentation-shaped and not wired into LSP/check yet.
+Import the Bun/Jest-shaped API from **`tish:test`** (`describe` / `it` / `expect` / hooks). Use Node assert via **`tish:assert`** or **`node:assert/strict`** (default import supported). **`tish test` runs on the Tish VM — it does not execute JavaScript**, so moving a suite off `tish build --target js && node` changes what is being tested. Details, CLI flags, and the deliberate divergences from Jest/Bun/Node: [testing.md](./testing.md).
 
 ---
 

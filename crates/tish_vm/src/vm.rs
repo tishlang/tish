@@ -2178,6 +2178,11 @@ impl Vm {
                     }
                 }
                 Opcode::JumpBack => {
+                    // Cooperative timeout poll: a runaway loop is otherwise uninterruptible.
+                    // Disarmed (every path but `tish test --timeout`) this is one relaxed load.
+                    if tishlang_core::execution_deadline_exceeded() {
+                        return Some(Err(tishlang_core::DEADLINE_ERROR.to_string()));
+                    }
                     let dist = Self::read_u16(code, &mut ip) as usize;
                     // #190 OSR: `ip` now points just past the JumpBack (region end); the loop header is
                     // `region_end - dist`. Once a loop is hot, try to run its remaining iterations in
@@ -3092,6 +3097,10 @@ impl Vm {
                     }
                 }
                 Opcode::JumpBack => {
+                    // Cooperative timeout poll — see the frame VM's JumpBack.
+                    if tishlang_core::execution_deadline_exceeded() {
+                        return Err(tishlang_core::DEADLINE_ERROR.to_string());
+                    }
                     let dist = Self::read_u16(code, &mut ip) as usize;
                     // #190 OSR: on a hot back-edge, try to finish the loop natively. Slot-based frames
                     // only (`slot_locals` is the live frame); non-slot / non-numeric loops fail the

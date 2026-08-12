@@ -1,16 +1,11 @@
 //! Suite tree registry — collect-then-run (Jest/Bun model).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tishlang_core::Value;
 
 static ONLY_MODE: AtomicBool = AtomicBool::new(false);
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_id() -> u64 {
-    NEXT_ID.fetch_add(1, Ordering::SeqCst)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestMode {
@@ -23,14 +18,11 @@ pub enum TestMode {
 
 #[derive(Clone)]
 pub struct TestCase {
-    pub id: u64,
     pub name: String,
     pub full_name: String,
     pub callback: Value,
     pub mode: TestMode,
     pub timeout_ms: Option<u64>,
-    pub concurrent: bool,
-    pub serial: bool,
     pub tags: Vec<String>,
     pub file: String,
 }
@@ -68,6 +60,9 @@ struct CollectState {
     path: Vec<usize>,
     current_file: String,
     collecting: bool,
+    /// Errors thrown by `describe` bodies during collection. A throw here would otherwise
+    /// silently drop every test after it, so the runner reports these as failures.
+    errors: Vec<String>,
 }
 
 impl CollectState {
@@ -77,6 +72,7 @@ impl CollectState {
             path: Vec::new(),
             current_file: String::new(),
             collecting: false,
+            errors: Vec::new(),
         }
     }
 
@@ -111,6 +107,11 @@ pub fn end_collect() -> SuiteNode {
     })
 }
 
+/// Errors thrown by `describe` bodies during the last collection pass.
+pub fn take_collect_errors() -> Vec<String> {
+    STATE.with(|s| std::mem::take(&mut s.borrow_mut().errors))
+}
+
 pub fn is_collecting() -> bool {
     STATE.with(|s| s.borrow().collecting)
 }
@@ -118,28 +119,35 @@ pub fn is_collecting() -> bool {
 fn full_name_for(suite_path: &[String], test_name: &str) -> String {
     let mut parts = suite_path.to_vec();
     parts.push(test_name.to_string());
-    parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" > ")
+    parts
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join(" > ")
 }
 
-fn suite_path_names() -> Vec<String> {
-    STATE.with(|s| {
-        let st = s.borrow();
-        let mut names = Vec::new();
-        let mut node = &st.root;
+/// Names of the suites currently on the collect stack, outermost first.
+fn suite_path_names(st: &CollectState) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut node = &st.root;
+    names.push(node.name.clone());
+    for &i in &st.path {
+        node = &node.children[i];
         names.push(node.name.clone());
-        for &i in &st.path {
-            node = &node.children[i];
-            names.push(node.name.clone());
-        }
-        names
-    })
+    }
+    names
 }
 
 pub fn push_describe(name: &str, mode: TestMode, body: &Value) {
-    STATE.with(|s| {
+    // `describe.only` narrows the run exactly like `test.only` (Jest/Bun): registering one
+    // puts the whole file in only-mode so unmarked suites are filtered out.
+    if mode == TestMode::Only {
+        ONLY_MODE.store(true, Ordering::SeqCst);
+    }
+    let pushed = STATE.with(|s| {
         let mut st = s.borrow_mut();
         if !st.collecting {
-            return;
+            return false;
         }
         let child = SuiteNode {
             name: name.to_string(),
@@ -152,12 +160,26 @@ pub fn push_describe(name: &str, mode: TestMode, body: &Value) {
             cur.children.len() - 1
         };
         st.path.push(idx);
+        true
     });
-    // Run describe body immediately (Jest model).
-    let _ = tishlang_core::value_call(body, &[]);
+    if !pushed {
+        return;
+    }
+    // Run describe body immediately (Jest model). A throw here would silently drop every
+    // remaining registration in the body, so record it — the runner turns it into a failure.
     let _ = tishlang_core::take_pending_throw();
+    let _ = tishlang_core::value_call(body, &[]);
+    let thrown = tishlang_core::take_pending_throw();
     STATE.with(|s| {
-        s.borrow_mut().path.pop();
+        let mut st = s.borrow_mut();
+        st.path.pop();
+        if let Some(err) = thrown {
+            let full = full_name_for(&suite_path_names(&st), name);
+            st.errors.push(format!(
+                "{full} (collecting): {}\n  Tests registered after this point in the describe body were skipped.",
+                err.to_display_string()
+            ));
+        }
     });
 }
 
@@ -167,7 +189,6 @@ pub fn add_test(
     body: Value,
     timeout_ms: Option<u64>,
     tags: Vec<String>,
-    concurrent: bool,
 ) {
     if mode == TestMode::Only {
         ONLY_MODE.store(true, Ordering::SeqCst);
@@ -177,26 +198,14 @@ pub fn add_test(
         if !st.collecting {
             return;
         }
-        let path = {
-            let mut names = Vec::new();
-            let mut node = &st.root;
-            names.push(node.name.clone());
-            for &i in &st.path {
-                node = &node.children[i];
-                names.push(node.name.clone());
-            }
-            names
-        };
+        let path = suite_path_names(&st);
         let file = st.current_file.clone();
         let case = TestCase {
-            id: next_id(),
             name: name.to_string(),
             full_name: full_name_for(&path, name),
             callback: body,
             mode,
             timeout_ms,
-            concurrent,
-            serial: false,
             tags,
             file,
         };
@@ -223,13 +232,4 @@ pub fn add_hook(kind: &str, body: Value) {
 
 pub fn only_mode() -> bool {
     ONLY_MODE.load(Ordering::SeqCst)
-}
-
-pub fn set_only_mode(v: bool) {
-    ONLY_MODE.store(v, Ordering::SeqCst);
-}
-
-#[allow(dead_code)]
-pub fn current_suite_path() -> Vec<String> {
-    suite_path_names()
 }

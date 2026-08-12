@@ -636,7 +636,7 @@ pub(crate) struct TestArgs {
     /// File or directory filters (paths / substrings). Omit to discover under the current directory.
     #[arg(num_args = 0.., value_name = "FILTER", help_heading = "Arguments")]
     pub filters: Vec<String>,
-    /// `vm` or `interp`.
+    /// Execution backend. Only `vm` runs tests today.
     #[arg(
         long,
         default_value = "vm",
@@ -644,7 +644,8 @@ pub(crate) struct TestArgs {
         help_heading = "Options"
     )]
     pub backend: String,
-    /// Restrict which platform APIs tests may use (omit = all capabilities compiled into this `tish`).
+    /// Restrict which platform APIs tests may use, as `tish run --feature` does
+    /// (omit = all capabilities compiled into this `tish`). Enforced on `--backend vm`.
     #[arg(
         long = "feature",
         value_name = "NAME",
@@ -658,12 +659,16 @@ pub(crate) struct TestArgs {
     /// Only run tests whose full name matches this regex.
     #[arg(short = 't', long = "test-name-pattern", value_name = "REGEX", help_heading = "Options")]
     pub test_name_pattern: Option<String>,
-    /// Per-test timeout in milliseconds (default 5000).
+    /// Per-test timeout in milliseconds (default 5000). Loops are interrupted at the deadline;
+    /// a body blocked inside one native call is only caught once it returns.
     #[arg(long, default_value = "5000", value_name = "MS", help_heading = "Options")]
     pub timeout: u64,
     /// Update snapshot files on mismatch (`-u`).
     #[arg(short = 'u', long = "update-snapshots", help_heading = "Options")]
     pub update_snapshots: bool,
+    /// Fail on a missing snapshot instead of writing it (also on when `CI` is set).
+    #[arg(long, help_heading = "Options")]
+    pub ci: bool,
     /// Stop after the first failing test file / suite.
     #[arg(long, help_heading = "Options")]
     pub bail: bool,
@@ -688,7 +693,7 @@ pub(crate) struct TestArgs {
     /// Seed for `--randomize` (implies randomize).
     #[arg(long, value_name = "N", help_heading = "Options")]
     pub seed: Option<u64>,
-    /// Run the suite this many times (`--rerun-each`).
+    /// Run the suite this many times; any failing pass fails the command (`--rerun-each`).
     #[arg(long = "rerun-each", default_value = "1", value_name = "N", help_heading = "Options")]
     pub rerun_each: u32,
     /// Shard files as `i/n` (1-based index).
@@ -697,10 +702,10 @@ pub(crate) struct TestArgs {
     /// Only run tests that include this tag (repeatable).
     #[arg(long = "tag", value_name = "TAG", action = clap::ArgAction::Append, help_heading = "Options")]
     pub tags: Vec<String>,
-    /// Preload module paths (evaluated before each test file).
+    /// Preload module paths (evaluated before each test file, on the same backend instance).
     #[arg(long = "preload", value_name = "FILE", action = clap::ArgAction::Append, help_heading = "Options")]
     pub preload: Vec<String>,
-    /// Collect line coverage (AST instrumentation; works with `--backend vm` and `interp`).
+    /// Collect line coverage via AST instrumentation.
     #[arg(long, help_heading = "Options")]
     pub coverage: bool,
     /// Write `lcov.info` under this directory (implies `--coverage`). Default: `coverage/`.

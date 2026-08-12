@@ -160,10 +160,16 @@ fn main() {
                     }
                 });
                 let backend = a.backend.as_str();
-                if backend != "vm" && backend != "interp" {
-                    eprintln!(
-                        "error: unsupported --backend `{backend}` for tish test (use `vm` or `interp`; `--backend native` is not implemented yet)"
-                    );
+                if backend != "vm" {
+                    // The interpreter cannot host test callbacks: its closures are bound to the
+                    // `Evaluator`, which is dropped before the collected suite runs. `--backend
+                    // interp` used to be accepted and then fail on the simplest test file.
+                    let hint = if backend == "interp" {
+                        "`--backend interp` cannot run tests: interpreter closures are bound to the evaluator and cannot be called back after collection"
+                    } else {
+                        "`--backend native` is not implemented yet"
+                    };
+                    eprintln!("error: unsupported --backend `{backend}` for tish test (use `vm`); {hint}");
                     std::process::exit(2);
                 }
                 let opts = TestOptions {
@@ -186,6 +192,7 @@ fn main() {
                     rerun_each: a.rerun_each,
                     tags: a.tags.clone(),
                     preload: a.preload.iter().map(std::path::PathBuf::from).collect(),
+                    ci: a.ci,
                     coverage: a.coverage || a.coverage_dir.is_some(),
                     coverage_dir: a.coverage_dir.as_ref().map(std::path::PathBuf::from),
                 };

@@ -28,10 +28,7 @@ fn instrument_stmts(stmts: Vec<Statement>, file_id: u32) -> Vec<Statement> {
             | Statement::Import { .. } => {
                 out.push(stmt);
             }
-            Statement::Export {
-                declaration,
-                span,
-            } => {
+            Statement::Export { declaration, span } => {
                 let declaration = Box::new(match *declaration {
                     ExportDeclaration::Named(inner) => {
                         ExportDeclaration::Named(Box::new(instrument_stmt(*inner, file_id)))
@@ -42,10 +39,7 @@ fn instrument_stmts(stmts: Vec<Statement>, file_id: u32) -> Vec<Statement> {
                     other => other,
                 });
                 out.push(hit_stmt(file_id, span.start.0 as u32));
-                out.push(Statement::Export {
-                    declaration,
-                    span,
-                });
+                out.push(Statement::Export { declaration, span });
             }
             Statement::Multi { statements, span } => {
                 out.push(Statement::Multi {
@@ -182,7 +176,12 @@ fn instrument_stmt(stmt: Statement, file_id: u32) -> Statement {
             expr: instrument_expr(expr, file_id),
             cases: cases
                 .into_iter()
-                .map(|(c, body)| (c.map(|e| instrument_expr(e, file_id)), instrument_stmts(body, file_id)))
+                .map(|(c, body)| {
+                    (
+                        c.map(|e| instrument_expr(e, file_id)),
+                        instrument_stmts(body, file_id),
+                    )
+                })
                 .collect(),
             default_body: default_body.map(|b| instrument_stmts(b, file_id)),
             span,
@@ -316,6 +315,117 @@ fn instrument_expr(expr: Expr, file_id: u32) -> Expr {
                 .collect(),
             span,
         },
+        // Every remaining expression form that can nest an arrow function. Missing one does not
+        // fail loudly: the arrow's body is simply never marked executable, so it drops out of
+        // the denominator and inflates the reported percentage.
+        Expr::New { callee, args, span } => Expr::New {
+            callee: Box::new(instrument_expr(*callee, file_id)),
+            args: args
+                .into_iter()
+                .map(|a| match a {
+                    CallArg::Expr(e) => CallArg::Expr(instrument_expr(e, file_id)),
+                    CallArg::Spread(e) => CallArg::Spread(instrument_expr(e, file_id)),
+                })
+                .collect(),
+            span,
+        },
+        Expr::Index {
+            object,
+            index,
+            optional,
+            span,
+        } => Expr::Index {
+            object: Box::new(instrument_expr(*object, file_id)),
+            index: Box::new(instrument_expr(*index, file_id)),
+            optional,
+            span,
+        },
+        Expr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            span,
+        } => Expr::Conditional {
+            cond: Box::new(instrument_expr(*cond, file_id)),
+            then_branch: Box::new(instrument_expr(*then_branch, file_id)),
+            else_branch: Box::new(instrument_expr(*else_branch, file_id)),
+            span,
+        },
+        Expr::NullishCoalesce { left, right, span } => Expr::NullishCoalesce {
+            left: Box::new(instrument_expr(*left, file_id)),
+            right: Box::new(instrument_expr(*right, file_id)),
+            span,
+        },
+        Expr::Await { operand, span } => Expr::Await {
+            operand: Box::new(instrument_expr(*operand, file_id)),
+            span,
+        },
+        Expr::TypeOf { operand, span } => Expr::TypeOf {
+            operand: Box::new(instrument_expr(*operand, file_id)),
+            span,
+        },
+        Expr::Delete { target, span } => Expr::Delete {
+            target: Box::new(instrument_expr(*target, file_id)),
+            span,
+        },
+        Expr::CompoundAssign {
+            name,
+            op,
+            value,
+            span,
+        } => Expr::CompoundAssign {
+            name,
+            op,
+            value: Box::new(instrument_expr(*value, file_id)),
+            span,
+        },
+        Expr::LogicalAssign {
+            name,
+            op,
+            value,
+            span,
+        } => Expr::LogicalAssign {
+            name,
+            op,
+            value: Box::new(instrument_expr(*value, file_id)),
+            span,
+        },
+        Expr::MemberAssign {
+            object,
+            prop,
+            value,
+            span,
+        } => Expr::MemberAssign {
+            object: Box::new(instrument_expr(*object, file_id)),
+            prop,
+            value: Box::new(instrument_expr(*value, file_id)),
+            span,
+        },
+        Expr::IndexAssign {
+            object,
+            index,
+            value,
+            span,
+        } => Expr::IndexAssign {
+            object: Box::new(instrument_expr(*object, file_id)),
+            index: Box::new(instrument_expr(*index, file_id)),
+            value: Box::new(instrument_expr(*value, file_id)),
+            span,
+        },
+        Expr::TemplateLiteral {
+            quasis,
+            exprs,
+            span,
+        } => Expr::TemplateLiteral {
+            quasis,
+            exprs: exprs
+                .into_iter()
+                .map(|e| instrument_expr(e, file_id))
+                .collect(),
+            span,
+        },
+        // Literals, identifiers, increments/decrements and JSX carry no nested arrow bodies
+        // that statement-level instrumentation would otherwise miss.
         other => other,
     }
 }
@@ -329,10 +439,7 @@ fn hit_stmt(file_id: u32, line: u32) -> Statement {
     let name: Arc<str> = Arc::from(hit_global_name());
     Statement::ExprStmt {
         expr: Expr::Call {
-            callee: Box::new(Expr::Ident {
-                name,
-                span,
-            }),
+            callee: Box::new(Expr::Ident { name, span }),
             args: vec![
                 CallArg::Expr(Expr::Literal {
                     value: Literal::Number(file_id as f64),

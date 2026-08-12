@@ -639,6 +639,7 @@ impl Evaluator {
             }
             Statement::While { cond, body, .. } => {
                 loop {
+                    deadline_check()?;
                     if !self.eval_expr(cond)?.is_truthy() {
                         break;
                     }
@@ -778,6 +779,10 @@ impl Evaluator {
                 };
                 let mut ret = Ok(Value::Null);
                 loop {
+                    if let Err(e) = deadline_check() {
+                        ret = Err(e);
+                        break;
+                    }
                     self.scope = Rc::clone(&loop_env);
                     let cond_ok = match cond.as_ref() {
                         Some(c) => match self.eval_expr(c) {
@@ -909,6 +914,7 @@ impl Evaluator {
             }
             Statement::DoWhile { body, cond, .. } => {
                 loop {
+                    deadline_check()?;
                     match self.eval_statement(body) {
                         Ok(_) => {}
                         Err(EvalError::Break) => break,
@@ -5387,6 +5393,16 @@ impl Evaluator {
             "await requires the http feature".to_string(),
         ))
     }
+}
+
+/// Cooperative timeout poll for loop back-edges (`tish test --timeout`). Disarmed on every
+/// other path, where it costs one relaxed atomic load.
+#[inline]
+fn deadline_check() -> Result<(), EvalError> {
+    if tishlang_core::execution_deadline_exceeded() {
+        return Err(EvalError::Error(tishlang_core::DEADLINE_ERROR.to_string()));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

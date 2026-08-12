@@ -22,11 +22,13 @@ pub fn discover_tests(roots: &[PathBuf], filters: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         if root.is_file() {
+            // An explicit file argument runs even without a test-file suffix, so
+            // `tish test path/to/one.tish` works.
             if let Some(name) = root.file_name().and_then(|n| n.to_str()) {
-                if is_test_file_name(name) || root.extension().map(|e| e == "tish") == Some(true) {
-                    if path_matches(root, filters) {
-                        out.push(root.clone());
-                    }
+                let is_candidate =
+                    is_test_file_name(name) || root.extension().map(|e| e == "tish") == Some(true);
+                if is_candidate && path_matches(root, filters) {
+                    out.push(root.clone());
                 }
             }
             continue;

@@ -13,14 +13,6 @@ pub struct TishTestConfig {
     pub preload: Vec<PathBuf>,
     /// Default timeout ms.
     pub timeout_ms: Option<u64>,
-    /// Project globs keyed by name (unit / integration / …).
-    pub projects: Vec<ProjectConfig>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ProjectConfig {
-    pub name: String,
-    pub root: PathBuf,
 }
 
 /// Read `package.json` beside `cwd` (or ancestors) and parse `tish.test`.
@@ -34,7 +26,11 @@ pub fn load_tish_test_config(start: &Path) -> TishTestConfig {
     let Ok(json) = serde_json::from_str::<Json>(&text) else {
         return TishTestConfig::default();
     };
-    let Some(test) = json.get("tish").and_then(|t| t.get("test")).or_else(|| json.get("tish.test")) else {
+    let Some(test) = json
+        .get("tish")
+        .and_then(|t| t.get("test"))
+        .or_else(|| json.get("tish.test"))
+    else {
         // Also accept top-level "tish.test" object via nested tish.test already tried;
         // try `tishTest` camelCase as a convenience.
         if let Some(t) = json.get("tishTest") {
@@ -84,23 +80,6 @@ fn parse_config(test: &Json, base: &Path) -> TishTestConfig {
     }
     if let Some(n) = test.get("timeout").and_then(|v| v.as_u64()) {
         cfg.timeout_ms = Some(n);
-    }
-    if let Some(projects) = test.get("projects").and_then(|v| v.as_array()) {
-        for p in projects {
-            let name = p
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default")
-                .to_string();
-            let root = p
-                .get("root")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            cfg.projects.push(ProjectConfig {
-                name,
-                root: base.join(root),
-            });
-        }
     }
     cfg
 }

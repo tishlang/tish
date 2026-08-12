@@ -109,17 +109,17 @@ pub fn process_argv() -> Vec<String> {
     }
 }
 
-/// #303 — a thrown JS value parked while it unwinds across a boundary that can't carry a `Result`.
-///
-/// The native value-fn ABI is `Fn(&[Value]) -> Value`, and `Callable::call` likewise returns a bare
-/// `Value`, so a `throw` crossing such a boundary can't ride a `Result`. It is parked here and picked
-/// up at the next checkpoint: native codegen checks it after each call; the VM checks it after each
-/// `Callable::call`; and the shared array builtins (`forEach`/`map`/`sort`/…) check it between
-/// elements so they stop iterating promptly instead of running the callback for the rest of the
-/// array. The slot lives in `tishlang_core` (rather than `tishlang_runtime`) so `tishlang_builtins`
-/// can poll it without a `builtins -> runtime` dependency cycle; `tishlang_runtime` and `tishlang_vm`
-/// share this one slot. First-throw-wins; drained exactly once by [`take_pending_throw`] at the frame
-/// that converts it back into a `Result`.
+// #303 — a thrown JS value parked while it unwinds across a boundary that can't carry a `Result`.
+//
+// The native value-fn ABI is `Fn(&[Value]) -> Value`, and `Callable::call` likewise returns a bare
+// `Value`, so a `throw` crossing such a boundary can't ride a `Result`. It is parked here and picked
+// up at the next checkpoint: native codegen checks it after each call; the VM checks it after each
+// `Callable::call`; and the shared array builtins (`forEach`/`map`/`sort`/…) check it between
+// elements so they stop iterating promptly instead of running the callback for the rest of the
+// array. The slot lives in `tishlang_core` (rather than `tishlang_runtime`) so `tishlang_builtins`
+// can poll it without a `builtins -> runtime` dependency cycle; `tishlang_runtime` and `tishlang_vm`
+// share this one slot. First-throw-wins; drained exactly once by [`take_pending_throw`] at the frame
+// that converts it back into a `Result`.
 #[cfg(not(feature = "portable"))]
 thread_local! {
     static PENDING_THROW: core::cell::RefCell<Option<Value>> = const { core::cell::RefCell::new(None) };
@@ -150,6 +150,98 @@ pub fn has_pending_throw() -> bool {
 pub fn take_pending_throw() -> Option<Value> {
     PENDING_THROW.with(|c| c.borrow_mut().take())
 }
+
+// ---------------------------------------------------------------------------
+// Cooperative execution deadline (`tish test --timeout`).
+//
+// Without this a runaway loop is uninterruptible: the runner can only notice a blown
+// deadline *after* the body returns, which never happens. Backends poll
+// [`execution_deadline_exceeded`] on loop back-edges and abort with a catchable error.
+//
+// Disarmed is the default and costs one relaxed load — `tish run` never arms it. Armed,
+// the clock is read once every `DEADLINE_POLL_MASK + 1` back-edges so a hot loop is not
+// paying a `now()` per iteration.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "portable"))]
+mod deadline {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::LazyLock;
+    use std::time::Instant;
+
+    /// Nanoseconds since [`START`] at which execution must stop. 0 = disarmed.
+    static DEADLINE_NS: AtomicU64 = AtomicU64::new(0);
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    const DEADLINE_POLL_MASK: u32 = 0x3FF;
+
+    thread_local! {
+        static POLL_TICK: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        static TRIPPED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    /// Arm the deadline `millis` from now, or disarm with `None`. Clears any previous trip.
+    pub fn set_execution_deadline(millis: Option<u64>) {
+        TRIPPED.with(|t| t.set(false));
+        POLL_TICK.with(|t| t.set(0));
+        match millis {
+            Some(ms) => {
+                let at = START.elapsed().as_nanos() as u64 + ms.saturating_mul(1_000_000);
+                // 0 means "disarmed"; nudge an exact-zero deadline to 1ns.
+                DEADLINE_NS.store(at.max(1), Ordering::Relaxed);
+            }
+            None => DEADLINE_NS.store(0, Ordering::Relaxed),
+        }
+    }
+
+    /// Has the armed deadline passed? Cheap and false when disarmed.
+    #[inline]
+    pub fn execution_deadline_exceeded() -> bool {
+        let at = DEADLINE_NS.load(Ordering::Relaxed);
+        if at == 0 {
+            return false;
+        }
+        if TRIPPED.with(|t| t.get()) {
+            return true;
+        }
+        let tick = POLL_TICK.with(|t| {
+            let n = t.get().wrapping_add(1);
+            t.set(n);
+            n
+        });
+        if tick & DEADLINE_POLL_MASK != 0 {
+            return false;
+        }
+        if START.elapsed().as_nanos() as u64 >= at {
+            TRIPPED.with(|t| t.set(true));
+            return true;
+        }
+        false
+    }
+
+    /// Did this thread abort because the deadline tripped?
+    pub fn execution_deadline_tripped() -> bool {
+        TRIPPED.with(|t| t.get())
+    }
+}
+
+// Portable / single-core builds (GBA and friends) have no wall clock to poll.
+#[cfg(feature = "portable")]
+mod deadline {
+    pub fn set_execution_deadline(_millis: Option<u64>) {}
+    #[inline]
+    pub fn execution_deadline_exceeded() -> bool {
+        false
+    }
+    pub fn execution_deadline_tripped() -> bool {
+        false
+    }
+}
+
+pub use deadline::{execution_deadline_exceeded, execution_deadline_tripped, set_execution_deadline};
+
+/// Message backends raise when [`execution_deadline_exceeded`] trips.
+pub const DEADLINE_ERROR: &str = "Test exceeded its timeout and was aborted";
 
 // Current user-function call depth for the bytecode VM. The VM's recursive path builds a fresh
 // `Vm` per call (so no shared struct field can accumulate) and its `Callable::call` signature is

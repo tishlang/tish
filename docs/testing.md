@@ -1,18 +1,21 @@
 # Testing in Tish
 
-Native test runner: **`tish test`**. API is Bun/Jest-shaped via `tish:test`, plus Node-compatible `assert` via `tish:assert` / `node:assert` / `node:assert/strict`.
+Native test runner: **`tish test`**. The API is Bun/Jest-shaped via `tish:test`, plus a
+Node-mirrored `assert` via `tish:assert` / `node:assert` / `node:assert/strict`.
 
 ## Tish is not JavaScript
 
-**`tish test` runs on the Tish VM or interpreter (`--backend vm|interp`). It does not execute JavaScript.**
+**`tish test` runs on the Tish bytecode VM. It does not execute JavaScript.**
 
 | Runner | What it proves |
 |--------|----------------|
-| `tish test` / `tish run` | Language + runtime semantics on the **Tish** VM/interp |
-| `tish build --target js` + **node** (or bun) | Behavior of **compiled JS emit** under a JS engine |
+| `tish test` / `tish run` | Language + runtime semantics on the **Tish** VM |
+| `tish build --target js` + **node** (or bun) | Behavior of the **compiled JS emit** under a JS engine |
 | Vite / jsdom / browser | Host integration of that JS emit |
 
-Moving a suite from `build --target js && node` → `tish test` changes the subject under test. Keep Node dual-runs for JS-emit / browser / DomHost contracts. Host-wiring audit: [test.md](./test.md).
+Moving a suite from `build --target js && node` → `tish test` **changes the subject under
+test**; pass/fail may diverge. Keep Node dual-runs for JS-emit, browser, and DomHost contracts —
+never drop an emit leg just because a native suite was added.
 
 ## Quick start
 
@@ -42,51 +45,95 @@ test("strict", () => {
 })
 ```
 
-## Bun / Jest surface (`tish:test`)
+Discovery globs: `*.test.tish`, `*_test.tish`, `*.spec.tish`, `*_spec.tish`.
+Aliases: `node:test` and bare `test` normalize to `tish:test`.
+
+The runner's own suites double as worked examples:
+[`tests/runner/api.test.tish`](../tests/runner/api.test.tish) and
+[`tests/runner/assert.test.tish`](../tests/runner/assert.test.tish).
+
+## `tish:test`
 
 | Export | Role |
 |--------|------|
 | `describe` / `suite` (+ `.skip` / `.only` / `.each`) | Suite grouping (collect-then-run) |
 | `test` / `it` (+ `.skip` / `.only` / `.todo` / `.failing` / `.skipIf` / `.each`) | Cases |
-| `expect(x).toBe` / `toEqual` / … | Matchers (incl. mock + snapshot matchers) |
+| `expect(x)` | Matchers (see below) |
 | `beforeAll` / `afterAll` / `beforeEach` / `afterEach` | Hooks (`before` / `after` aliases) |
 | `mock` / `spyOn` / `clearAllMocks` / `restoreAllMocks` | Doubles |
 
-Discovery globs: `*.test.tish`, `*_test.tish`, `*.spec.tish`, `*_spec.tish`.
+Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toMatchObject`, `toMatch`, `toContain`,
+`toContainEqual`, `toHaveLength`, `toHaveProperty`, `toBeNull`, `toBeDefined`, `toBeUndefined`,
+`toBeTruthy`, `toBeFalsy`, `toBeNaN`, `toBeTypeOf`, `toBeCloseTo`, `toBeGreaterThan`,
+`toBeGreaterThanOrEqual`, `toBeLessThan`, `toBeLessThanOrEqual`, `toThrow` / `toThrowError`,
+`toMatchSnapshot`, and the mock matchers `toHaveBeenCalled`, `toHaveBeenCalledTimes`,
+`toHaveBeenCalledWith`, `toHaveBeenLastCalledWith`. Every matcher except `toMatchSnapshot` is
+also available under `.not`.
 
-Aliases: `node:test` and bare `test` normalize to `tish:test`.
+Asymmetric matchers: `expect.any(type)`, `expect.anything()`, `expect.objectContaining(o)`,
+`expect.arrayContaining(a)`, `expect.stringMatching(s)`.
 
-## Node assert (`tish:assert`)
+Assertion contracts: `expect.assertions(n)` and `expect.hasAssertions()` fail the test if the
+body made the wrong number of `expect(...)` calls — useful when an early return would otherwise
+look like a pass.
 
-Callable `assert(value)` plus `ok`, `strictEqual`, `deepStrictEqual`, `throws`, `match`, and related Node methods. `equal` / `deepEqual` are **strict** aliases (Tish has no loose `==`).
+Mocks expose both spellings: `m.mockClear()` / `m.mockImplementation(fn)` /
+`m.mockReturnValue(v)` / `m.mockResolvedValue(v)` on the mock itself, and `m.mock.calls` /
+`m.mock.callCount` for inspection.
 
-Aliases: `node:assert`, `node:assert/strict`, bare `assert` / `assert/strict` → `tish:assert`.
+## `tish:assert`
 
-## Suggested layout (optional)
+Callable `assert(value)` plus `ok`, `strictEqual`, `deepStrictEqual`, `partialDeepStrictEqual`,
+`match`, `doesNotMatch`, `throws`, `doesNotThrow`, `rejects`, `doesNotReject`, `fail`,
+`ifError`. Aliases: `node:assert`, `node:assert/strict`, bare `assert` / `assert/strict`.
 
-Packages typically use `test/` or `src/**/*.test.tish`. Folders like `unit/` / `regression/` / `integration/` are conventions only — discovery does not require a special in-repo tree.
+`throws(fn, error?, message?)` validates the thrown value against `error` — a string substring,
+a regex, or an `Error`-shaped object whose listed fields must all match. `rejects` /
+`doesNotReject` accept a promise **or** a function returning one, as in Node.
 
-## CLI flags (common)
+## Divergences from Jest / Bun / Node
+
+These are deliberate and permanent unless noted:
+
+| Behavior | Tish | Why |
+|----------|------|-----|
+| `assert.equal` / `deepEqual` | Strict (aliases of `strictEqual` / `deepStrictEqual`) | Tish has no loose `==` |
+| `toBeUndefined()` / `toBeNull()` | Both test for `null`; `toBeDefined()` fails on `null` | Tish has no `undefined`; `null` is the absence value |
+| `toEqual` on functions | Identity comparison | Same as Jest |
+| Parallelism | None — files and cases run sequentially | Single-threaded VM; `{ concurrent: true }` is accepted and ignored |
+| Snapshots | One `.snap` file per snapshot, under `__snapshots__/` | Simpler diffs than a single combined file |
+| Backends | `--backend vm` only | Interpreter closures are bound to the `Evaluator`, which is dropped before the collected suite runs; `--backend native` is not implemented |
+
+## CLI flags
 
 | Flag | Meaning |
 |------|---------|
-| `--backend vm\|interp` | Execution backend (default `vm`). Other values are rejected. |
-| `-t` / `--test-name-pattern` | Regex filter on test full name |
-| `--timeout` | Per-test timeout ms (default `5000`; enforced after the body returns, and while awaiting promises) |
-| `--bail` | Stop after first failure |
+| `--backend vm` | Execution backend. Only `vm` runs tests; other values are rejected up front. |
+| `--feature NAME` | Restrict platform capabilities, exactly as `tish run --feature` does |
+| `-t` / `--test-name-pattern` | Regex filter on the test's full name |
+| `--timeout MS` | Per-test timeout (default `5000`) |
+| `--bail` | Stop after the first failure |
 | `--retry N` | Retry failed tests |
 | `--only` | Only run `.only` cases |
 | `-u` / `--update-snapshots` | Refresh snapshots |
+| `--ci` | Fail on a missing snapshot instead of writing it (also on when `CI` is set) |
 | `--watch` | Re-run on file changes |
 | `--randomize` / `--seed N` | Shuffle file order |
-| `--rerun-each N` | Run the suite N times |
+| `--rerun-each N` | Run the suite N times; **any** failing pass fails the command |
 | `--shard i/n` | Run file shard `i` of `n` (1-based) |
 | `--tag TAG` | Filter by test `{ tags: [...] }` (repeatable) |
-| `--preload FILE` | Evaluate setup module before each test file |
-| `--reporter console\|dots` | Console style |
+| `--preload FILE` | Evaluate a setup module before each test file, on the same VM instance |
+| `--reporter console\|dots` | Console style; both replay full failure diagnostics at the end |
 | `--reporter-outfile PATH` | Write JUnit XML |
-| `--coverage` | Line coverage via AST instrumentation (vm + interp) |
+| `--coverage` | Line coverage via AST instrumentation |
 | `--coverage-dir DIR` | Write `lcov.info` (implies `--coverage`; default `coverage/`) |
+
+### Timeouts
+
+`--timeout` is enforced cooperatively: the VM polls the deadline on loop back-edges, so a
+runaway loop is aborted and the run continues with the next test. A body blocked inside a
+single native call (a synchronous socket read, say) cannot be preempted — that case is caught
+by the elapsed-time check once the call returns.
 
 ## Config (`package.json`)
 
@@ -102,43 +149,52 @@ Packages typically use `test/` or `src/**/*.test.tish`. Folders like `unit/` / `
 }
 ```
 
-`root`, `timeout`, and `preload` are applied when CLI roots are still the default `.`.
+`root`, `timeout`, and `preload` apply when the CLI roots are still the default `.`.
 
 ## Isolation
 
-Between files the runner clears pending throws. It does **not** reset timers, HTTP routes, or sockets in-process. Suites that leak host state should run in separate processes (separate CI job / worker).
+Each test file gets a fresh VM. Between files the runner clears pending throws and the mock
+registry. It does **not** reset timers, HTTP routes, or sockets in-process — suites that leak
+host state should run in separate processes (a separate CI job or worker).
 
-## Dogfood / migration
+## Coverage
 
-Replace local `assertEq` / `throw "FAIL"` / `check()` helpers with `import { expect } from "tish:test"` or `import assert from "node:assert/strict"`. Rename language-semantics suites to `*.test.tish` and run `tish test`.
-
-| Package | Onto `tish test` | Keep on Node (or similar) |
-|---------|------------------|---------------------------|
-| **scii** | All suites (already `tish run`) — migrated to `tish:test` + `node:assert/strict` | — |
-| **deck** | `smoke.test.tish` + `conformance.test.tish` (language) | `conformance.mjs`, c8 on `dist/deck.js`, `test:js-smoke`, player, rust |
-| **deckard** (`tish-midi`) | `test/*.test.tish` prepared | **Primary CI:** JS-emit batch + ratchet. Native VM blocked by JS `undefined` in product sources |
-| **lattish** | `jsx-runtime.test.tish` prepared | **Primary CI:** DomHost (`run-tests.mjs` + jsdom) + Vite HMR. Native VM blocked by JS `undefined` in `Lattish.tish` |
-
-`stdlib/test.d.tish` and `stdlib/assert.d.tish` are documentation-shaped stubs and are **not** wired into LSP/check yet (`declare module` is unsupported).
+`tish test --coverage` instruments `.tish` ASTs inside `crates/tish_test` (not the VM), then
+runs on the VM. It writes `coverage/lcov.info` plus a per-file summary. Only files actually
+loaded by a test are counted, and test/spec files are excluded from the denominator; a run that
+executed no non-test source says so rather than reporting 100%. This is **not** a substitute
+for c8 (or similar) on compiled JS.
 
 ## Ecosystem CI layers
 
 | Layer | Command |
 |-------|---------|
 | Language goldens | `just test` / cargo-nextest |
+| Runner regressions | `cargo test -p tishlang --test test_runner` (+ `.github/workflows/test-runner.yml`) |
 | App language suites | `tish test` in the package |
 | JS-emit / browser parity | `tish build --target js` + `node` (package-specific) |
 | Parity / test262 / perf | existing scripts/workflows |
 
+## Host wiring
+
+Everything this feature adds outside [`crates/tish_test`](../crates/tish_test):
+
+| File | Why |
+|------|-----|
+| [`Cargo.toml`](../Cargo.toml) | Workspace member for `crates/tish_test` |
+| [`crates/tish/Cargo.toml`](../crates/tish/Cargo.toml) | Optional `tishlang_test` + `test-runner` feature; `full` enables it |
+| [`crates/tish/src/cli_help.rs`](../crates/tish/src/cli_help.rs), [`main.rs`](../crates/tish/src/main.rs) | `Commands::Test` / `TestArgs` and dispatch |
+| [`crates/tish_compile/src/resolve.rs`](../crates/tish_compile/src/resolve.rs) | Aliases `test` / `assert` / `assert/strict` and their `node:` forms; allows a **default** import only for `tish:assert` |
+| [`crates/tish_vm/src/vm.rs`](../crates/tish_vm/src/vm.rs) | `LoadNativeExport` consults `register_native_module` for all specs; `JumpBack` polls the execution deadline |
+| [`crates/tish_core/src/lib.rs`](../crates/tish_core/src/lib.rs) | The cooperative deadline itself (disarmed on every path but `tish test`) |
+| [`crates/tish_eval/src/eval.rs`](../crates/tish_eval/src/eval.rs) | Same deadline poll on interpreter loop back-edges |
+| [`stdlib/test.d.tish`](../stdlib/test.d.tish), [`stdlib/assert.d.tish`](../stdlib/assert.d.tish) | Ambient declarations (flat `declare let` form, like `builtins.d.tish`) |
+
 ## Deferred
 
+- `--backend interp` and `--backend native`
+- True parallel `test.concurrent` and per-file process isolation
 - Full Node `TestContext` / TAP / programmatic `run()`
 - DOM / HappyDOM / RTL inside the Tish VM
-- `--backend native` (build+exec) for `tish test`
-- True parallel `test.concurrent` (single-threaded VM today)
 
-## Coverage
-
-`tish test --coverage` instruments `.tish` ASTs inside `crates/tish_test` (not the VM), then runs on **vm** or **interp**. Writes `coverage/lcov.info` and a per-file summary. Test/spec files are excluded from the report denominator. This is **not** a substitute for c8 (or similar) on compiled JS.
-
-See also the short **Testing** section in [LANGUAGE.md](./LANGUAGE.md) and the host audit in [test.md](./test.md).
+See also the short **Testing** section in [LANGUAGE.md](./LANGUAGE.md).

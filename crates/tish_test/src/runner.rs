@@ -4,16 +4,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use tishlang_core::{
-    has_pending_throw, take_pending_throw, value_call, Value,
-};
+use tishlang_core::{has_pending_throw, take_pending_throw, value_call, Value};
 
 use crate::isolation::reset_between_files;
 use crate::registry::{only_mode, SuiteNode, TestCase, TestMode};
 use crate::report::{
     write_junit_xml, ConsoleReporter, ReporterKind, RunSummary, TestResultRecord, TestStatus,
 };
-use crate::snapshots::{set_current_file, set_update_snapshots};
+use crate::snapshots::{set_ci_mode, set_current_file, set_current_test, set_update_snapshots};
 
 #[derive(Clone, Debug)]
 pub struct TestOptions {
@@ -43,6 +41,8 @@ pub struct TestOptions {
     pub tags: Vec<String>,
     /// Preload modules (absolute or cwd-relative) evaluated before each test file.
     pub preload: Vec<PathBuf>,
+    /// Treat a missing snapshot as a failure instead of writing it (also on when `CI` is set).
+    pub ci: bool,
     /// Collect line coverage via AST instrumentation (backend-agnostic).
     pub coverage: bool,
     /// Directory for `lcov.info` (implies coverage). Default: `coverage/`.
@@ -71,6 +71,7 @@ impl Default for TestOptions {
             rerun_each: 1,
             tags: Vec::new(),
             preload: Vec::new(),
+            ci: false,
             coverage: false,
             coverage_dir: None,
         }
@@ -84,11 +85,13 @@ pub struct TestRunResult {
 }
 
 /// Run an already-collected suite (typically one file's tree).
-pub fn run_suite(suite: &SuiteNode, opts: &TestOptions, summary: &mut RunSummary, reporter: &mut ConsoleReporter) -> bool {
-    let pattern = opts
-        .name_pattern
-        .as_ref()
-        .and_then(|p| Regex::new(p).ok());
+pub fn run_suite(
+    suite: &SuiteNode,
+    opts: &TestOptions,
+    summary: &mut RunSummary,
+    reporter: &mut ConsoleReporter,
+) -> bool {
+    let pattern = opts.name_pattern.as_ref().and_then(|p| Regex::new(p).ok());
     let enforce_only = opts.only || only_mode();
     run_suite_inner(
         suite,
@@ -97,11 +100,16 @@ pub fn run_suite(suite: &SuiteNode, opts: &TestOptions, summary: &mut RunSummary
         opts,
         pattern.as_ref(),
         enforce_only,
+        false,
         summary,
         reporter,
     )
 }
 
+/// `ancestor_only` is true once any enclosing suite was declared with `describe.only`, so a
+/// `.only` on an outer suite selects everything nested beneath it (Jest/Bun semantics) rather
+/// than only its direct children.
+#[allow(clippy::too_many_arguments)]
 fn run_suite_inner(
     suite: &SuiteNode,
     parent_before: &[Value],
@@ -109,6 +117,7 @@ fn run_suite_inner(
     opts: &TestOptions,
     pattern: Option<&Regex>,
     enforce_only: bool,
+    ancestor_only: bool,
     summary: &mut RunSummary,
     reporter: &mut ConsoleReporter,
 ) -> bool {
@@ -117,6 +126,7 @@ fn run_suite_inner(
         skip_tree(suite, summary, reporter);
         return true;
     }
+    let ancestor_only = ancestor_only || suite.mode == TestMode::Only;
 
     let mut before_each = parent_before.to_vec();
     before_each.extend(suite.before_each.iter().cloned());
@@ -126,19 +136,46 @@ fn run_suite_inner(
     if let Err(msg) = run_hooks(&suite.before_all) {
         let rec = TestResultRecord {
             full_name: format!("{} (beforeAll)", suite.name),
-            file: String::new(),
+            file: first_file_in(suite),
             status: TestStatus::Fail,
             duration: Duration::ZERO,
-            message: Some(msg),
+            message: Some(msg.clone()),
         };
         reporter.on_result(&rec);
         summary.record(rec);
+        // Every test below this suite is now unrunnable. Report each one rather than
+        // dropping it, so the total count still reflects what the file declared.
+        fail_tree(
+            suite,
+            &format!("suite setup failed (beforeAll): {msg}"),
+            summary,
+            reporter,
+        );
+        // `afterAll` still runs: `beforeAll` may have acquired resources before it threw.
+        if let Err(after_msg) = run_hooks(&suite.after_all) {
+            let rec = TestResultRecord {
+                full_name: format!("{} (afterAll)", suite.name),
+                file: String::new(),
+                status: TestStatus::Fail,
+                duration: Duration::ZERO,
+                message: Some(after_msg),
+            };
+            reporter.on_result(&rec);
+            summary.record(rec);
+        }
         return false;
     }
 
     let mut ok = true;
     for test in &suite.tests {
-        match classify_test(test, suite, pattern, enforce_only, &opts.tags) {
+        match classify_test(
+            test,
+            suite,
+            pattern,
+            enforce_only,
+            ancestor_only,
+            &opts.tags,
+        ) {
             TestDisposition::Run => {}
             disposition => {
                 let status = match disposition {
@@ -161,6 +198,7 @@ fn run_suite_inner(
         }
 
         set_current_file(&test.file);
+        set_current_test(&test.full_name);
         let timeout = test.timeout_ms.unwrap_or(opts.timeout_ms);
         let mut attempts = 0;
         let max_attempts = opts.retry + 1;
@@ -177,7 +215,11 @@ fn run_suite_inner(
                 continue;
             }
 
+            crate::expect::begin_test_assertions();
             let result = run_test_body(&test.callback, timeout);
+            // An `expect.assertions(n)` contract turns a body that silently returned early
+            // into a failure instead of a pass.
+            let result = result.and_then(|()| crate::expect::check_test_assertions());
             let dur = start.elapsed();
             let _ = run_hooks(&after_each);
 
@@ -252,6 +294,7 @@ fn run_suite_inner(
             opts,
             pattern,
             enforce_only,
+            ancestor_only,
             summary,
             reporter,
         ) {
@@ -285,15 +328,19 @@ enum TestDisposition {
     Filtered,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_test(
     test: &TestCase,
     suite: &SuiteNode,
     pattern: Option<&Regex>,
     enforce_only: bool,
+    ancestor_only: bool,
     tag_filter: &[String],
 ) -> TestDisposition {
     // Name / tag / only filters hide tests entirely (including skip/todo that don't match).
-    if enforce_only && test.mode != TestMode::Only && suite.mode != TestMode::Only {
+    // `ancestor_only` already folds in `suite.mode`, and every enclosing suite besides.
+    let _ = suite;
+    if enforce_only && test.mode != TestMode::Only && !ancestor_only {
         return TestDisposition::Filtered;
     }
     if let Some(re) = pattern {
@@ -317,20 +364,54 @@ fn classify_test(
 }
 
 fn skip_tree(suite: &SuiteNode, summary: &mut RunSummary, reporter: &mut ConsoleReporter) {
+    mark_tree(suite, TestStatus::Skip, None, summary, reporter);
+}
+
+/// Report every test under `suite` as failed — used when a `beforeAll` makes them unrunnable.
+fn fail_tree(
+    suite: &SuiteNode,
+    message: &str,
+    summary: &mut RunSummary,
+    reporter: &mut ConsoleReporter,
+) {
+    mark_tree(suite, TestStatus::Fail, Some(message), summary, reporter);
+}
+
+fn mark_tree(
+    suite: &SuiteNode,
+    status: TestStatus,
+    message: Option<&str>,
+    summary: &mut RunSummary,
+    reporter: &mut ConsoleReporter,
+) {
     for test in &suite.tests {
         let rec = TestResultRecord {
             full_name: test.full_name.clone(),
             file: test.file.clone(),
-            status: TestStatus::Skip,
+            status,
             duration: Duration::ZERO,
-            message: None,
+            message: message.map(|m| m.to_string()),
         };
         reporter.on_result(&rec);
         summary.record(rec);
     }
     for child in &suite.children {
-        skip_tree(child, summary, reporter);
+        mark_tree(child, status, message, summary, reporter);
     }
+}
+
+/// First test file path found in the subtree — gives hook failures a file to report against.
+fn first_file_in(suite: &SuiteNode) -> String {
+    if let Some(t) = suite.tests.first() {
+        return t.file.clone();
+    }
+    for child in &suite.children {
+        let f = first_file_in(child);
+        if !f.is_empty() {
+            return f;
+        }
+    }
+    String::new()
 }
 
 fn run_hooks(hooks: &[Value]) -> Result<(), String> {
@@ -360,43 +441,69 @@ fn run_hooks(hooks: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
+/// Run one test body under `timeout_ms`.
+///
+/// The backends poll [`tishlang_core::execution_deadline_exceeded`] on loop back-edges, so a
+/// runaway loop is aborted rather than hanging the run. A body that blocks inside a single
+/// native call (a synchronous socket read, say) still cannot be preempted; the elapsed-time
+/// check after it returns catches that case.
 fn run_test_body(body: &Value, timeout_ms: u64) -> Result<(), String> {
     let _ = take_pending_throw();
     let start = Instant::now();
     let deadline = Duration::from_millis(timeout_ms);
+    let timed_out = |extra: &str| -> String {
+        if extra.is_empty() {
+            format!("Test timed out after {timeout_ms}ms")
+        } else {
+            format!("Test timed out after {timeout_ms}ms ({extra})")
+        }
+    };
+
+    tishlang_core::set_execution_deadline(Some(timeout_ms));
     let result = value_call(body, &[]);
+    let tripped = tishlang_core::execution_deadline_tripped();
+    tishlang_core::set_execution_deadline(None);
+
+    if tripped {
+        let _ = take_pending_throw();
+        return Err(timed_out(""));
+    }
     if has_pending_throw() {
         let err = take_pending_throw().unwrap_or(Value::Null);
         return Err(err.to_display_string());
     }
     if start.elapsed() > deadline {
-        return Err(format!("Test timed out after {}ms", timeout_ms));
+        return Err(timed_out("body returned late"));
     }
     // Await promise-returning tests when the promise feature is on.
     #[cfg(feature = "promise")]
     {
         if matches!(result, Value::Promise(_)) {
             let _ = take_pending_throw();
-            // Best-effort deadline: blocking await cannot be preempted mid-poll; check before/after.
-            if start.elapsed() > deadline {
-                return Err(format!("Test timed out after {}ms", timeout_ms));
+            let remaining = deadline.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(timed_out("before await"));
             }
+            tishlang_core::set_execution_deadline(Some(remaining.as_millis() as u64));
             let _ = tishlang_runtime::await_promise(result);
+            let tripped = tishlang_core::execution_deadline_tripped();
+            tishlang_core::set_execution_deadline(None);
+            if tripped {
+                let _ = take_pending_throw();
+                return Err(timed_out("awaiting"));
+            }
             if has_pending_throw() {
                 let err = take_pending_throw().unwrap_or(Value::Null);
                 return Err(err.to_display_string());
             }
             if start.elapsed() > deadline {
-                return Err(format!("Test timed out after {}ms", timeout_ms));
+                return Err(timed_out("awaiting"));
             }
         }
     }
     #[cfg(not(feature = "promise"))]
     {
         let _ = result;
-    }
-    if start.elapsed() > deadline {
-        return Err(format!("Test timed out after {}ms", timeout_ms));
     }
     Ok(())
 }
@@ -411,20 +518,42 @@ pub fn run_tests(opts: TestOptions) -> TestRunResult {
         summary: RunSummary::default(),
         exit_code: 0,
     };
+    // `--rerun-each` exists to surface flakes: ANY failing pass fails the command. Reporting only
+    // the final pass would make a run that failed once and passed twice exit 0.
+    let mut worst_exit = 0;
+    let mut failed_passes = Vec::new();
     for i in 0..times {
         if times > 1 {
             eprintln!("── rerun-each {}/{} ──", i + 1, times);
         }
         last = run_tests_once(&opts);
-        if last.exit_code != 0 && opts.bail {
-            break;
+        if last.exit_code != 0 {
+            worst_exit = last.exit_code;
+            failed_passes.push(i + 1);
+            if opts.bail {
+                break;
+            }
         }
     }
+    if times > 1 && !failed_passes.is_empty() {
+        eprintln!(
+            "\n{} of {} passes failed (pass {}) — flaky or consistently failing.",
+            failed_passes.len(),
+            times,
+            failed_passes
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    last.exit_code = worst_exit;
     last
 }
 
 fn apply_package_config(opts: &mut TestOptions) {
-    let cfg = crate::config::load_tish_test_config(opts.roots.first().unwrap_or(&PathBuf::from(".")));
+    let cfg =
+        crate::config::load_tish_test_config(opts.roots.first().unwrap_or(&PathBuf::from(".")));
     if opts.roots == vec![PathBuf::from(".")] && !cfg.root.is_empty() {
         opts.roots = cfg.root;
     }
@@ -442,6 +571,8 @@ fn apply_package_config(opts: &mut TestOptions) {
 
 fn run_tests_once(opts: &TestOptions) -> TestRunResult {
     set_update_snapshots(opts.update_snapshots);
+    set_ci_mode(opts.ci);
+    set_ci_mode(opts.ci);
     let coverage_on = opts.coverage || opts.coverage_dir.is_some();
     if coverage_on {
         crate::coverage::begin();
@@ -483,25 +614,33 @@ fn run_tests_once(opts: &TestOptions) -> TestRunResult {
 
         #[cfg(feature = "runner")]
         {
-            // Preload modules (collect only — side effects / shared setup).
-            for pre in &opts.preload {
-                let _ = crate::load::load_and_collect_tests(
-                    pre,
-                    &opts.backend,
-                    opts.no_optimize,
-                    &opts.features,
-                );
-                // Discard preload suite registrations; begin_collect resets per file load.
-            }
-
             match crate::load::load_and_collect_tests(
                 file,
+                &opts.preload,
                 &opts.backend,
                 opts.no_optimize,
                 &opts.features,
             ) {
-                Ok(suite) => {
-                    if !run_suite(&suite, opts, &mut summary, &mut reporter) && opts.bail {
+                Ok(loaded) => {
+                    // A throw inside a `describe` body truncates registration silently. Report
+                    // each one as a failure so a file that lost tests can never exit 0.
+                    let had_collect_errors = !loaded.collect_errors.is_empty();
+                    for err in &loaded.collect_errors {
+                        if gh {
+                            eprintln!("::error file={}::{}", file.display(), err);
+                        }
+                        let rec = TestResultRecord {
+                            full_name: format!("{} (collection error)", file.display()),
+                            file: file.display().to_string(),
+                            status: TestStatus::Fail,
+                            duration: Duration::ZERO,
+                            message: Some(err.clone()),
+                        };
+                        reporter.on_result(&rec);
+                        summary.record(rec);
+                    }
+                    let suite_ok = run_suite(&loaded.suite, opts, &mut summary, &mut reporter);
+                    if (!suite_ok || had_collect_errors) && opts.bail {
                         break;
                     }
                 }
@@ -575,12 +714,29 @@ fn shuffle_with_seed(files: &mut [PathBuf], seed: u64) {
     // Simple LCG shuffle (Fisher–Yates).
     let mut state = seed;
     for i in (1..files.len()).rev() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         let j = (state as usize) % (i + 1);
         files.swap(i, j);
     }
+}
+
+/// Paths a run writes into itself. Watching these would make `--watch --coverage` (or `-u`,
+/// or `--reporter-outfile` inside the tree) re-trigger on its own output forever.
+#[cfg(feature = "watch")]
+fn is_self_written(path: &std::path::Path, opts: &TestOptions) -> bool {
+    if let Some(junit) = &opts.junit_path {
+        if path == junit.as_path() {
+            return true;
+        }
+    }
+    let coverage_dir = opts
+        .coverage_dir
+        .clone()
+        .unwrap_or_else(crate::coverage::default_dir);
+    path.components().any(|c| {
+        let s = c.as_os_str();
+        s == "__snapshots__" || s == coverage_dir.as_os_str() || s == ".git"
+    })
 }
 
 /// Run tests once, then re-run when files under `opts.roots` change (`--watch`).
@@ -606,30 +762,33 @@ pub fn run_tests_watch(opts: TestOptions) -> i32 {
         };
         for root in &opts.roots {
             if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
-                eprintln!(
-                    "tish test --watch: cannot watch {}: {e}",
-                    root.display()
-                );
+                eprintln!("tish test --watch: cannot watch {}: {e}", root.display());
             }
         }
         eprintln!("tish test --watch: watching for changes (Ctrl-C to stop)");
         loop {
             let result = run_tests(opts.clone());
-            // Block until an event, then debounce briefly.
-            match rx.recv() {
-                Ok(_) => {
-                    while rx.recv_timeout(Duration::from_millis(150)).is_ok() {}
-                    eprintln!("\n── file change; re-running ──");
+            // Block until a change we did not cause ourselves, then debounce briefly.
+            let relevant = loop {
+                match rx.recv() {
+                    Ok(Ok(event)) if event.paths.iter().any(|p| !is_self_written(p, &opts)) => {
+                        break true
+                    }
+                    // Our own snapshot / coverage / junit writes: keep waiting.
+                    Ok(_) => continue,
+                    Err(_) => break false,
                 }
-                Err(_) => return result.exit_code,
+            };
+            if !relevant {
+                return result.exit_code;
             }
+            while rx.recv_timeout(Duration::from_millis(150)).is_ok() {}
+            eprintln!("\n── file change; re-running ──");
         }
     }
     #[cfg(not(feature = "watch"))]
     {
-        eprintln!(
-            "tish test --watch: notify feature not enabled in this build; running once"
-        );
+        eprintln!("tish test --watch: notify feature not enabled in this build; running once");
         run_tests(opts).exit_code
     }
 }
