@@ -198,3 +198,93 @@ fn colliding_exported_names_are_isolated_across_modules() {
         );
     }
 }
+
+// ── #653: a LOCAL named export (`export { A }`) of a top-level binding ───────────────────────────
+//
+// `collect_module_top_level_names` only treated `export const A` / `export fn f` as exported, so a
+// binding exported via the `export { A }` (no `from`) form looked module-PRIVATE. The isolation pass
+// then renamed it to `A__m0` while the export table still keyed off `A`, pointing every importer at
+// a symbol that no longer existed — "Undefined variable: A" at best, and on the native target the
+// same class of mismatch that #653 saw as a silently wrong constant.
+
+/// Two modules exporting the same constant name, one of them via `export { … }`. Every importer
+/// must land on ITS OWN module's value.
+#[test]
+fn local_named_export_survives_collision_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("frames.tish"),
+        "const HERO_WALK = 0\nconst ITEM_BOMB = 0\nexport { HERO_WALK, ITEM_BOMB as IFRAME_BOMB }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("hero.tish"),
+        "export const HERO_WALK = 1\nexport const ITEM_BOMB = 1\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.tish"),
+        "import { HERO_WALK, ITEM_BOMB } from \"./hero.tish\"\n\
+         import { HERO_WALK as SLOT, IFRAME_BOMB } from \"./frames.tish\"\n\
+         console.log(HERO_WALK, SLOT, ITEM_BOMB, IFRAME_BOMB)\n",
+    )
+    .unwrap();
+
+    let modules = resolve_project(&root.join("main.tish"), Some(root)).expect("resolve");
+    let merged = merge_modules(modules).expect("merge");
+
+    // Collect top-level declarations and the alias bindings the imports lowered to.
+    let mut declared: Vec<String> = Vec::new();
+    for s in &merged.program.statements {
+        match s {
+            Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                declared.push(name.to_string())
+            }
+            Statement::Export { declaration, .. } => {
+                if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                    if let Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } =
+                        inner.as_ref()
+                    {
+                        declared.push(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &merged.program.statements {
+        if let Statement::VarDecl {
+            name,
+            init: Some(Expr::Ident { name: src, .. }),
+            ..
+        } = s
+        {
+            if matches!(name.as_ref(), "HERO_WALK" | "SLOT" | "ITEM_BOMB" | "IFRAME_BOMB") {
+                assert!(
+                    declared.iter().any(|d| d == src.as_ref()),
+                    "import alias `{}` binds to `{}`, which is not declared in the merged program \
+                     (#653: a locally-named export was renamed out from under its export table)",
+                    name,
+                    src
+                );
+            }
+            // The `export { … }` module's bindings must NOT collapse onto the other module's
+            // symbol — that is #653's silent wrong value (`SLOT` reading hero's 1, not frames' 0).
+            if name.as_ref() == "SLOT" {
+                assert_eq!(
+                    src.as_ref(),
+                    "HERO_WALK__m1",
+                    "`SLOT` must bind to frames.tish's own HERO_WALK, not to hero.tish's"
+                );
+            }
+            if name.as_ref() == "IFRAME_BOMB" {
+                assert_eq!(
+                    src.as_ref(),
+                    "ITEM_BOMB__m1",
+                    "`IFRAME_BOMB` must bind to frames.tish's own ITEM_BOMB, not to hero.tish's"
+                );
+            }
+        }
+    }
+}

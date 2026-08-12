@@ -1421,6 +1421,22 @@ fn collect_module_top_level_names(
                 collect_module_top_level_names(statements, decls, exported, imports);
             }
             Statement::Export { declaration, .. } => {
+                // #653/#415: a LOCAL named export (`export { A }`, no `from`) exports an
+                // already-declared top-level binding. Without this the binding looks module-private,
+                // gets renamed by the isolation pass below, and the export table — which keys off the
+                // ORIGINAL name — points at a symbol that no longer exists.
+                if let ExportDeclaration::ReExport {
+                    specifiers,
+                    from: None,
+                    ..
+                } = declaration.as_ref()
+                {
+                    for spec in specifiers {
+                        if let ImportSpecifier::Named { name, .. } = spec {
+                            exported.insert(name.to_string());
+                        }
+                    }
+                }
                 if let ExportDeclaration::Named(inner) = declaration.as_ref() {
                     match inner.as_ref() {
                         Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
@@ -2049,7 +2065,15 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                             if let ImportSpecifier::Named { name, alias, .. } = spec {
                                 let export_name =
                                     alias.as_deref().unwrap_or(name.as_ref()).to_string();
-                                module_exports[idx].insert(export_name, name.to_string());
+                                // #653: the local binding may have been renamed for a collision.
+                                // `export_renames` is renamed -> original, so look the other way to
+                                // find the symbol this export name must now point at.
+                                let binding = export_renames[idx]
+                                    .iter()
+                                    .find(|(_, original)| original.as_str() == name.as_ref())
+                                    .map(|(renamed, _)| renamed.clone())
+                                    .unwrap_or_else(|| name.to_string());
+                                module_exports[idx].insert(export_name, binding);
                             }
                         }
                     }
