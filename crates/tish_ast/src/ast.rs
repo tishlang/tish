@@ -374,6 +374,12 @@ pub enum Statement {
         name: Arc<str>,
         name_span: Span,
         params: Vec<FunParam>,
+        /// #672 — per-parameter `readonly` marker, parallel to `params`. A `cargo:` native's body is
+        /// invisible to the compiler, so an array handed to one is boxed on every read everywhere in
+        /// the program. `readonly` is the crate author asserting the contract their declaration
+        /// already implies — "read during the call, not retained, not written through" — which lets
+        /// the array keep its typed representation. Opt-in: unmarked stays conservative.
+        readonly_params: Vec<bool>,
         rest_param: Option<TypedParam>,
         return_type: Option<TypeAnnotation>,
         span: Span,

@@ -3299,8 +3299,12 @@ impl Codegen {
             if self.emit_mode == crate::NativeEmitMode::Gba {
                 let mut array_names: Vec<String> = Vec::new();
                 Self::collect_annotated_array_names(&program.statements, &mut array_names);
-                self.arrays_passed_to_calls =
-                    Self::collect_escaping_array_names(&program.statements, &array_names);
+                let ro_natives = Self::collect_declared_readonly_params(&program.statements);
+                self.arrays_passed_to_calls = Self::collect_escaping_array_names(
+                    &program.statements,
+                    &array_names,
+                    &ro_natives,
+                );
             }
             // Pick the integer representation where the values allow it. GBA only: off-target the
             // `f64` layout is free and eligibility must stay byte-identical to before.
@@ -19060,7 +19064,39 @@ impl Codegen {
     ///
     /// Over-approximating only costs an array its native lowering. Under-approximating brings back a
     /// silently wrong result, so the bias is deliberate.
-    fn collect_escaping_array_names(stmts: &[Statement], names: &[String]) -> std::collections::HashSet<String> {
+    /// #672 — per-parameter `readonly` flags from each `declare fn`, keyed by function name.
+    ///
+    /// A `cargo:` native's body is invisible, so #663 has to assume the worst and box any array
+    /// handed to one — on every read, everywhere in the program, for a call that typically runs once
+    /// per level. But a native's contract is already written down; `readonly` lets the crate author
+    /// state the part the compiler cannot see: this parameter is read during the call, not retained
+    /// and not written through. Opt-in, because a native that DOES mutate its argument must keep
+    /// today's behaviour and silence has to keep meaning "assume it might".
+    fn collect_declared_readonly_params(
+        stmts: &[Statement],
+    ) -> std::collections::HashMap<String, Vec<bool>> {
+        let mut out: std::collections::HashMap<String, Vec<bool>> =
+            std::collections::HashMap::new();
+        for s in stmts {
+            if let Statement::DeclareFun {
+                name,
+                readonly_params,
+                ..
+            } = s
+            {
+                if readonly_params.iter().any(|b| *b) {
+                    out.insert(name.to_string(), readonly_params.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_escaping_array_names(
+        stmts: &[Statement],
+        names: &[String],
+        ro_natives: &std::collections::HashMap<String, Vec<bool>>,
+    ) -> std::collections::HashSet<String> {
         // `for_each_stmt_expr` deliberately does NOT descend into `FunDecl` bodies, so the forwarding
         // call is normally invisible to it — the array is declared inside a function and passed
         // inside that same function, which is exactly the reported shape. Gather nested bodies as
@@ -19113,7 +19149,9 @@ impl Codegen {
             // a local fn whose corresponding parameter provably does neither, boxing the array buys
             // nothing and costs a boxed read on every OTHER access, which is usually a hot loop
             // while the call that caused it may run once per level.
-            if f.forwarded && !Self::forward_sites_are_harmless(stmts, &f.forward_sites) {
+            if f.forwarded
+                && !Self::forward_sites_are_harmless(stmts, &f.forward_sites, ro_natives)
+            {
                 out.insert(n.clone());
             }
         }
@@ -19130,7 +19168,11 @@ impl Codegen {
     /// Being forwarded is not by itself an aliasing hazard; it is one only if the callee can write
     /// through the reference or let it escape. Boxing on the mere fact of a call costs a boxed read
     /// on every OTHER access — usually a hot loop, while the call that caused it may run once.
-    fn forward_sites_are_harmless(stmts: &[Statement], sites: &[ForwardSite]) -> bool {
+    fn forward_sites_are_harmless(
+        stmts: &[Statement],
+        sites: &[ForwardSite],
+        ro_natives: &std::collections::HashMap<String, Vec<bool>>,
+    ) -> bool {
         if sites.is_empty() {
             return false; // `forwarded` was set but nothing was recorded — do not assume safety
         }
@@ -19138,8 +19180,19 @@ impl Codegen {
             let ForwardSite::Named(callee, pos) = site else {
                 return false; // opaque callee
             };
+            // #672 — a native whose `declare fn` marks this parameter `readonly`. The body is
+            // still invisible, but the contract is declared, and that is exactly the fact #663 was
+            // missing rather than something it decided against.
+            if ro_natives
+                .get(callee)
+                .and_then(|flags| flags.get(*pos))
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let Some((params, body)) = Self::find_local_fn(stmts, callee) else {
-                return false; // an import, a native, or a value-position closure
+                return false; // an import, an unmarked native, or a value-position closure
             };
             let Some(FunParam::Simple(tp)) = params.get(*pos) else {
                 return false; // rest/destructured param, or fewer params than args
