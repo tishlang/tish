@@ -1,0 +1,34 @@
+let C: i32[] = []
+let D: i32[] = []
+let E: i32[] = []
+let F: i32[] = []
+let keep = null
+let ci: i32 = 0
+while (ci < 4) { C.push(ci); ci = ci + 1 }
+let di: i32 = 0
+while (di < 4) { D.push(di); di = di + 1 }
+let ei: i32 = 0
+while (ei < 4) { E.push(ei); ei = ei + 1 }
+let fi: i32 = 0
+while (fi < 4) { F.push(fi); fi = fi + 1 }
+
+fn mutate(arr) { arr[0] = 99 }
+fn onward(arr) { return mutate(arr) }
+fn stash(arr) { keep = arr }
+fn readLen(arr) { return arr.length }
+
+export fn sumF(): i32 {
+  let acc: i32 = 0
+  let i: i32 = 0
+  while (i < 4) { acc = acc + F[i]; i = i + 1 }
+  return acc
+}
+
+fn main() {
+  mutate(C)
+  onward(D)
+  stash(E)
+  console.log("C0=" + C[0] + " D0=" + D[0] + " E0=" + E[0])
+  console.log("Flen=" + readLen(F) + " sumF=" + sumF())
+}
+main()
