@@ -1,0 +1,13 @@
+// #669: a callee that writes an element must be visible to the caller — the array is passed by
+// reference, not copied. Also covers the `let mut` on a captured binding handed to a native-vec fn
+// as `&mut Vec`, which was `error[E0596]: cannot borrow as mutable` in the generated Rust.
+//
+// (An ANNOTATED array in the same shape is still wrong on the host native backend — see #668.
+// Left out deliberately rather than skipped, so this fixture asserts only what actually holds.)
+let U = [0, 1, 2, 3]
+fn mutate(arr) { arr[0] = 99 }
+fn main() {
+  mutate(U)
+  console.log("U0=" + U[0] + " U1=" + U[1])
+}
+main()

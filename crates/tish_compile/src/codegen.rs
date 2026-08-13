@@ -7373,7 +7373,13 @@ impl Codegen {
                 for outer_var in &read_only_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     self.writeln(&format!(
-                        "let {} = {}_capt.clone();",
+                        // #669 — `let mut`: an immutable capture can still be handed to a native-vec
+                        // fn as `&mut Vec` (`mutate_nv(&mut U)`), and a non-`mut` binding makes that
+                        // `error[E0596]: cannot borrow as mutable` — a hard compile failure on an
+                        // ordinary shape (an array passed to a fn that writes an element). The
+                        // generated crate is `#![allow(unused, ...)]`, which covers `unused_mut`, so
+                        // this is silent where the binding is never mutated.
+                        "let mut {} = {}_capt.clone();",
                         var_escaped, var_escaped
                     ));
                 }
@@ -8410,6 +8416,26 @@ impl Codegen {
                                         // `get_prop`-ing every field back out. emit_native_expr falls
                                         // back to the typed/value path for non-literal args.
                                         let native_val = self.emit_native_expr(e, elem_type.as_ref())?;
+                                        // #669 — PUSHING A BARE VARIABLE MOVES IT. For a non-`Copy`
+                                        // element type (`Value`, `String`, an aggregate) the bare
+                                        // identifier is moved into the Vec, so a second push of the
+                                        // same variable is a use-after-move:
+                                        //
+                                        //     while (i < 4) { C.push(i); D.push(i); i = i + 1 }
+                                        //     error[E0382]: use of moved value: `i`
+                                        //
+                                        // A hard compile failure in the generated program, and the
+                                        // shape is ordinary — filling two arrays from one counter.
+                                        // Giving each loop its own counter avoids it, which is why
+                                        // it reads as arbitrary. `Copy` elements (the numeric
+                                        // scalars) are unaffected and keep the bare move.
+                                        let native_val = if !elem_type.is_copy()
+                                            && matches!(e, Expr::Ident { .. })
+                                        {
+                                            format!("{}.clone()", native_val)
+                                        } else {
+                                            native_val
+                                        };
                                         push_stmts.push(format!("{}.push({});", base, native_val));
                                     }
                                 }

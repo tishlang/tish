@@ -40,7 +40,8 @@ fn immutable_capture_needs_no_cell() {
         "an immutable captured const must not get a VmRef cell (#654):\n{rust}"
     );
     assert!(
-        rust.contains("let HERO_NAME = HERO_NAME_capt.clone();"),
-        "the call body must bind from the captured snapshot, not a per-call cell borrow (#654)"
+        rust.contains("let mut HERO_NAME = HERO_NAME_capt.clone();"),
+        "the call body must bind from the captured snapshot, not a per-call cell borrow (#654). \
+         The `mut` is #669: the binding can be handed to a native-vec fn as `&mut Vec`."
     );
 }
