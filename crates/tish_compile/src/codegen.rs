@@ -1000,6 +1000,18 @@ struct ParamUse {
     /// could mutate the array, and a write to the caller's array would be lost on the owned copy.
     /// `classify_vec_param` ignores this field; only `native_arr_param_fns` reads it.
     forwarded: bool,
+    /// #663 — one entry per site that set `forwarded`, naming the callee and argument position
+    /// where determinable. Populated at the same place as `forwarded`, so it is exactly as complete.
+    forward_sites: Vec<ForwardSite>,
+}
+
+/// #663 — where a bare array argument was handed to a callee.
+#[derive(Debug, Clone, PartialEq)]
+enum ForwardSite {
+    /// `f(arr)` with `f` a plain identifier — the body may be inspectable.
+    Named(String, usize),
+    /// A method call, computed callee, or native-module member: the body is not visible.
+    Opaque,
 }
 
 /// #175 — kind of one parameter of a native-vec free fn (spectral_norm/queens shape).
@@ -19095,11 +19107,82 @@ impl Codegen {
             // is about. Using it deopted arrays that are legitimately native
             // (`numeric_returning_fn_keeps_pushed_array_native`). #597 is specifically "passed as a
             // call argument", which is what `forwarded` means.
-            if f.forwarded {
+            //
+            // #663: being forwarded is not by itself an aliasing hazard — it is a hazard only if
+            // the CALLEE can mutate the array or let it escape. When every forwarding site targets
+            // a local fn whose corresponding parameter provably does neither, boxing the array buys
+            // nothing and costs a boxed read on every OTHER access, which is usually a hot loop
+            // while the call that caused it may run once per level.
+            if f.forwarded && !Self::forward_sites_are_harmless(stmts, &f.forward_sites) {
                 out.insert(n.clone());
             }
         }
         out
+    }
+
+    /// #663 — can every call that received this array be trusted not to alias or mutate it?
+    ///
+    /// True only when EVERY recorded site names a locally-declared `fn` (so the body is visible)
+    /// and that fn's parameter in the receiving position is neither written, escaped, nor forwarded
+    /// onward. Anything opaque — a `cargo:` native, a method call, a value-position callee, an
+    /// unknown arity — is false, and the array keeps today's conservative boxing.
+    ///
+    /// Being forwarded is not by itself an aliasing hazard; it is one only if the callee can write
+    /// through the reference or let it escape. Boxing on the mere fact of a call costs a boxed read
+    /// on every OTHER access — usually a hot loop, while the call that caused it may run once.
+    fn forward_sites_are_harmless(stmts: &[Statement], sites: &[ForwardSite]) -> bool {
+        if sites.is_empty() {
+            return false; // `forwarded` was set but nothing was recorded — do not assume safety
+        }
+        for site in sites {
+            let ForwardSite::Named(callee, pos) = site else {
+                return false; // opaque callee
+            };
+            let Some((params, body)) = Self::find_local_fn(stmts, callee) else {
+                return false; // an import, a native, or a value-position closure
+            };
+            let Some(FunParam::Simple(tp)) = params.get(*pos) else {
+                return false; // rest/destructured param, or fewer params than args
+            };
+            let mut pu = ParamUse::default();
+            Self::for_each_stmt_expr(body, &mut |e| {
+                Self::scan_param_use(e, tp.name.as_ref(), false, &mut pu)
+            });
+            if pu.is_mut || pu.escaped || pu.forwarded {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// #663 — locate a top-level `fn NAME` so its parameter uses can be inspected. Only top-level
+    /// declarations: a nested one is not reliably the callee at an arbitrary call site.
+    fn find_local_fn<'a>(
+        stmts: &'a [Statement],
+        name: &str,
+    ) -> Option<(&'a [FunParam], &'a Statement)> {
+        for s in stmts {
+            let inner = match s {
+                Statement::Export { declaration, .. } => match declaration.as_ref() {
+                    tishlang_ast::ExportDeclaration::Named(inner) => inner.as_ref(),
+                    _ => continue,
+                },
+                other => other,
+            };
+            if let Statement::FunDecl {
+                name: fname,
+                params,
+                rest_param: None,
+                body,
+                ..
+            } = inner
+            {
+                if fname.as_ref() == name {
+                    return Some((params.as_slice(), body.as_ref()));
+                }
+            }
+        }
+        None
     }
 
     fn for_each_expr_root(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
@@ -22050,6 +22133,23 @@ impl Codegen {
                         CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {
                             // forward (native-vec re-borrows; arr-param owned-copy must reject).
                             f.forwarded = true;
+                            // #663 — record WHERE it was forwarded, so a caller can ask whether the
+                            // callee could actually alias or mutate it. Recorded here, at the one
+                            // site that sets `forwarded`, so the record can never be less complete
+                            // than the flag itself — a separate AST walk could miss an expression
+                            // variant and silently call a real forward "harmless".
+                            match callee.as_ref() {
+                                Expr::Ident { name: cn, .. } => {
+                                    f.forward_sites.push(ForwardSite::Named(
+                                        cn.to_string(),
+                                        args.iter()
+                                            .position(|x| std::ptr::eq(x, a))
+                                            .unwrap_or(usize::MAX),
+                                    ));
+                                }
+                                // Method call, computed callee, native module member: body unknown.
+                                _ => f.forward_sites.push(ForwardSite::Opaque),
+                            }
                         }
                         CallArg::Expr(e) | CallArg::Spread(e) => {
                             Self::scan_param_use(e, p, false, f)
