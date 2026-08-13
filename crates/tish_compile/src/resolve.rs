@@ -1582,6 +1582,108 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<Has
     export_renames
 }
 
+/// #659 — give a module a private name for an import binding that another module already bound to a
+/// DIFFERENT symbol in the merged top-level scope.
+///
+/// Import specifiers lower to `const <bind> = <source>` (only when `bind != source`; an import of a
+/// name the dep declares under that same name emits nothing and cannot collide). Two modules that
+/// pick the same `bind` therefore emit two `const`s with one name:
+///
+/// ```text
+/// const field = field__m0;   // module a
+/// const field = field__m0;   // module b   — duplicate declaration
+/// ```
+///
+/// Same source, so the value was at least right and only the JS target rejected it. When the sources
+/// differ the merge is actively wrong — `import { x as f }` in one module and `import { y as f }` in
+/// another leaves both modules calling whichever landed second, on interp and vm too.
+///
+/// First binder of a name keeps it; later modules that would bind it to something else get
+/// `<name>__i<idx>` and have their own references rewritten. A module re-binding it to the SAME
+/// source is left alone — the emitter already skips the redundant alias, so nothing collides.
+fn isolate_conflicting_import_aliases(
+    modules: &mut [ResolvedModule],
+    module_exports: &[HashMap<String, String>],
+    path_to_idx: &HashMap<PathBuf, usize>,
+) {
+    // bind name -> the source symbol the first module bound it to.
+    let mut claimed: HashMap<String, String> = HashMap::new();
+    for i in 0..modules.len() {
+        let dir = modules[i]
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let mut renames: HashMap<String, Arc<str>> = HashMap::new();
+        // Collect this module's (bind, source) pairs without holding a borrow of `modules`.
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for stmt in &modules[i].program.statements {
+            let Statement::Import { specifiers, from, .. } = stmt else {
+                continue;
+            };
+            let Some(dep_idx) = resolve_import_path(from.as_ref(), &dir, Path::new("."))
+                .ok()
+                .map(|p| p.canonicalize().unwrap_or(p))
+                .and_then(|p| path_to_idx.get(&p).copied())
+            else {
+                continue; // native/builtin import — not a tish module in the merge set
+            };
+            for spec in specifiers {
+                if let ImportSpecifier::Named { name, alias, .. } = spec {
+                    let source = module_exports[dep_idx]
+                        .get(name.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| name.to_string());
+                    let bind = alias.as_deref().unwrap_or(name.as_ref()).to_string();
+                    if bind != source {
+                        pairs.push((bind, source));
+                    }
+                }
+            }
+        }
+        for (bind, source) in pairs {
+            match claimed.get(&bind) {
+                // Someone already bound this name to a DIFFERENT symbol — take a private one.
+                Some(prev) if *prev != source => {
+                    renames.insert(bind.clone(), Arc::from(format!("{bind}__i{i}")));
+                }
+                // Same symbol, or unclaimed: the first binder keeps the bare name.
+                Some(_) => {}
+                None => {
+                    claimed.insert(bind, source);
+                }
+            }
+        }
+        if renames.is_empty() {
+            continue;
+        }
+        for stmt in &mut modules[i].program.statements {
+            rewrite_import_binding(stmt, &renames);
+        }
+        for stmt in &mut modules[i].program.statements {
+            let mut active = renames.clone();
+            rewrite_stmt_scope(stmt, &mut active, true);
+        }
+    }
+}
+
+/// #659 — rewrite the LOCAL binding name of each import specifier per `renames`. The export name the
+/// specifier asks the dep for is untouched; only the name this module binds it to moves, so import
+/// resolution is unaffected and the merged scope stops colliding.
+fn rewrite_import_binding(stmt: &mut Statement, renames: &HashMap<String, Arc<str>>) {
+    let Statement::Import { specifiers, .. } = stmt else {
+        return;
+    };
+    for spec in specifiers.iter_mut() {
+        if let ImportSpecifier::Named { name, alias, .. } = spec {
+            let bound = alias.as_deref().unwrap_or(name.as_ref()).to_string();
+            if let Some(renamed) = renames.get(&bound) {
+                *alias = Some(Arc::clone(renamed));
+            }
+        }
+    }
+}
+
 /// Apply the rename for a *declared* name. At module top level the binding is the canonical
 /// private one — rename it. In a nested scope the same name is a shadow — drop it from `active`
 /// so the inner binding and its references keep their own identity.
@@ -2082,6 +2184,15 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
         }
     }
 
+    // #659: two modules can bind the SAME top-level name to DIFFERENT symbols via imports. Each
+    // lowers to `const <bind> = <source>` in the one merged scope, which is a duplicate `const`
+    // (SyntaxError) on the JS target and — when the sources differ — a silently wrong program on
+    // every backend, because the second binding shadows the first. Runs here, after the export
+    // table exists, because that is what makes `source` knowable.
+    isolate_conflicting_import_aliases(&mut modules, &module_exports, &path_to_idx);
+
+    // #659 — top-level import aliases already emitted, as `bind -> source`.
+    let mut emitted_import_aliases: HashMap<String, String> = HashMap::new();
     let mut statements = Vec::new();
     let mut statement_sources = Vec::new();
     for (idx, module) in modules.iter().enumerate() {
@@ -2198,7 +2309,21 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                                     .cloned()
                                     .unwrap_or_else(|| name.to_string());
                                 let bind = alias.as_deref().unwrap_or(name.as_ref());
-                                if bind != source {
+                                // #659: two modules importing the SAME symbol under the same name
+                                // each emitted `const <bind> = <source>` into the one merged scope
+                                // — a duplicate declaration, which `--target js` turns into
+                                // `SyntaxError: Identifier 'field' has already been declared`. The
+                                // build itself succeeded, so only `node --check` or actually loading
+                                // the bundle caught it and it could ship unnoticed. One alias serves
+                                // every importer: same name, same target, and it is emitted at the
+                                // FIRST importer's position, which precedes every later use.
+                                // (A same-name/different-target clash is not this case — that is
+                                // renamed apart by `isolate_conflicting_import_aliases` above.)
+                                let already_aliased =
+                                    emitted_import_aliases.get(bind) == Some(&source);
+                                if bind != source && !already_aliased {
+                                    emitted_import_aliases
+                                        .insert(bind.to_string(), source.clone());
                                     let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
                                     merge_push(
                                         &mut statements,
