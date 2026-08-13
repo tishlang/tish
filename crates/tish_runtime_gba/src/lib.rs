@@ -30,11 +30,83 @@ pub use tishlang_core::{
     has_pending_throw, set_pending_throw, stack_overflow_error, take_pending_throw, CallDepthGuard,
 };
 
-/// Enter a boxed user-fn call frame or trip the recursion guard. On GBA there is
-/// no stack-pressure probe (no `std`), so this is just the counted-depth guard.
+unsafe extern "C" {
+    /// End of the `.iwram` output section (agb's `gba.ld`). IWRAM is
+    /// 0x0300_0000..0x0300_8000; agb's code/data sits at the bottom and the user stack
+    /// grows DOWN from ~0x0300_7F00 toward this address. Below it is live agb data —
+    /// the audio mixer's buffers among them.
+    static __iwram_end: u8;
+}
+
+/// Top of IWRAM. The user stack must be below this; anything else is not our stack.
+const IWRAM_TOP: usize = 0x0300_8000;
+
+/// Headroom above [`__iwram_end`]: must cover the frames between two guard checks plus
+/// the bail path. Boxed `Value` frames run a few hundred bytes, so 2 KB is several of
+/// them — deliberately small against the host's 256 KB, which is sized for an 8 MB stack.
+const GBA_STACK_MARGIN: usize = 2 * 1024;
+
+/// #655 — is the GBA stack nearly exhausted?
+///
+/// The host probe (`stacker::remaining_stack`) needs `std` and reports nothing here, so its
+/// `None -> floor 1` fallback made this dead code on the one target where overflow is
+/// unrecoverable: no MMU, no guard page, so the stack grows silently into agb's IWRAM data
+/// and surfaces frames later as an illegal opcode that names nothing.
+///
+/// ⚠️⚠️ THE RANGE CHECK IS NOT DEFENSIVE PADDING. A floor derived from a link symbol is only
+/// meaningful if the stack really is in IWRAM above it. If it is not — a different linker
+/// script, a game that moves the stack to EWRAM, a probe taken on some other stack — then
+/// `sp < floor` is trivially TRUE FOR EVERY CALL, the guard trips on the first one, and every
+/// guarded fn returns the bail value. That is not a subtle failure: it kills the ROM before it
+/// draws a frame, with no message, and it is indistinguishable from a codegen bug. When the
+/// assumption does not hold we must say "cannot judge" and let the call through.
+#[inline]
+pub fn stack_low() -> bool {
+    let anchor = 0u8;
+    let sp = &anchor as *const u8 as usize;
+    let end = (&raw const __iwram_end) as usize;
+    if sp <= end || sp > IWRAM_TOP {
+        return false;
+    }
+    sp < end + GBA_STACK_MARGIN
+}
+
+/// Enter a boxed user-fn call frame, or trip the recursion guard. Trips on the counted
+/// ceiling or on real stack pressure ([`stack_low`]) — on a 32 KB stack the counted default
+/// (20000 frames) is far out of reach, so pressure is what actually fires.
+///
+/// ⚠️⚠️ ON GBA A TRIP PANICS INSTEAD OF PARKING A CATCHABLE THROW, and that difference is the
+/// whole lesson of this bug. The host bails by parking a `RangeError` and returning `None`,
+/// whereupon the generated body returns `Value::Null` — fine where a throw checkpoint will
+/// raise it. On GBA the same silence turned a stack overflow into a wrong VALUE: the ROM kept
+/// running on nulls, drew nothing, said nothing, and cost a full day of bisecting a compiler
+/// that was working correctly. agb's panic handler prints and shows a crash screen, so a game
+/// that recurses too deep now says so.
 #[inline]
 pub fn enter_call_guarded() -> Option<CallDepthGuard> {
+    if stack_low() {
+        let anchor = 0u8;
+        let sp = &anchor as *const u8 as usize;
+        let end = (&raw const __iwram_end) as usize;
+        stack_overflow_panic(sp, end);
+    }
     tishlang_core::enter_call_guarded()
+}
+
+#[cold]
+#[inline(never)]
+fn stack_overflow_panic(sp: usize, end: usize) -> ! {
+    // ⚠️ The NUMBERS matter, not just the fact. "Stack overflow" alone cannot tell you whether a
+    // game is legitimately deep or the probe is reading a stack that is not where it was assumed
+    // to be — and those want opposite fixes. `used` is measured from the BIOS entry SP.
+    let used = 0x0300_7F00usize.saturating_sub(sp);
+    panic!(
+        "tish: GBA stack overflow - sp={:#010X} floor={:#010X} used={}B of ~{}B",
+        sp,
+        end + GBA_STACK_MARGIN,
+        used,
+        0x0300_7F00usize - (end + GBA_STACK_MARGIN)
+    );
 }
 
 // ── Error type for throw/return non-local control flow ───────────────────────
