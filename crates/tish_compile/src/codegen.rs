@@ -25882,26 +25882,55 @@ impl Codegen {
                                         .map(|v| v.len())
                                 })
                                 .unwrap_or(0);
-                            // OUT-OF-RANGE STAYS f64. An unproven index still has to be able to
-                            // answer `NaN`, and there is no `i32` that means "absent" — picking a
-                            // sentinel here would silently turn a missing element into a real value.
-                            // So the bounds-checked form keeps today's exact semantics and only the
-                            // STORAGE narrows; the integer win is claimed above, where the index is
-                            // proven and no sentinel is reachable.
-                            let elem = if is_int {
-                                format!("{}[_i] as f64", static_name)
-                            } else {
-                                format!("{}[_i]", static_name)
-                            };
+                            // #658 — THE BOUNDS-CHECKED FALLBACK STAYS IN THE INTEGER DOMAIN TOO.
+                            //
+                            // The previous note here reasoned that out-of-range "still has to be
+                            // able to answer NaN, and there is no i32 that means absent". The
+                            // premise does not survive checking what the other backends answer:
+                            //
+                            //     let LIT: i32[] = [...]
+                            //     console.log(LIT[999999])
+                            //     interp / vm / node -> null      native -> NaN
+                            //
+                            // So `NaN` is not a semantic being preserved — it is already a
+                            // native-only divergence, and no backend agrees with it. Keeping the
+                            // f64 round trip to protect it bought nothing and cost two soft-float
+                            // calls per element on a chip with no FPU: `G_LIT[_i] as f64` widening
+                            // on the way out and `as i32` narrowing at the consumer. Measured in
+                            // the report at ~25 ticks/element against ~0.4 for the identical read
+                            // behind a mask, where the index happens to be provably in range.
+                            //
+                            // An integer consumer is unaffected either way — `f64::NAN as i32` is
+                            // already 0 in Rust, which is exactly the sentinel used here, so the
+                            // common case is byte-identical and simply loses the conversions. Only
+                            // a read that reaches a BOXED context can tell the difference, and
+                            // there it trades one wrong answer (NaN) for another (0); neither
+                            // matches the `null` every other backend gives. That divergence is
+                            // pre-existing and tracked separately — it is not what this path is
+                            // for, and it is not made worse by removing the conversions.
+                            if is_int {
+                                let access = if const_len > 0 {
+                                    format!(
+                                        "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ 0 }} }}",
+                                        idx_usize, const_len, static_name
+                                    )
+                                } else {
+                                    format!(
+                                        "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ 0 }} }}",
+                                        idx_usize, static_name, static_name
+                                    )
+                                };
+                                return Ok((access, RustType::I32));
+                            }
                             let access = if const_len > 0 {
                                 format!(
-                                    "{{ let _i = {}; if _i < {} {{ {} }} else {{ f64::NAN }} }}",
-                                    idx_usize, const_len, elem
+                                    "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ f64::NAN }} }}",
+                                    idx_usize, const_len, static_name
                                 )
                             } else {
                                 format!(
-                                    "{{ let _i = {}; if _i < {}.len() {{ {} }} else {{ f64::NAN }} }}",
-                                    idx_usize, static_name, elem
+                                    "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
+                                    idx_usize, static_name, static_name
                                 )
                             };
                             return Ok((access, RustType::F64));
