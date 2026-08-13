@@ -288,3 +288,115 @@ fn local_named_export_survives_collision_isolation() {
         }
     }
 }
+
+// ── #659: two modules binding the same top-level name via IMPORTS ───────────────────────────────
+//
+// Import specifiers lower to `const <bind> = <source>` in the one merged scope, so two modules that
+// pick the same `bind` emitted two `const`s with one name. `tish build` succeeded, so only
+// `node --check` or actually loading the bundle caught it — it could ship unnoticed.
+//
+// Two distinct cases, and the second is worse than the reported one:
+//   same source      -> duplicate but equivalent; one alias serves every importer (dedupe)
+//   different source -> the second SHADOWS the first, so a call in the FIRST module silently ran
+//                       the other module's function, on interp and vm too, not just JS
+
+/// Reported case: `a` and `b` both `import { field }` from the same dep, and a third module's own
+/// `field` forces the dep's export to be renamed (which is what makes an alias get emitted at all).
+#[test]
+fn same_symbol_imported_twice_emits_one_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("util.tish"), "export fn field(o) { return o }\n").unwrap();
+    fs::write(
+        root.join("a.tish"),
+        "import { field } from \"./util.tish\"\nexport fn useA(o) { return field(o) }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("b.tish"),
+        "import { field } from \"./util.tish\"\nexport fn useB(o) { return field(o) }\n",
+    )
+    .unwrap();
+    // c declares its OWN `field` — this is what triggers the renaming, per the report.
+    fs::write(
+        root.join("c.tish"),
+        "fn field(o) { return o }\nexport fn useC(o) { return field(o) }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.tish"),
+        "import { useA } from \"./a.tish\"\n\
+         import { useB } from \"./b.tish\"\n\
+         import { useC } from \"./c.tish\"\n\
+         console.log(useA(1), useB(2), useC(3))\n",
+    )
+    .unwrap();
+
+    let modules = resolve_project(&root.join("main.tish"), Some(root)).expect("resolve");
+    let merged = merge_modules(modules).expect("merge");
+
+    let bare_field_decls = merged
+        .program
+        .statements
+        .iter()
+        .filter(|s| matches!(s, Statement::VarDecl { name, .. } if name.as_ref() == "field"))
+        .count();
+    assert!(
+        bare_field_decls <= 1,
+        "two importers of the same symbol must share ONE top-level alias — {} were emitted, which \
+         is `SyntaxError: Identifier 'field' has already been declared` in the js bundle (#659)",
+        bare_field_decls
+    );
+}
+
+/// The worse half: same local name, DIFFERENT symbols. Each module must keep its own.
+#[test]
+fn same_name_different_symbols_do_not_shadow() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("u1.tish"), "export fn x(v) { return \"x1\" }\n").unwrap();
+    fs::write(root.join("u2.tish"), "export fn y(v) { return \"y2\" }\n").unwrap();
+    fs::write(
+        root.join("a.tish"),
+        "import { x as f } from \"./u1.tish\"\nexport fn useA() { return f(1) }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("b.tish"),
+        "import { y as f } from \"./u2.tish\"\nexport fn useB() { return f(2) }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.tish"),
+        "import { useA } from \"./a.tish\"\n\
+         import { useB } from \"./b.tish\"\n\
+         console.log(useA(), useB())\n",
+    )
+    .unwrap();
+
+    let modules = resolve_project(&root.join("main.tish"), Some(root)).expect("resolve");
+    let merged = merge_modules(modules).expect("merge");
+
+    // Each alias must bind a DISTINCT name; if both are `f`, the second shadows the first and
+    // `useA()` silently returns "y2" — on every backend, not only in the js bundle.
+    let alias_names: Vec<&str> = merged
+        .program
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::VarDecl { name, init: Some(Expr::Ident { .. }), .. }
+                if name.starts_with('f') =>
+            {
+                Some(name.as_ref())
+            }
+            _ => None,
+        })
+        .collect();
+    let bare_f = alias_names.iter().filter(|n| **n == "f").count();
+    assert!(
+        bare_f <= 1,
+        "two modules binding different symbols to `f` must not both declare `f` — the second \
+         shadows the first and the first module's calls run the wrong function (#659). Got {:?}",
+        alias_names
+    );
+}
