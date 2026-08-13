@@ -8249,7 +8249,22 @@ impl Codegen {
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
                     if var_type.is_native() {
-                        var_type.to_value_expr(&format!("(*{}.borrow())", escaped))
+                        // #665 — READ WITHOUT HOLDING THE GUARD. `(*cell.borrow())` puts the guard
+                        // in a temporary whose lifetime runs to the end of the enclosing STATEMENT,
+                        // so in argument position it is still held while `value_call` runs the
+                        // callee — and a callee that assigns this same module variable panics on
+                        // `borrow_mut`. The shape is ordinary (`setG(g)`, `descend(seed)`), it fails
+                        // inside the callee rather than at the call, and the panic names vmref.rs
+                        // rather than anything in the program.
+                        //
+                        // `vm_read` copies out and drops the guard at its own return — the boxed
+                        // branch below has always used it, for the same hazard one build config
+                        // over (two reads of one cell under `send-values` self-deadlock). The
+                        // argument is passed by value either way, so this is not a semantic change.
+                        var_type.to_value_expr(&format!(
+                            "tishlang_runtime::vm_read(&{})",
+                            escaped
+                        ))
                     } else {
                         format!("tishlang_runtime::vm_read(&{})", escaped)
                     }
