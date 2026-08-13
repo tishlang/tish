@@ -9655,9 +9655,16 @@ impl Codegen {
                 }
             }
             Expr::Index { optional, .. } if !optional => {
-                // Try native Vec<T> fast path via emit_typed_expr; wrap result.
-                let (code, ty) = self.emit_typed_expr(expr)?;
-                if ty.is_native() { ty.to_value_expr(&code) } else { code }
+                // #658 — an out-of-range read of a promoted module array must answer `null`, the
+                // same as interp/vm/node. Going through the typed path and wrapping would report
+                // the sentinel (NaN before, 0 after the integer-domain change) as a real element.
+                if let Some(v) = self.emit_module_const_index_as_value(expr)? {
+                    v
+                } else {
+                    // Try native Vec<T> fast path via emit_typed_expr; wrap result.
+                    let (code, ty) = self.emit_typed_expr(expr)?;
+                    if ty.is_native() { ty.to_value_expr(&code) } else { code }
+                }
             }
             Expr::Index {
                 object,
@@ -14477,6 +14484,16 @@ impl Codegen {
                 val_code
             } else if val_ty == RustType::Value {
                 elem_type.from_value_expr(&val_code)
+            } else if *elem_type.as_ref() == RustType::Value && val_ty.is_native() {
+                // #669 — BOX A NATIVE VALUE INTO A BOXED ARRAY. The array lowered to `Vec<Value>`
+                // (it escapes, or its elements are not uniformly numeric) while the RHS stayed
+                // native, and this arm passed the raw `f64`/`i32` straight through:
+                //
+                //     (*WARM.borrow_mut())[__i] = __v;   // expected `Value`, found `f64`
+                //
+                // A hard `E0308` in the generated program rather than a slow path — `WARM[i] = …`
+                // simply would not build once the array was boxed for any reason.
+                val_ty.to_value_expr(&val_code)
             } else {
                 val_code
             }
@@ -25440,6 +25457,68 @@ impl Codegen {
         }
     }
 
+    /// #658 — a promoted module-array read in VALUE position, whose index is not provably in
+    /// range. The typed path has to answer with an in-band sentinel (there is no `i32` or `f64`
+    /// that means "absent"), and wrapping that sentinel would report it as a real element: `NaN`
+    /// before the integer-domain change, `0` after. Neither is what an out-of-range read means, and
+    /// neither matches what every other backend says:
+    ///
+    /// ```text
+    /// let LIT: i32[] = [...]
+    /// console.log(LIT[999999])     // interp / vm / node -> null,  native -> NaN
+    /// ```
+    ///
+    /// In value position the representation is a `Value`, so the sentinel is unnecessary — the
+    /// bounds check can yield `Value::Null` directly and native finally agrees with the rest.
+    /// Returns `None` for anything this does not apply to (proven in-bounds, not a promoted array),
+    /// leaving the fast typed path exactly as it is.
+    fn emit_module_const_index_as_value(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Option<String>, CompileError> {
+        let Expr::Index { object, index, optional, .. } = expr else {
+            return Ok(None);
+        };
+        if *optional {
+            return Ok(None);
+        }
+        let Expr::Ident { name, .. } = object.as_ref() else {
+            return Ok(None);
+        };
+        let Some(static_name) = Self::module_const_array_static(
+            &self.module_const_f64_arrays,
+            &self.module_const_f64_aliases,
+            name.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        // A proven-in-range read cannot reach the sentinel — leave it on the direct-load path.
+        if self.index_in_bounds(index, name.as_ref()) {
+            return Ok(None);
+        }
+        let idx_usize = self.emit_index_usize(index)?;
+        let is_int = self.module_const_int_statics.contains(&static_name);
+        let elem = if is_int {
+            format!("Value::Number({}[_i] as f64)", static_name)
+        } else {
+            format!("Value::Number({}[_i])", static_name)
+        };
+        let const_len = self
+            .cum_static_and_len(name.as_ref())
+            .map(|(_, n)| n)
+            .or_else(|| self.module_const_f64_arrays.get(name.as_ref()).map(|v| v.len()))
+            .unwrap_or(0);
+        let bound = if const_len > 0 {
+            const_len.to_string()
+        } else {
+            format!("{}.len()", static_name)
+        };
+        Ok(Some(format!(
+            "{{ let _i = {}; if _i < {} {{ {} }} else {{ Value::Null }} }}",
+            idx_usize, bound, elem
+        )))
+    }
+
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
@@ -25817,8 +25896,17 @@ impl Codegen {
                 }
 
                 // Fall back: convert both sides to Value and use the runtime.
-                let lv = Self::box_operand_for_runtime(left, &l, &lt);
-                let rv = Self::box_operand_for_runtime(right, &r, &rt);
+                // #658 — an operand that is an unproven promoted-array read must become `null` out
+                // of range, not the boxed in-band sentinel. Boxing here is exactly the conversion
+                // that would turn "absent" into a real `0` (or, before, `NaN`).
+                let lv = match self.emit_module_const_index_as_value(left)? {
+                    Some(v) => v,
+                    None => Self::box_operand_for_runtime(left, &l, &lt),
+                };
+                let rv = match self.emit_module_const_index_as_value(right)? {
+                    Some(v) => v,
+                    None => Self::box_operand_for_runtime(right, &r, &rt),
+                };
                 let result = self.emit_binop(&lv, *op, &rv, *span)?;
                 Ok((result, RustType::Value))
             }
