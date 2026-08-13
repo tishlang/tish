@@ -2,3 +2,9 @@
 // Declares the native signatures of exports so a call lowers to a DIRECT `demo_shim::<name>_typed(..)`
 // instead of the boxed `value_call` path — the consuming program never writes these declarations.
 declare fn add(a: number, b: number): number
+
+// #675 — an array parameter has no scalar ABI, so this declaration must NOT register a typed extern
+// (there is no `sink_typed` to call). It exists purely to carry the `readonly` marker (#672) to the
+// aliasing analysis, so the caller's array keeps its typed representation while the CALL stays on
+// the boxed namespace path.
+declare fn sink(n: number, readonly data: number[]): void

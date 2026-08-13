@@ -3011,6 +3011,19 @@ impl Codegen {
             };
             // Every parameter must be a simple, explicitly-typed native scalar; a `Value` param (an
             // untyped one) means the direct call would gain nothing, so keep the whole fn boxed.
+            //
+            // #675 — "native" is not the same as "has a scalar ABI". `is_native()` is merely
+            // `!= Value`, so an `i32[]` parameter passed it, registered a typed extern, and the call
+            // was routed to a `<name>_typed` sibling that cannot exist:
+            //
+            //     error[E0425]: cannot find function `grid_from_gids_typed`
+            //
+            // That made #672's `readonly` unusable on exactly the natives it was built for — an
+            // array sink — because declaring the function to carry the marker also opted it into a
+            // dispatch it can never satisfy. The two are now independent: a declaration with a
+            // non-scalar parameter still contributes its `readonly` flags to the aliasing analysis,
+            // it just does not register a typed extern, so the CALL stays on the boxed namespace
+            // path it uses today (it runs once per level; nobody is trying to speed it up).
             let mut ptys = Vec::with_capacity(params.len());
             let mut ok = true;
             for p in params {
@@ -3018,7 +3031,7 @@ impl Codegen {
                     FunParam::Simple(tp) if tp.default.is_none() => match &tp.type_ann {
                         Some(ann) => {
                             let ty = RustType::from_annotation(ann);
-                            if ty.is_native() {
+                            if ty.is_native() && Self::has_scalar_extern_abi(&ty) {
                                 ptys.push(ty);
                             } else {
                                 ok = false;
@@ -19081,6 +19094,25 @@ impl Codegen {
     ///
     /// Over-approximating only costs an array its native lowering. Under-approximating brings back a
     /// silently wrong result, so the bias is deliberate.
+    /// #675 — does this type have a by-value scalar ABI a typed extern can be generated for?
+    ///
+    /// The numeric scalars, `Fixed`, `bool` and `String` cross the extern boundary as themselves.
+    /// An aggregate — an array (`Vec`), an object/struct, a tuple, an `Option`/`Boxed` wrapper —
+    /// does not: there is no `<name>_typed` sibling to call, and routing to one is a hard
+    /// `E0425` in the generated program. Distinct from [`RustType::is_native`], which only asks
+    /// "is it not `Value`" and therefore says yes to all of these.
+    fn has_scalar_extern_abi(ty: &RustType) -> bool {
+        matches!(
+            ty,
+            RustType::F64
+                | RustType::I32
+                | RustType::Fixed
+                | RustType::Bool
+                | RustType::String
+                | RustType::Unit
+        ) || ty.is_narrow_int()
+    }
+
     /// #672 — per-parameter `readonly` flags from each `declare fn`, keyed by function name.
     ///
     /// A `cargo:` native's body is invisible, so #663 has to assume the worst and box any array
