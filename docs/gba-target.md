@@ -74,7 +74,7 @@ serverless/desktop compile.
 | `tish_compile/src/lib.rs` | `NativeEmitMode::Gba` variant | An enum discriminant. |
 | `tish_compile/src/codegen.rs` | ~24 `emit_mode == Gba` sites: no_std header, the `#[agb::entry] agb_main` entry, `gba_no_std_rewrite` (std→core post-pass), scheme-module emission, perf-pass/PropIC/OnceLock gating | All **string** emission — no agb dependency. |
 | `tish_compile/src/types.rs` + `codegen.rs` | `RustType::Fixed` + the `fixed` lowering (emits the `tishlang_runtime::Fixed` alias) | Activates only on a `fixed` annotation. Emits the facade alias, not `agb::` directly. |
-| `tish_native/src/{config.rs,build.rs}` | `NativeBuildConfig::gba()`, `build_gba_rom` (thumbv4t scaffold, `gba.ld`, `agb-gbafix`) | The build driver. Shells out; links no agb into the compiler. The agb **version** is read from the facade's `Cargo.toml` (`read_facade_agb_version`), not hardcoded — one source of truth. Nested GBA `Cargo.toml` profiles: default **thin** LTO; `TISH_FAST_NATIVE_BUILD=1` disables LTO for iteration; `TISH_GBA_FAT_LTO=1` restores fat LTO for ship builds; `TISH_GBA_DEBUG=1` keeps release debuginfo. |
+| `tish_native/src/{config.rs,build.rs}` | `NativeBuildConfig::gba()`, `build_gba_rom` (thumbv4t scaffold, `gba.ld`, `agb-gbafix`) | The build driver. Shells out; links no agb into the compiler. The agb **version** is read from the facade's `Cargo.toml` (`read_facade_agb_version`), not hardcoded — one source of truth. Nested GBA `Cargo.toml` profiles: default **no LTO** + 16 CGUs at opt-3; `TISH_GBA_LTO=thin` / `TISH_GBA_FAT_LTO=1` opt in to LTO; `TISH_FAST_NATIVE_BUILD=1` is the opt-1 iteration profile; `TISH_GBA_DEBUG=1` keeps release debuginfo. |
 | `tish/src/main.rs` | `--target gba` CLI handling | Selects `NativeBuildConfig::gba()`. |
 
 ### Known couplings (candidates to push further out)
@@ -100,36 +100,24 @@ documented here so the boundary is honest; none breaks the "no agb dependency" i
 ## ROM build profiles (#581)
 
 `gba_cargo_profiles_toml` in `tish_native/src/build.rs` writes the nested crate's `[profile.*]`.
-Three profiles, selected by env var:
+Profiles, selected by env var:
 
 | profile | selected by | `opt-level` / LTO / CGUs |
 |---|---|---|
-| **default** | — | 3 / thin / 8 |
+| **default** | — | 3 / none / 16 |
+| thin (opt-in) | `TISH_GBA_LTO=thin` | 3 / thin / 8 |
 | ship | `TISH_GBA_FAT_LTO=1` | 3 / fat / 1 |
 | iteration | `TISH_FAST_NATIVE_BUILD=1` | 1 / none / 16, incremental |
 
 `TISH_GBA_DEBUG=1` keeps release debuginfo (for mgba backtraces); it is off by default.
 
-The default used to be the ship profile, so every `tish build --target gba` paid fat LTO over the
-single ~20k-line `run()` a real game generates.
+The default used to be fat LTO + 1 CGU, so every `tish build --target gba` paid a full fat-LTO link
+over the ~20k-line `run()` a real game generates. Thin LTO was tried as a middle ground and still
+left large (~10 MB) ROMs linking clean while dying on a blank screen, so LTO is opt-in: the default
+keeps `opt-level = 3` and parallelizes across 16 CGUs with `lto = false`.
 
-Measured on a synthetic 400-fn ROM (14,173-line generated `main.rs`), incremental rebuild after a
-source change, isolated build dir per profile — note this box was at load average 17, so the
-fat-vs-thin numbers are noise-dominated and only the fast profile separates cleanly:
-
-| profile | rebuild (median of 12 / 4 runs) | ROM bytes |
-|---|---:|---:|
-| fat | ~38 s | 1,386,536 |
-| thin (default) | ~34 s | 1,343,432 |
-| fast | **~1.0 s** | 1,481,024 |
-
-So: thin is not *measurably* faster than fat here — it is not slower either, and it produces a 3.1%
-smaller ROM. **If you want the build-time win, it is `TISH_FAST_NATIVE_BUILD=1`**, which is ~35×
-faster and is the flag to use for day-to-day work. It is deliberately not the default: `opt-level=1`
-would silently make every shipped ROM slow, which is the opposite of what the rest of the GBA perf
-work is for.
-
-All three profiles were verified to boot under mgba and produce identical program output.
+`TISH_FAST_NATIVE_BUILD=1` remains the throwaway iteration profile (`opt-level = 1`); it is
+deliberately not the default, because shipping every ROM at opt-1 would undo the GBA perf work.
 
 ## Server-stability note
 

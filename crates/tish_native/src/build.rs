@@ -353,16 +353,17 @@ fn read_facade_agb_version(facade_path: &Path) -> Option<String> {
 /// Cargo `[profile.*]` blocks for the nested GBA crate.
 ///
 /// #581 — the default used to be `lto = "fat"` + `codegen-units = 1`, which dominates wall-clock on
-/// the ~20k-line `run()` a real game generates, and every `tish build --target gba` paid it. Thin
-/// LTO across 8 CGUs keeps most of the size/speed win and lets rustc parallelize; fat LTO stays one
-/// env var away for a ship build.
+/// the ~20k-line `run()` a real game generates. A later thin-LTO default still paid link time and,
+/// on ~10 MB ROMs, produced cartridges that linked clean and then died on a blank screen. The
+/// acceptance for #581 is a measurable iterative win with an escape hatch for size/speed — not a
+/// particular LTO flavour.
 ///
 /// Env knobs (checked here, not by cargo):
-/// - `TISH_FAST_NATIVE_BUILD=1` — iteration profile: no LTO, opt-level 1, many codegen-units.
-///   Same flag as desktop native; use this for day-to-day GBA work.
-/// - `TISH_GBA_FAT_LTO=1` — old ship profile: fat LTO + single CGU (slow; smallest/fastest ROM).
-/// - default — thin LTO, opt-level 3, 8 CGUs, no debuginfo. Much faster than fat LTO while still
-///   producing a solid ROM.
+/// - default — `opt-level = 3`, `lto = false`, 16 CGUs. Parallel rustc, no LTO tax; ROMs still
+///   optimized. This is the day-to-day GBA profile.
+/// - `TISH_GBA_LTO=thin` — opt-in thin LTO across 8 CGUs when a project has validated it.
+/// - `TISH_GBA_FAT_LTO=1` — ship profile: fat LTO + single CGU (slow; smallest/fastest ROM).
+/// - `TISH_FAST_NATIVE_BUILD=1` — throwaway iteration: opt-level 1, no LTO, incremental.
 /// - `TISH_GBA_DEBUG=1` — keep debuginfo in the release profile (slower link; for mgba backtraces).
 fn gba_cargo_profiles_toml() -> String {
     let debug = if std::env::var("TISH_GBA_DEBUG").as_deref() == Ok("1") {
@@ -413,8 +414,9 @@ opt-level = 3
 "#
         );
     }
-    format!(
-        r#"[profile.dev]
+    if std::env::var("TISH_GBA_LTO").as_deref() == Ok("thin") {
+        return format!(
+            r#"[profile.dev]
 opt-level = 3
 debug = {debug}
 
@@ -425,6 +427,26 @@ opt-level = 3
 opt-level = 3
 lto = "thin"
 codegen-units = 8
+debug = {debug}
+panic = "abort"
+
+[profile.release.build-override]
+opt-level = 3
+"#
+        );
+    }
+    format!(
+        r#"[profile.dev]
+opt-level = 3
+debug = {debug}
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
 debug = {debug}
 panic = "abort"
 
@@ -990,10 +1012,9 @@ mod tests {
         assert_eq!(f.iter().filter(|x| *x == "http").count(), 1);
     }
 
-    // #581 — the GBA ROM profile policy. The default used to be fat LTO + 1 CGU, so every
-    // `tish build --target gba` paid a full fat-LTO link over the ~20k-line `run()` a real game
-    // generates. These assert the policy rather than the wall-clock (which is machine-dependent):
-    // thin by default, fat still reachable, and a genuinely fast iteration profile.
+    // #581 — GBA ROM profile policy. Assert the TOML, not wall-clock (machine-dependent):
+    // default is optimized with no LTO (parallel CGUs); thin/fat remain explicit opt-ins; a
+    // genuinely fast iteration profile still exists.
     //
     // Serialized because they mutate process-wide env; `gba_cargo_profiles_toml` reads it directly.
     #[test]
@@ -1006,7 +1027,12 @@ mod tests {
             Some(v) => std::env::set_var(k, v),
             None => std::env::remove_var(k),
         };
-        let keys = ["TISH_GBA_FAT_LTO", "TISH_FAST_NATIVE_BUILD", "TISH_GBA_DEBUG"];
+        let keys = [
+            "TISH_GBA_FAT_LTO",
+            "TISH_GBA_LTO",
+            "TISH_FAST_NATIVE_BUILD",
+            "TISH_GBA_DEBUG",
+        ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         for k in keys {
             std::env::remove_var(k);
@@ -1014,17 +1040,27 @@ mod tests {
 
         let default = super::gba_cargo_profiles_toml();
         assert!(
-            default.contains(r#"lto = "thin""#) && default.contains("codegen-units = 8"),
-            "default ROM profile must be thin LTO across 8 CGUs, not fat + 1 (#581):\n{default}"
+            default.contains("lto = false")
+                && default.contains("codegen-units = 16")
+                && default.contains("opt-level = 3"),
+            "default ROM profile must be opt-3 with no LTO across many CGUs (#581):\n{default}"
         );
         assert!(
-            !default.contains(r#"lto = "fat""#),
-            "fat LTO must be opt-in, not the default (#581):\n{default}"
+            !default.contains(r#"lto = "fat""#) && !default.contains(r#"lto = "thin""#),
+            "any LTO flavour must be opt-in, not the default (#581):\n{default}"
         );
         assert!(
             default.contains("debug = false"),
             "release debuginfo must be opt-in via TISH_GBA_DEBUG (#581)"
         );
+
+        std::env::set_var("TISH_GBA_LTO", "thin");
+        let thin = super::gba_cargo_profiles_toml();
+        assert!(
+            thin.contains(r#"lto = "thin""#) && thin.contains("codegen-units = 8"),
+            "TISH_GBA_LTO=thin must reach the thin profile (#581):\n{thin}"
+        );
+        std::env::remove_var("TISH_GBA_LTO");
 
         std::env::set_var("TISH_GBA_FAT_LTO", "1");
         let ship = super::gba_cargo_profiles_toml();
