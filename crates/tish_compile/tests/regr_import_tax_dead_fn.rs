@@ -65,29 +65,25 @@ console.log(mid(3))
         !rust.contains("let unused = {"),
         "unused must be omitted:\n{rust}"
     );
-    assert!(
-        !rust.contains("let leaf = {") || rust.contains("fn leaf_bfn"),
-        "call-only leaf should prefer free fn over Value::native when hoist succeeds"
-    );
 }
 
 #[test]
 fn call_only_fns_emit_as_free_bfn_without_heap_binding() {
+    // Non-numeric bodies so M5 does not claim them (M5 keeps a Value twin for spread/value_call).
     let rust = compile_src(
         "call_only_bfn",
         r#"
-function leaf(x) { return x + 1 }
-function mid(x) { return leaf(x) * 2 }
-console.log(mid(3))
+function leaf(x) { return "n:" + x }
+function mid(x) { return leaf(x) + "!" }
+console.log(mid("a"))
 "#,
     );
-    // leaf may lower as M5 `leaf_native` (typed) or residual `leaf_bfn` (boxed ABI free fn).
     assert!(
-        rust.contains("fn leaf_bfn(") || rust.contains("fn leaf_native("),
+        rust.contains("fn leaf_bfn("),
         "leaf must be a free fn:\n{rust}"
     );
     assert!(
-        rust.contains("fn mid_bfn(args: &[Value]) -> Value") || rust.contains("fn mid_native("),
+        rust.contains("fn mid_bfn("),
         "mid must be a free fn:\n{rust}"
     );
     assert!(
@@ -99,8 +95,8 @@ console.log(mid(3))
         "mid must not allocate Value::native:\n{rust}"
     );
     assert!(
-        rust.contains("mid_bfn(") || rust.contains("mid_native("),
-        "call sites must route to a free fn:\n{rust}"
+        rust.contains("mid_bfn(") && rust.contains("leaf_bfn("),
+        "call sites must route to _bfn:\n{rust}"
     );
 }
 

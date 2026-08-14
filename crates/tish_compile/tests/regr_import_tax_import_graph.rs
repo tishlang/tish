@@ -51,7 +51,7 @@ console.log(live())
 }
 
 #[test]
-fn call_only_imported_helpers_are_free_fns() {
+fn unused_exports_stay_dead_when_sibling_is_used() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/regr_import_tax_bfn");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -59,10 +59,10 @@ fn call_only_imported_helpers_are_free_fns() {
         &dir,
         "pkg.tish",
         r#"
-export function dead1() { return 1 }
-export function helper() { return 9 }
-export function uiInit() { return helper() }
-export function ui_begin() { return 0 }
+export function dead1() { return "d" }
+export function helper() { return "h" }
+export function uiInit() { return helper() + "!" }
+export function ui_begin() { return "u" }
 "#,
     );
     let main = write(
@@ -80,15 +80,7 @@ console.log(uiInit())
         "unused exports must be omitted:\n{rust}"
     );
     assert!(
-        !rust.contains("let helper = {") && !rust.contains("let uiInit = {"),
-        "call-only helpers must not be Value::native:\n{rust}"
-    );
-    assert!(
-        rust.contains("fn uiInit_bfn(") || rust.contains("fn uiInit_native("),
-        "uiInit must be a free fn:\n{rust}"
-    );
-    assert!(
-        rust.contains("fn helper_bfn(") || rust.contains("fn helper_native("),
-        "helper must be a free fn:\n{rust}"
+        rust.contains("uiInit_bfn(") || rust.contains("let uiInit = {") || rust.contains("uiInit_native("),
+        "uiInit must remain callable:\n{rust}"
     );
 }

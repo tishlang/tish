@@ -2617,12 +2617,14 @@ impl Codegen {
             if others > 0 || calls == 0 {
                 continue;
             }
-            // Already has a typed free twin — drop only the heap Value.
+            // Already claimed by a typed free path (M5 / #175 / #177). Do NOT drop the boxed
+            // twin here: spread calls and other value_call shapes still need the `Value` binding
+            // (MVP `spread.tish` → E0425 on `sum3`/`add4` when the twin was stripped). Those
+            // paths already suppress or keep their bindings themselves.
             if self.native_fns.contains(name)
                 || self.native_vec_fns.contains_key(name)
                 || self.aggregate_fns.contains_key(name)
             {
-                skip_heap.insert(name.clone());
                 continue;
             }
             if *async_ {
