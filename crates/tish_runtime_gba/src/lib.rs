@@ -39,51 +39,89 @@ unsafe extern "C" {
     static __iwram_end: u8;
 }
 
-/// Headroom kept above [`__iwram_end`] (#655): must cover the frames emitted between
-/// two guard checks plus the bail path that parks the `RangeError`. Boxed `Value`
-/// frames on GBA run a few hundred bytes each, and the total stack is under 32 KB,
-/// so this is deliberately small relative to the host's 256 KB margin.
-const GBA_STACK_MARGIN: usize = 2 * 1024;
+/// Bytes reserved above the linker’s IWRAM end before we call the stack exhausted
+/// (#655). Must fit the frames between two guard checks. 2 KB is several boxed
+/// `Value` frames on a <32 KB stack — keep it; shrinking it to “fit” a deep init
+/// chain just lets the overflow overwrite agb’s IWRAM data (the mixer buffers).
+const STACK_HEADROOM: usize = 2 * 1024;
 
-/// #655 — is the GBA stack nearly exhausted? The host probe (`stacker::remaining_stack`)
-/// needs `std` and reports no bounds here, so its `None → floor 1` fallback made the
-/// guard dead code on the one target where overflow is unrecoverable: there is no MMU
-/// and no guard page, so the stack silently grows down into agb's IWRAM data and the
-/// corruption surfaces frames later as an illegal opcode somewhere unrelated.
-///
-/// The bounds ARE known statically here — the linker hands us the IWRAM extent — so
-/// this is a link-time constant plus a pointer compare, about the cost of the
-/// thread-local read it replaces on the host.
+/// Exclusive upper bound of IWRAM on the GBA. The user stack lives in this region
+/// and grows DOWN toward [`__iwram_end`].
+const IWRAM_EXCLUSIVE_END: usize = 0x0300_8000;
+
+/// BIOS / crt0 entry SP for “how much stack have we used” diagnostics.
+const IWRAM_ENTRY_SP: usize = 0x0300_7F00;
+
 #[inline]
-pub fn stack_low() -> bool {
+fn current_sp() -> usize {
     let anchor = 0u8;
-    let sp = &anchor as *const u8 as usize;
-    let floor = (&raw const __iwram_end) as usize + GBA_STACK_MARGIN;
-    sp < floor
+    &anchor as *const u8 as usize
 }
 
-/// Enter a boxed user-fn call frame, or trip the recursion guard. Trips on EITHER the
-/// counted ceiling (`tishlang_core`) or real stack pressure ([`stack_low`]) — on a
-/// 32 KB IWRAM stack the counted default is far out of reach, so pressure is the
-/// trigger that actually fires. On trip: parks the catchable `RangeError` and returns
-/// `None`, exactly as on the host.
+#[inline]
+fn iwram_end_addr() -> usize {
+    (&raw const __iwram_end) as usize
+}
+
+/// #655 — pure predicate: is `sp` inside the GBA user-stack band and below the
+/// headroom floor derived from `iwram_end`?
+///
+/// A floor derived from `__iwram_end` is meaningless unless `sp` is actually in
+/// IWRAM above that symbol. Outside that band (`sp <= end` or `sp > IWRAM top`)
+/// the compare `sp < floor` is true for *every* call — the guard trips on frame
+/// one, every lowered fn bails, and the ROM dies blank before drawing anything.
+/// When the premise does not hold we refuse to judge and return false.
+#[inline]
+pub(crate) fn sp_below_stack_floor(sp: usize, iwram_end: usize) -> bool {
+    if sp <= iwram_end || sp > IWRAM_EXCLUSIVE_END {
+        return false;
+    }
+    sp < iwram_end + STACK_HEADROOM
+}
+
+/// #655 — is the GBA stack nearly exhausted?
+#[inline]
+pub fn stack_low() -> bool {
+    sp_below_stack_floor(current_sp(), iwram_end_addr())
+}
+
+/// #655 — abort with numbers. Host parks a catchable `RangeError` and returns
+/// `Value::Null`; on GBA that same silence turns overflow into a wrong value the
+/// ROM keeps running on (blank screen, no message). agb’s panic handler prints
+/// and shows a crash screen, so a deep call chain says so instead of looking like
+/// a codegen bug.
+#[cold]
+#[inline(never)]
+fn abort_on_stack_exhaustion() -> ! {
+    let sp = current_sp();
+    let end = iwram_end_addr();
+    let floor = end + STACK_HEADROOM;
+    let used = IWRAM_ENTRY_SP.saturating_sub(sp);
+    let budget = IWRAM_ENTRY_SP.saturating_sub(floor);
+    panic!(
+        "tish: GBA stack overflow — sp={:#010X} floor={:#010X} used={}B / budget≈{}B",
+        sp, floor, used, budget
+    );
+}
+
+/// Enter a boxed user-fn call frame, or trip the recursion guard. Trips on the
+/// counted ceiling (`tishlang_core`) or on real stack pressure ([`stack_low`]).
+/// On GBA a pressure trip aborts loudly (see [`abort_on_stack_exhaustion`]).
 #[inline]
 pub fn enter_call_guarded() -> Option<CallDepthGuard> {
     if stack_low() {
-        set_pending_throw(stack_overflow_error());
-        return None;
+        abort_on_stack_exhaustion();
     }
     tishlang_core::enter_call_guarded()
 }
 
-/// #655 — bail path for a tripped typed-fn recursion guard (GBA mirror of the host's
-/// `recursion_tripped_f64`): park the catchable `RangeError` and unwind the numeric
-/// frame with NaN until the first `Value` frame's pending-throw checkpoint raises it.
+/// #655 — typed-fn recursion bail on GBA. Same loud abort as the boxed path: a
+/// NaN unwind with a parked `RangeError` has no throw checkpoint that surfaces
+/// on cartridge, so it would again look like a silent wrong numeric result.
 #[cold]
 #[inline(never)]
 pub fn recursion_tripped_f64() -> f64 {
-    set_pending_throw(stack_overflow_error());
-    f64::NAN
+    abort_on_stack_exhaustion();
 }
 
 // ── Error type for throw/return non-local control flow ───────────────────────
@@ -897,3 +935,28 @@ math_unary_libm! {
 }
 
 pub mod gba;
+
+#[cfg(test)]
+mod stack_guard_tests {
+    use super::{sp_below_stack_floor, IWRAM_EXCLUSIVE_END, STACK_HEADROOM};
+
+    /// Issue #655 acceptance: a real floor from the link map, but only when SP is
+    /// in the IWRAM user-stack band. Without the band check the guard is a
+    /// permanent trip (blank ROM); with a never-trip floor it is dead code.
+    #[test]
+    fn band_gated_floor_matches_655() {
+        let end = 0x0300_1000usize;
+        let floor = end + STACK_HEADROOM;
+
+        // Inside IWRAM, above end, below floor → trip.
+        assert!(sp_below_stack_floor(floor - 1, end));
+        // Inside IWRAM, above floor → ok.
+        assert!(!sp_below_stack_floor(floor + 64, end));
+        // SP at or below live IWRAM payload → cannot judge.
+        assert!(!sp_below_stack_floor(end, end));
+        assert!(!sp_below_stack_floor(end - 1, end));
+        // SP outside IWRAM entirely → cannot judge (would false-trip every call).
+        assert!(!sp_below_stack_floor(IWRAM_EXCLUSIVE_END + 1, end));
+        assert!(!sp_below_stack_floor(0x0200_0000, end));
+    }
+}

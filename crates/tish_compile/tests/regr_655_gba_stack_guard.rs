@@ -1,14 +1,17 @@
-//! #655 — the stack-overflow guard must actually be emitted on the GBA target.
+//! #655 — the stack-overflow guard must fire on GBA, but only when SP is on the
+//! user stack, and a trip must be loud.
 //!
-//! The recursion guard was gated OFF for `NativeEmitMode::Gba` (the no_std runtime had no
-//! stack-pressure probe), and the boxed guard's floor fell back to "never trips". GBA is the one
-//! target where that is unrecoverable: 32 KB of IWRAM, no MMU, no guard page — an unguarded
-//! overflow grows down into agb's live data (the audio mixer's buffers among them) and surfaces
-//! frames later as an illegal opcode at an address that names nothing.
+//! Issue acceptance (ordered):
+//! 1. A real no_std floor from the link map so deep call chains bail instead of
+//!    overwriting agb IWRAM.
+//! 2. Fail loudly — a silent `Value::Null` / NaN unwind on cartridge is
+//!    indistinguishable from a codegen bug.
 //!
-//! `tishlang_runtime_gba` now derives a real floor from the link map (`__iwram_end`), so both the
-//! typed and boxed guards are emitted here exactly as they are on the host.
+//! Extra premise (learned the hard way): a floor from `__iwram_end` is only
+//! meaningful when SP is inside IWRAM above that symbol. Without that band check
+//! `sp < floor` is true on every call and the ROM dies blank before drawing.
 
+use std::fs;
 use std::path::PathBuf;
 
 use tishlang_compile::{compile_project_full_emit, NativeEmitMode};
@@ -20,7 +23,13 @@ fn gba_rust(fixture: &str) -> String {
         .0
 }
 
-/// A self-recursive typed fn opens with the stack check and bails through the NaN sentinel.
+fn runtime_gba_lib() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tish_runtime_gba/src/lib.rs");
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// A self-recursive typed fn opens with the stack check.
 #[test]
 fn gba_typed_recursion_emits_stack_guard() {
     let rust = gba_rust("../../tests/perf/recursion_fib.tish");
@@ -33,9 +42,42 @@ fn gba_typed_recursion_emits_stack_guard() {
         .unwrap()
         .to_string();
     assert!(
-        copy0.contains("tishlang_runtime::stack_low()")
-            && copy0.contains("tishlang_runtime::recursion_tripped_f64()"),
-        "gba typed recursion must open with the stack check — without it an overflow silently \
-         overwrites IWRAM instead of raising a catchable RangeError:\n{copy0}"
+        copy0.contains("tishlang_runtime::stack_low()"),
+        "gba typed recursion must open with the stack check (#655):\n{copy0}"
+    );
+}
+
+/// Runtime contract for #655: band-gated floor + loud abort (not silent Null).
+#[test]
+fn gba_runtime_stack_guard_is_band_gated_and_loud() {
+    let src = runtime_gba_lib();
+    assert!(
+        src.contains("sp_below_stack_floor")
+            || (src.contains("IWRAM_EXCLUSIVE_END") && src.contains("STACK_HEADROOM")),
+        "runtime must expose a band-gated floor predicate (#655)"
+    );
+    assert!(
+        src.contains("0x0300_8000") || src.contains("0x03008000"),
+        "runtime must bound the check to the IWRAM top (#655)"
+    );
+    assert!(
+        src.contains("abort_on_stack_exhaustion") || src.contains("panic!"),
+        "a tripped guard on GBA must abort loudly, not park a silent Null (#655)"
+    );
+    assert!(
+        src.contains("enter_call_guarded") && src.contains("stack_low"),
+        "boxed frames must still go through enter_call_guarded → stack_low (#655)"
+    );
+    // The silent host-shaped bail must not be the GBA trip path.
+    let enter = src
+        .split("pub fn enter_call_guarded")
+        .nth(1)
+        .expect("enter_call_guarded")
+        .split("pub fn ")
+        .next()
+        .unwrap();
+    assert!(
+        !enter.contains("set_pending_throw(stack_overflow_error())"),
+        "GBA enter_call_guarded must not silently park RangeError+Null on trip (#655):\n{enter}"
     );
 }
