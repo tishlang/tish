@@ -14902,12 +14902,37 @@ impl Codegen {
             // of falling to the boxed `set_prop(object_from_pairs(..))` path (which also wouldn't
             // persist — it built a throwaway object).
             Expr::Ident { name, .. } => {
+                // ⚠️ Globals FIRST: a struct global is not in `type_context` (that holds locals), so
+                // looking it up there yields `Value` and the store falls to the boxed `set_prop`
+                // path — which does not even persist, and inside a lowered free `fn` names a
+                // binding that does not exist (E0425). Resolve its shape from the alias table.
+                if let Some(alias) = self.module_struct_globals.get(name.as_ref()).cloned() {
+                    let fields = match self.type_aliases.get(alias.as_str()) {
+                        Some(RustType::Named { fields, .. }) | Some(RustType::Object(fields)) => {
+                            fields.clone()
+                        }
+                        _ => return Ok(None),
+                    };
+                    let Some((_, fty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) else {
+                        return Ok(None);
+                    };
+                    let fty = fty.clone();
+                    let coerced = self.emit_coerced_native(value, &fty)?;
+                    let code = Self::struct_global_field_set(name.as_ref(), prop, &coerced);
+                    return Ok(Some(if side_effect_only {
+                        code
+                    } else {
+                        format!(
+                            "{{ {}; {} }}",
+                            code,
+                            Self::struct_global_field_get(name.as_ref(), prop)
+                        )
+                    }));
+                }
                 let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
                     return Ok(None);
                 };
-                // Store into the `Cell` static: read the `Copy` struct out, set the field, put it
-                // back. Same reachability reason as the read path above.
-                if self.module_struct_globals.contains_key(name.as_ref()) {
+                if false {
                     if let Some((_, fty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) {
                         let fty = fty.clone();
                         let coerced = self.emit_coerced_native(value, &fty)?;
@@ -20121,6 +20146,24 @@ impl Codegen {
         // native lowering. See `STRUCT_PARAMS`.
         if Self::is_struct_param_field(expr) {
             return true;
+        }
+        // A STORE into an all-numeric struct field is native too: for a global it lowers to
+        // `G.with(|c| { let mut t = c.get(); t.f = v; c.set(t); })`, a `Copy` round-trip with no
+        // boxing. Without this every function that WRITES state stays boxed — which in a game is
+        // most of the interesting ones.
+        if let Expr::MemberAssign { object, value, .. } = expr {
+            if let Expr::Ident { name, .. } = object.as_ref() {
+                if Self::struct_params_with(|s| s.contains(name.as_ref())) {
+                    return Self::native_safe_expr(
+                        value,
+                        params,
+                        cand,
+                        globals,
+                        nums,
+                        native_vec_names,
+                    );
+                }
+            }
         }
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
