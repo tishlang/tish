@@ -436,7 +436,7 @@ impl RustType {
             RustType::String => "String::new()".to_string(),
             RustType::Bool => "false".to_string(),
             RustType::Unit => "()".to_string(),
-            RustType::Vec(_) => "Vec::new()".to_string(),
+            RustType::Vec(inner) => format!("Vec::<{}>::new()", inner.to_rust_type_str()),
             RustType::Option(_) => "None".to_string(),
             RustType::Boxed(inner) => format!("Box::new({})", inner.default_value()),
             RustType::Object(_) => "Value::Null".to_string(),

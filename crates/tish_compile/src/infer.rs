@@ -1810,7 +1810,7 @@ fn body_ends_in_return(s: &Statement) -> bool {
 /// occurrence of the name — as a value, an assignment/inc-dec target, etc. Exhaustive over the
 /// whole AST (walks fn bodies, switch, try — which the shared `walk_exprs_stmt` skips) so it can
 /// back a SOUND escape check: if `other_uses > 0` the function escapes and must not be inlined.
-fn fn_name_uses(stmts: &[Statement], f: &str) -> (usize, usize) {
+pub(crate) fn fn_name_uses(stmts: &[Statement], f: &str) -> (usize, usize) {
     let mut calls = 0usize;
     let mut others = 0usize;
     for s in stmts {

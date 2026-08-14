@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tishlang_ast::{
     ArrayElement, ArrowBody, BinOp, CallArg, CompoundOp, DestructElement, DestructPattern, Expr,
     FunParam, ImportSpecifier, Literal, LogicalAssignOp, MemberProp, ObjectProp, Program, Span,
-    Statement, TypeAnnotation, UnaryOp,
+    Statement, TypeAnnotation, TypedParam, UnaryOp,
 };
 
 /// Tracks variable usage for move/clone optimization.
@@ -1369,6 +1369,22 @@ pub(crate) struct Codegen {
     program_has_jsx: bool,
     /// `fn` names for Rust JSX: PascalCase tags matching these use a value binding; others are string intrinsics.
     program_fun_decl_names: std::collections::HashSet<String>,
+    /// Top-level `function` / `fn` decls reachable from module-level code (or a RustLib export).
+    /// Unreachable decls are NOT emitted as `Value::native` heap closures — that is the import tax:
+    /// importing a package materialised every function whether called or not (~151 bytes each).
+    reachable_fun_decls: std::collections::HashSet<String>,
+    /// Every FunDecl that is a direct child of `program.statements` (not nested in a body/block).
+    /// [`Self::should_omit_fun_decl`] only omits names in this set, so a nested `function helper`
+    /// is never killed because an unreachable top-level `helper` exists.
+    top_level_fun_decls: std::collections::HashSet<String>,
+    /// True after [`Self::compute_reachable_fun_decls`] has run for this program.
+    reachable_fun_decls_ready: bool,
+    /// Call-only capture-free top-level FunDecls emitted as `fn name_bfn(args: &[Value]) -> Value`
+    /// (no `Value::native` heap binding). Import-tax / #583: only-called functions stay static.
+    boxed_free_fns: std::collections::HashSet<String>,
+    /// Top-level FunDecls that must not get a `Value::native` / `_cell` in `run()` — the union of
+    /// [`Self::boxed_free_fns`], call-only M5/`native_vec` twins (free fn already exists), etc.
+    skip_heap_fun_decls: std::collections::HashSet<String>,
     /// Nesting depth inside `Value::native(move |args| {{ ... }})` user functions / arrows.
     /// `try`/`throw` lowering uses `return Err` only at depth 0 (e.g. `run()`); inside native
     /// closures it must not return a `Result` from a `Value`-returning closure.
@@ -1510,6 +1526,11 @@ impl Codegen {
             type_aliases: std::collections::HashMap::new(),
             program_has_jsx: false,
             program_fun_decl_names: std::collections::HashSet::new(),
+            reachable_fun_decls: std::collections::HashSet::new(),
+            top_level_fun_decls: std::collections::HashSet::new(),
+            reachable_fun_decls_ready: false,
+            boxed_free_fns: std::collections::HashSet::new(),
+            skip_heap_fun_decls: std::collections::HashSet::new(),
             value_fn_depth: 0,
             emit_mode: crate::NativeEmitMode::DesktopBin,
             entry_exports: Vec::new(),
@@ -2452,18 +2473,341 @@ impl Codegen {
         self.output.push('\n');
     }
 
-    /// Pre-scan statements to find all function declarations in this scope
+    /// Pre-scan statements to find all function declarations in this scope that still need a
+    /// boxed `Value` cell. Unreachable top-level decls are omitted (import tax / dead strip).
     fn prescan_function_decls(&self, statements: &[Statement]) -> Vec<String> {
         statements
             .iter()
             .filter_map(|s| {
                 if let Statement::FunDecl { name, .. } = s {
-                    Some(name.to_string())
+                    let n = name.to_string();
+                    if self.should_omit_fun_decl(&n) || self.skip_heap_fun_decls.contains(&n) {
+                        None
+                    } else {
+                        Some(n)
+                    }
                 } else {
                     None
                 }
             })
             .collect()
+    }
+
+    /// Omit a top-level FunDecl that nothing reachable references. Nested FunDecls are never
+    /// omitted here — see `top_level_fun_decls`.
+    fn should_omit_fun_decl(&self, name: &str) -> bool {
+        self.reachable_fun_decls_ready
+            && self.value_fn_depth == 0
+            && self.top_level_fun_decls.contains(name)
+            && !self.reachable_fun_decls.contains(name)
+    }
+
+    /// Mark top-level FunDecls reachable from module-level statements (and RustLib exports).
+    /// Everything else is dead at the import boundary: importing a package used to emit a
+    /// `Value::native` for every function in it whether called or not.
+    fn compute_reachable_fun_decls(&mut self, program: &Program) {
+        use std::collections::{HashMap, HashSet, VecDeque};
+        let mut bodies: HashMap<String, &Statement> = HashMap::new();
+        let mut decl_names: HashSet<String> = HashSet::new();
+        for s in &program.statements {
+            if let Statement::FunDecl { name, body, .. } = s {
+                let n = name.to_string();
+                decl_names.insert(n.clone());
+                bodies.insert(n, body);
+            }
+        }
+        self.top_level_fun_decls = decl_names.clone();
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut stack: VecDeque<String> = VecDeque::new();
+        let seed = |s: &Statement, decl_names: &HashSet<String>, stack: &mut VecDeque<String>| {
+            let mut ids = HashSet::new();
+            Self::collect_stmt_idents(s, &mut ids);
+            for id in ids {
+                if decl_names.contains(&id) {
+                    stack.push_back(id);
+                }
+            }
+        };
+        for s in &program.statements {
+            if matches!(s, Statement::FunDecl { .. }) {
+                continue;
+            }
+            seed(s, &decl_names, &mut stack);
+        }
+        // RustLib publishes exports as Values at end of run(); those names are live even if
+        // nothing in the module body calls them.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            for e in self.rust_lib_exports(program) {
+                if decl_names.contains(&e.local_name) {
+                    stack.push_back(e.local_name.clone());
+                }
+            }
+        }
+        while let Some(name) = stack.pop_front() {
+            if !reachable.insert(name.clone()) {
+                continue;
+            }
+            if let Some(body) = bodies.get(&name) {
+                seed(body, &decl_names, &mut stack);
+            }
+        }
+        self.reachable_fun_decls = reachable;
+        self.reachable_fun_decls_ready = true;
+    }
+
+    /// Import tax: call-only, capture-free top-level FunDecls become `fn name_bfn(args: &[Value]) -> Value`
+    /// with no `Value::native` binding. Call-only M5 / `#175` fns keep their typed free fn and only
+    /// drop the boxed twin.
+    fn setup_boxed_free_fns(&mut self, program: &Program) {
+        use std::collections::{HashMap, HashSet};
+        // RustLib publishes exports as Values — keep heap bindings for anything that may be exported.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            return;
+        }
+        let stmts = &program.statements;
+        let mut decls: HashMap<String, (&[FunParam], Option<&TypedParam>, &Statement, bool)> =
+            HashMap::new();
+        let mut all_fn_names: HashSet<String> = HashSet::new();
+        for s in stmts {
+            if let Statement::FunDecl {
+                async_,
+                name,
+                params,
+                rest_param,
+                body,
+                ..
+            } = s
+            {
+                let n = name.to_string();
+                all_fn_names.insert(n.clone());
+                decls.insert(
+                    n,
+                    (
+                        params.as_slice(),
+                        rest_param.as_ref(),
+                        body.as_ref(),
+                        *async_,
+                    ),
+                );
+            }
+        }
+        let mut module_bindings = Self::collect_module_level_binding_names(stmts);
+        for k in self.module_const_f64_arrays.keys() {
+            module_bindings.remove(k);
+        }
+        for k in self.native_numeric_globals.keys() {
+            module_bindings.remove(k);
+        }
+        for k in self.module_const_f64_cum.keys() {
+            module_bindings.remove(k);
+        }
+        for k in self.module_const_f64_aliases.keys() {
+            module_bindings.remove(k);
+        }
+
+        let mut skip_heap: HashSet<String> = HashSet::new();
+        let mut boxed_free: HashSet<String> = HashSet::new();
+
+        for (name, (params, rest, body, async_)) in &decls {
+            // Dead decls: omit entirely (no free fn, no binding).
+            if self.should_omit_fun_decl(name) {
+                continue;
+            }
+            let (calls, others) = crate::infer::fn_name_uses(stmts, name);
+            if others > 0 || calls == 0 {
+                continue;
+            }
+            // Already has a typed free twin — drop only the heap Value.
+            if self.native_fns.contains(name)
+                || self.native_vec_fns.contains_key(name)
+                || self.aggregate_fns.contains_key(name)
+            {
+                skip_heap.insert(name.clone());
+                continue;
+            }
+            if *async_ {
+                continue;
+            }
+            // v1: simple params only (no destructure / rest) — keeps emit small and sound.
+            if rest.is_some() || params.iter().any(|p| !matches!(p, FunParam::Simple(_))) {
+                continue;
+            }
+            if Self::body_reads_module_binding(body, &module_bindings) {
+                continue;
+            }
+            if !Self::body_names_only_its_own(params, body, &all_fn_names) {
+                continue;
+            }
+            boxed_free.insert(name.clone());
+        }
+
+        // Callee fixpoint: every Ident-call must target another admitted free/typed-free fn.
+        loop {
+            let mut remove = Vec::new();
+            for name in &boxed_free {
+                let Some((params, _, body, _)) = decls.get(name) else {
+                    continue;
+                };
+                if !self.bfn_body_callees_ok(body, &boxed_free, &all_fn_names, params) {
+                    remove.push(name.clone());
+                }
+            }
+            if remove.is_empty() {
+                break;
+            }
+            for n in remove {
+                boxed_free.remove(&n);
+            }
+        }
+
+        // Emit free fns (scratch + rollback on failure).
+        if !boxed_free.is_empty() {
+            let saved = std::mem::take(&mut self.output);
+            let saved_indent = self.indent;
+            self.indent = 0;
+            self.boxed_free_fns = boxed_free.clone();
+            let mut all_ok = true;
+            for s in stmts {
+                if let Statement::FunDecl {
+                    name,
+                    params,
+                    rest_param,
+                    body,
+                    span,
+                    ..
+                } = s
+                {
+                    if !boxed_free.contains(name.as_ref()) {
+                        continue;
+                    }
+                    if self
+                        .emit_boxed_free_fn(name.as_ref(), params, rest_param.as_ref(), body, *span)
+                        .is_err()
+                    {
+                        all_ok = false;
+                        break;
+                    }
+                    self.writeln("");
+                }
+            }
+            if all_ok {
+                let emitted = std::mem::take(&mut self.output);
+                self.output = saved;
+                self.indent = saved_indent;
+                self.output.push_str(&emitted);
+                skip_heap.extend(boxed_free.iter().cloned());
+            } else {
+                self.output = saved;
+                self.indent = saved_indent;
+                self.boxed_free_fns.clear();
+            }
+        }
+
+        self.skip_heap_fun_decls = skip_heap;
+    }
+
+    /// User Ident-calls in a `_bfn` body must target another `_bfn` / M5 / `#175` / `#177` fn.
+    /// Approximated via all referenced top-level FunDecl names (call-only admission already
+    /// forbids value uses, so a referenced FunDecl name is a callee).
+    fn bfn_body_callees_ok(
+        &self,
+        body: &Statement,
+        boxed_free: &std::collections::HashSet<String>,
+        all_fn_names: &std::collections::HashSet<String>,
+        params: &[FunParam],
+    ) -> bool {
+        let mut referenced = HashSet::new();
+        Self::collect_stmt_idents(body, &mut referenced);
+        let mut bound: HashSet<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
+        Self::collect_local_var_names(body, &mut bound);
+        referenced.iter().all(|n| {
+            if bound.contains(n) || !all_fn_names.contains(n) {
+                return true;
+            }
+            boxed_free.contains(n)
+                || self.native_fns.contains(n)
+                || self.native_vec_fns.contains_key(n)
+                || self.aggregate_fns.contains_key(n)
+        })
+    }
+
+    fn emit_boxed_free_fn(
+        &mut self,
+        name: &str,
+        params: &[FunParam],
+        rest_param: Option<&TypedParam>,
+        body: &Statement,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let _ = (rest_param, span); // v1: simple params only; rest refused at admission
+        let name_str = Self::escape_ident(name);
+        self.writeln(&format!("fn {}_bfn(args: &[Value]) -> Value {{", name_str));
+        self.value_fn_depth += 1;
+        let saved_try = self.try_closure_depth;
+        self.try_closure_depth = 0;
+        self.indent += 1;
+        if crate::native_recur_guard_enabled() {
+            self.writeln(
+                "let Some(_tish_depth) = tishlang_runtime::enter_call_guarded() else { return Value::Null; };",
+            );
+        }
+        self.type_context.push_fun_param_scope(params, None);
+        for (i, p) in params.iter().enumerate() {
+            if let FunParam::Simple(tp) = p {
+                self.writeln(&format!(
+                    "{} {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                    Self::mut_kw_for(tp.name.as_ref(), "let mut"),
+                    Self::escape_ident(tp.name.as_ref()),
+                    i
+                ));
+            }
+        }
+        let param_names: Vec<String> = params
+            .iter()
+            .flat_map(|p| p.bound_names())
+            .map(|n| n.to_string())
+            .collect();
+        self.outer_params_stack.push(param_names);
+        self.async_context_stack.push(false);
+        self.function_scope_stack.push(Vec::new());
+        self.outer_vars_stack.push(Vec::new());
+        self.rc_cell_storage_scopes
+            .push(std::collections::HashSet::new());
+        self.demote_scope_stack.push(name.to_string());
+        let body_res = if let Statement::Block { statements, .. } = body {
+            let mut ok = Ok(());
+            for s in statements {
+                if let Err(e) = self.emit_statement(s) {
+                    ok = Err(e);
+                    break;
+                }
+            }
+            ok
+        } else {
+            self.emit_statement(body)
+        };
+        self.demote_scope_stack.pop();
+        self.function_scope_stack.pop();
+        self.outer_vars_stack.pop();
+        self.rc_cell_storage_scopes.pop();
+        self.async_context_stack.pop();
+        self.outer_params_stack.pop();
+        self.type_context.pop_scope();
+        if let Err(e) = body_res {
+            self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+            self.try_closure_depth = saved_try;
+            return Err(e);
+        }
+        self.writeln("Value::Null");
+        self.indent -= 1;
+        self.writeln("}");
+        self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
+        self.try_closure_depth = saved_try;
+        Ok(())
     }
 
 
@@ -3116,6 +3460,7 @@ impl Codegen {
         self.is_async = program_uses_async(program);
         self.program_has_jsx = tishlang_ui::jsx::program_contains_jsx(program);
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
+        self.compute_reachable_fun_decls(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
         self.collect_extern_fns(program);
         if self.emit_mode == crate::NativeEmitMode::Gba {
@@ -3419,6 +3764,9 @@ impl Codegen {
             self.inline_fns = Self::collect_inline_fns(program);
             self.setup_native_vec_fns(program);
         }
+        // Import tax / #583: call-only capture-free FunDecls → `fn name_bfn` (no Value::native).
+        // Also drop the boxed twin for call-only M5 / native-vec fns that already have a free fn.
+        self.setup_boxed_free_fns(program);
         // #320 (default-on via native_opts_enabled): normal fns taking read-only `number[]` params get
         // those params unboxed to native owned `Vec<f64>` (boxed body + boxed return otherwise), so
         // `seq[i+j]` indexes natively. The SAME pure detection infer reads to keep the caller's array
@@ -3807,6 +4155,10 @@ impl Codegen {
             // #177: functions promoted to native aggregate free fns (`<name>_agg`) have their
             // boxed closure + cell suppressed — no boxed value exists to back-patch.
             if self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(func_name) {
+                continue;
+            }
+            // Import tax: call-only free fns / call-only typed twins have no heap Value.
+            if self.skip_heap_fun_decls.contains(func_name) {
                 continue;
             }
             let escaped = Self::escape_ident(func_name);
@@ -7059,6 +7411,16 @@ impl Codegen {
                 span,
                 ..
             } => {
+                // Import tax: a top-level function that nothing reachable calls (or stores as a
+                // value) must not become a heap `Value::native` closure. The linker cannot strip
+                // those — the cost is the binding at module init, not the code.
+                if self.should_omit_fun_decl(name.as_ref()) {
+                    return Ok(());
+                }
+                // Call-only free fn / call-only typed twin: no Value::native binding.
+                if self.skip_heap_fun_decls.contains(name.as_ref()) {
+                    return Ok(());
+                }
                 // #177: this function was de-virtualized into a native aggregate free fn
                 // (`<name>_agg`, emitted before `run()`); all call sites were routed there.
                 // Skip the boxed closure entirely — its body now references unboxed structs
@@ -9509,6 +9871,27 @@ impl Codegen {
                                 format!("Value::Number({})", call)
                             });
                         }
+                    }
+                }
+
+                // Import tax: call-only free fn → direct `name_bfn(&[…])` (no Value::native callee).
+                if let Expr::Ident { name: fname, .. } = callee.as_ref() {
+                    if self.boxed_free_fns.contains(fname.as_ref()) {
+                        let bfn = format!("{}_bfn", Self::escape_ident(fname.as_ref()));
+                        let has_spread = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                        if has_spread {
+                            let args_code = self.emit_call_args(args)?;
+                            return Ok(format!("{}({}.as_slice())", bfn, args_code));
+                        }
+                        let arg_exprs: Result<Vec<_>, _> =
+                            args.iter().map(|a| self.emit_call_arg(a)).collect();
+                        let arg_exprs = arg_exprs?;
+                        let args_vec = arg_exprs
+                            .iter()
+                            .map(|a| format!("{}.clone()", a))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Ok(format!("{}(&[{}])", bfn, args_vec));
                     }
                 }
 
@@ -12560,6 +12943,14 @@ impl Codegen {
 
         // Try to emit array literals directly as Vec<T>
         if let (RustType::Vec(inner_type), Expr::Array { elements, .. }) = (target_type, expr) {
+            // Empty `[]` must carry the element type: after import-tax DCE, a module
+            // `let LN: LNode[] = []` can survive with zero uses, and bare `vec![]` is E0282.
+            if elements.is_empty() {
+                return Ok(format!(
+                    "Vec::<{}>::new()",
+                    inner_type.to_rust_type_str()
+                ));
+            }
             let mut items = Vec::new();
             for elem in elements {
                 match elem {
