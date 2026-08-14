@@ -1137,6 +1137,11 @@ pub(crate) struct Codegen {
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
+    /// #654 — top-level scalar `const`/`let` with a literal init that is never reassigned.
+    /// Only these may be captured by value (`_capt`) instead of a `VmRef` cell. Aggregates are
+    /// excluded on purpose: a typed `Vec` / struct clone at closure creation is a stale snapshot
+    /// when another function mutates the module binding.
+    immutable_scalar_consts: std::collections::HashSet<String>,
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
     /// for direct indexing from native fns (fasta `codes`/`probs`).
     module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
@@ -1466,6 +1471,7 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
+            immutable_scalar_consts: std::collections::HashSet::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
             arrays_passed_to_calls: std::collections::HashSet::new(),
@@ -3630,6 +3636,8 @@ impl Codegen {
             let gba = self.emit_mode == crate::NativeEmitMode::Gba;
             self.native_numeric_globals =
                 Self::collect_native_numeric_globals(&program.statements);
+            self.immutable_scalar_consts =
+                Self::collect_immutable_scalar_consts(&program.statements);
             if !self.native_numeric_globals.is_empty() {
                 if gba {
                     self.emit_native_numeric_global_singlecore()?;
@@ -7516,22 +7524,26 @@ impl Codegen {
                     .filter(|v| assigned_in_body.contains(*v) || self.rc_cell_storage_contains(v))
                     .cloned()
                     .collect();
+                // #654 — only proven immutable SCALAR literals may skip the cell. A broad
+                // "not assigned in this body" gate snapshots typed Vec/struct module bindings by
+                // value at closure creation; another function's push/mutation then leaves every
+                // capture holding a stale copy (blank-screen class failure on large ROMs).
                 let read_only_outer_vars: Vec<String> = outer_vars
                     .iter()
-                    .filter(|v| !assigned_in_body.contains(*v) && !self.rc_cell_storage_contains(v))
+                    .filter(|v| {
+                        !assigned_in_body.contains(*v)
+                            && !self.rc_cell_storage_contains(v)
+                            && self.immutable_scalar_consts.contains(*v)
+                    })
                     .cloned()
                     .collect();
 
                 // Rebind outer vars to Rc<RefCell<>> with _cell suffix.
                 // If outer scope already has the var as RefCell, just clone it.
                 //
-                // #654: a READ-ONLY outer var is never assigned anywhere in the defining scope
-                // (that is exactly what keeps it out of `rc_cell_storage`), so the cell can never
-                // change and the indirection buys nothing — it cost a `VmRef` allocation per
-                // closure plus a `RefCell` borrow on EVERY call, to re-fetch a value that was
-                // already fixed. Snapshot it by value instead. This is invisible in the source: a
-                // fn that mentions six named constants was measurably slower than one that inlined
-                // the same six literals, which pushed authors toward magic numbers.
+                // #654: an immutable scalar const pays a VmRef alloc + per-call borrow/clone for a
+                // value fixed at compile time. Snapshot those by value. Everything else keeps a
+                // cell so module aggregates stay live.
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     if self.rc_cell_storage_contains(outer_var) {
@@ -18842,6 +18854,115 @@ impl Codegen {
 
     /// #176 — classify top-level `let x = <number-literal>` bindings whose every use is a numeric
     /// read or a whole-binding assign with a numeric-shaped RHS (fasta `seed`).
+    /// #654 — top-level bindings whose init is a scalar literal (or an alias of one) and that
+    /// are never assigned anywhere in the program. These are the only names safe to capture by
+    /// value (`_capt`) instead of through a `VmRef` cell (typed aggregates clone stale).
+    fn collect_immutable_scalar_consts(stmts: &[Statement]) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut assigned = HashSet::new();
+        for s in stmts {
+            Self::collect_assigned_idents_in_stmt(s, &mut assigned);
+        }
+        let mut out = HashSet::new();
+        Self::collect_immutable_scalar_literal_consts_in(stmts, &assigned, &mut out);
+        // Import aliases lower to `const local = mangled`; follow Ident chains to completion.
+        let mut aliases: Vec<(String, String)> = Vec::new();
+        Self::collect_top_level_ident_aliases(stmts, &mut aliases);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (name, src) in &aliases {
+                if assigned.contains(name) || out.contains(name) {
+                    continue;
+                }
+                if out.contains(src) {
+                    out.insert(name.clone());
+                    changed = true;
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_immutable_scalar_literal_consts_in(
+        stmts: &[Statement],
+        assigned: &std::collections::HashSet<String>,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl { name, init, .. } => {
+                    if assigned.contains(name.as_ref()) {
+                        continue;
+                    }
+                    if let Some(Expr::Literal {
+                        value:
+                            Literal::Number(_)
+                            | Literal::Bool(_)
+                            | Literal::String(_)
+                            | Literal::Null,
+                        ..
+                    }) = init.as_ref()
+                    {
+                        out.insert(name.to_string());
+                    }
+                }
+                Statement::Export { declaration, .. } => {
+                    if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                        if let Statement::VarDecl { name, init, .. } = inner.as_ref() {
+                            if assigned.contains(name.as_ref()) {
+                                continue;
+                            }
+                            if let Some(Expr::Literal {
+                                value:
+                                    Literal::Number(_)
+                                    | Literal::Bool(_)
+                                    | Literal::String(_)
+                                    | Literal::Null,
+                                ..
+                            }) = init.as_ref()
+                            {
+                                out.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                Statement::Multi { statements, .. } => {
+                    Self::collect_immutable_scalar_literal_consts_in(statements, assigned, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_top_level_ident_aliases(stmts: &[Statement], out: &mut Vec<(String, String)>) {
+        for s in stmts {
+            match s {
+                Statement::VarDecl {
+                    name,
+                    init: Some(Expr::Ident { name: src, .. }),
+                    ..
+                } => out.push((name.to_string(), src.to_string())),
+                Statement::Export { declaration, .. } => {
+                    if let tishlang_ast::ExportDeclaration::Named(inner) = declaration.as_ref() {
+                        if let Statement::VarDecl {
+                            name,
+                            init: Some(Expr::Ident { name: src, .. }),
+                            ..
+                        } = inner.as_ref()
+                        {
+                            out.push((name.to_string(), src.to_string()));
+                        }
+                    }
+                }
+                Statement::Multi { statements, .. } => {
+                    Self::collect_top_level_ident_aliases(statements, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn collect_native_numeric_globals(stmts: &[Statement]) -> HashMap<String, f64> {
         use std::collections::{HashMap, HashSet};
         let mut candidates: HashMap<String, f64> = HashMap::new();
