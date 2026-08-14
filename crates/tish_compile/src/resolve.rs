@@ -1406,19 +1406,29 @@ fn merge_push(
 fn collect_module_top_level_names(
     stmts: &[Statement],
     decls: &mut HashSet<String>,
+    var_decls: &mut HashSet<String>,
     exported: &mut HashSet<String>,
     imports: &mut HashSet<String>,
 ) {
     for stmt in stmts {
         match stmt {
-            Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+            Statement::VarDecl { name, .. } => {
+                decls.insert(name.to_string());
+                var_decls.insert(name.to_string());
+            }
+            Statement::FunDecl { name, .. } => {
                 decls.insert(name.to_string());
             }
             Statement::VarDeclDestructure { pattern, .. } => {
-                collect_destructure_names(pattern, decls);
+                let mut names = HashSet::new();
+                collect_destructure_names(pattern, &mut names);
+                for n in &names {
+                    decls.insert(n.clone());
+                    var_decls.insert(n.clone());
+                }
             }
             Statement::Multi { statements, .. } => {
-                collect_module_top_level_names(statements, decls, exported, imports);
+                collect_module_top_level_names(statements, decls, var_decls, exported, imports);
             }
             Statement::Export { declaration, .. } => {
                 // #653/#415: a LOCAL named export (`export { A }`, no `from`) exports an
@@ -1439,7 +1449,12 @@ fn collect_module_top_level_names(
                 }
                 if let ExportDeclaration::Named(inner) = declaration.as_ref() {
                     match inner.as_ref() {
-                        Statement::VarDecl { name, .. } | Statement::FunDecl { name, .. } => {
+                        Statement::VarDecl { name, .. } => {
+                            decls.insert(name.to_string());
+                            var_decls.insert(name.to_string());
+                            exported.insert(name.to_string());
+                        }
+                        Statement::FunDecl { name, .. } => {
                             decls.insert(name.to_string());
                             exported.insert(name.to_string());
                         }
@@ -1448,6 +1463,7 @@ fn collect_module_top_level_names(
                             collect_destructure_names(pattern, &mut names);
                             for n in names {
                                 decls.insert(n.clone());
+                                var_decls.insert(n.clone());
                                 exported.insert(n);
                             }
                         }
@@ -1508,8 +1524,15 @@ fn collect_destructure_names(pattern: &DestructPattern, out: &mut HashSet<String
 /// before `const _greet = greet` ran, and a barrel that re-wrapped its own import recursed until the
 /// stack blew.
 ///
-/// The ENTRY module is deliberately excluded: its exports are the bundle's public surface, so
-/// renaming them would change the API the caller sees.
+/// #653 goes further than collision-only renaming for CONST/LET bindings: every non-entry
+/// top-level variable is uniquely mangled (`name__m{i}`) before flatten. That matches the
+/// issue's preferred "uniquely-mangled items" outcome and closes the gap where a missed export
+/// form (local `export { A }`, generated sheet headers, …) still left two same-named consts in
+/// one Rust block — later shadowing earlier, host interp correct, native wrong. Functions keep
+/// collision-only isolation (#587) so ordinary unique exports are not churned.
+///
+/// The ENTRY module is deliberately excluded from routine var-mangling: its exports are the
+/// bundle's public surface. Private entry names still rename on collision with another module (#97).
 fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<HashMap<String, String>> {
     let n = modules.len();
     let mut export_renames: Vec<HashMap<String, String>> = vec![HashMap::new(); n];
@@ -1517,6 +1540,7 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<Has
         return export_renames; // a single module cannot collide with another
     }
     let mut decls: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    let mut var_decls: Vec<HashSet<String>> = vec![HashSet::new(); n];
     let mut exported: Vec<HashSet<String>> = vec![HashSet::new(); n];
     // `occupancy[i]` = every top-level name module i contributes (decls ∪ import bindings).
     let mut occupancy: Vec<HashSet<String>> = vec![HashSet::new(); n];
@@ -1525,6 +1549,7 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<Has
         collect_module_top_level_names(
             &m.program.statements,
             &mut decls[i],
+            &mut var_decls[i],
             &mut exported[i],
             &mut imports,
         );
@@ -1537,11 +1562,7 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<Has
             *count.entry(name.as_str()).or_insert(0) += 1;
         }
     }
-    // #587: for EXPORTED names the question is different, and `occupancy` answers the wrong one.
-    // It counts import bindings, so a dep's exported `greet` looks like it collides with the
-    // importer's binding of that same `greet` — but those are one thing, not two, and renaming on
-    // that basis breaks nothing yet churns every ordinary import. A real collision is another module
-    // DECLARING the name, so exported renames key off declarations only.
+    // Declaration count (not occupancy) — used for EXPORTED function collisions (#587).
     let mut decl_count: HashMap<&str, usize> = HashMap::new();
     for d in &decls {
         for name in d {
@@ -1552,13 +1573,23 @@ fn isolate_private_top_level_bindings(modules: &mut [ResolvedModule]) -> Vec<Has
         let is_entry = i + 1 == n; // the entry module is last — its exports are the public surface
         let mut renames: HashMap<String, Arc<str>> = HashMap::new();
         for name in &decls[i] {
+            let is_var = var_decls[i].contains(name);
+            // #653 — always uniquely-mangle NON-ENTRY top-level const/let bindings. The issue's
+            // silent wrong values were scalar consts flattened into one Rust block; functions keep
+            // the collision-only policy below (#587 / barrels).
+            if !is_entry && is_var {
+                let renamed = format!("{name}__m{i}");
+                if exported[i].contains(name) {
+                    export_renames[i].insert(renamed.clone(), name.clone());
+                }
+                renames.insert(name.clone(), Arc::from(renamed));
+                continue;
+            }
+            // Collision-only path: private names, and exported FUNCTIONS in non-entry modules.
             if count.get(name.as_str()).copied().unwrap_or(0) <= 1 {
-                continue; // no collision — leave it exactly as it is (zero blast radius)
+                continue;
             }
             if exported[i].contains(name) {
-                // #587: an exported collision in a NON-ENTRY module is renamed too, and the new
-                // symbol is recorded so `module_exports` can still answer to the original name.
-                // Gated on DECLARATION count — see the note above.
                 if is_entry || decl_count.get(name.as_str()).copied().unwrap_or(0) <= 1 {
                     continue;
                 }
