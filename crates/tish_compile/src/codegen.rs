@@ -1166,6 +1166,9 @@ pub(crate) struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// Names ever used AS A VALUE (see [`Self::collect_value_used_expr`]). A `native_fns` member
+    /// absent from this set needs no boxed `Value::native` wrapper in `run()`.
+    value_used_names: std::collections::HashSet<String>,
     /// Set while emitting the body of an i32-ABI native fn, so `return` coerces to `i32`.
     native_fn_abi_i32: bool,
     /// The subset of `native_fns` emitted with an `fn(i32, ..) -> i32` signature instead of the
@@ -1447,6 +1450,7 @@ impl Codegen {
             collection_instance_locals: std::collections::HashSet::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
+            value_used_names: std::collections::HashSet::new(),
             native_fns_i32: std::collections::HashSet::new(),
             native_fn_abi_i32: false,
             native_fn_body_emit: false,
@@ -3324,6 +3328,12 @@ impl Codegen {
                 &global_names,
                 &native_vec_names,
             );
+            // Which names are ever used as a VALUE rather than only called. Drives the
+            // boxed-wrapper elision at `Statement::FunDecl` — see `collect_value_used_expr`.
+            self.value_used_names.clear();
+            for s in &program.statements {
+                Self::collect_value_used_stmt(s, &mut self.value_used_names);
+            }
             // Which of the survivors carry the all-`i32` signature. Computed AFTER the fixpoint,
             // so a function the proof rejected never reaches the i32 ABI either.
             self.native_fns_i32 = program
@@ -7037,6 +7047,17 @@ impl Codegen {
                 {
                     return Ok(());
                 }
+                // Same idea, wider: this fn already has a native lowering (`<name>_native`) that
+                // every direct call routes to, and nothing in the program uses the NAME as a value
+                // — so the boxed `Value::native` wrapper is dead weight. It is not free weight: the
+                // wrapper and its cell are permanent slots in the enclosing frame, and for module
+                // fns that frame is `run()`, which on GBA holds every one of them at once against a
+                // 29 KB IWRAM stack. Skipping it is what makes "type your functions" actually pay.
+                if self.native_fns.contains(name.as_ref())
+                    && !self.value_used_names.contains(name.as_ref())
+                {
+                    return Ok(());
+                }
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
                 let name_raw = name.as_ref();
@@ -10365,6 +10386,122 @@ impl Codegen {
             ArrowBody::Block(stmt) => Self::collect_stmt_idents(stmt, &mut idents),
         }
         idents
+    }
+
+    /// Names used AS A VALUE — i.e. everywhere except the callee slot of a direct `f(..)` call.
+    /// A module fn that is only ever called directly needs no boxed `Value::native` wrapper: the
+    /// native lowering (`f_native`) already serves every call site, and the wrapper is a permanent
+    /// slot in `run()`'s stack frame. On GBA `run()` holds every module fn at once — 605 of them in
+    /// `examples/ffta` — against a 29 KB IWRAM stack, so dropping the unused wrappers is the
+    /// difference between a game fitting and overwriting the audio mixer.
+    ///
+    /// ⚠️ CONSERVATIVE BY CONSTRUCTION. Anything this does not structurally recurse through falls
+    /// back to [`Self::collect_expr_idents`], which marks every name inside as value-used — that
+    /// only forfeits the optimisation, it never removes a wrapper something needs. And if it ever
+    /// were wrong, the generated Rust names a binding that does not exist: a loud `E0425` at build
+    /// time, not a silently wrong ROM.
+    fn collect_value_used_expr(expr: &Expr, idents: &mut HashSet<String>) {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                // The callee slot of a direct call is NOT a value use.
+                if !matches!(&**callee, Expr::Ident { .. }) {
+                    Self::collect_value_used_expr(callee, idents);
+                }
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_value_used_expr(e, idents)
+                        }
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_value_used_expr(left, idents);
+                Self::collect_value_used_expr(right, idents);
+            }
+            Expr::Unary { operand, .. } => Self::collect_value_used_expr(operand, idents),
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_expr(then_branch, idents);
+                Self::collect_value_used_expr(else_branch, idents);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_value_used_expr(object, idents);
+                if let MemberProp::Expr(e) = prop {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_value_used_expr(object, idents);
+                Self::collect_value_used_expr(index, idents);
+            }
+            other => Self::collect_expr_idents(other, idents),
+        }
+    }
+
+    /// Statement-level driver for [`Self::collect_value_used_expr`]. Mirrors the shape of
+    /// [`Self::collect_stmt_idents`]; unknown statement forms fall back to it (conservative).
+    fn collect_value_used_stmt(stmt: &Statement, idents: &mut HashSet<String>) {
+        match stmt {
+            Statement::ExprStmt { expr, .. } => Self::collect_value_used_expr(expr, idents),
+            Statement::VarDecl { init, .. } => {
+                if let Some(e) = init {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    Self::collect_value_used_stmt(s, idents);
+                }
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_stmt(then_branch, idents);
+                if let Some(s) = else_branch {
+                    Self::collect_value_used_stmt(s, idents);
+                }
+            }
+            Statement::While { cond, body, .. } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_stmt(body, idents);
+            }
+            Statement::FunDecl { body, .. } => Self::collect_value_used_stmt(body, idents),
+            // ⚠️ An EXPORTED fn must keep its boxed wrapper: the module namespace hands it out as
+            // a `Value`, and an importer may do anything with it. Mark the exported name itself as
+            // value-used, then walk the declaration normally.
+            Statement::Export { declaration, .. } => match &**declaration {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
+                    if let Statement::FunDecl { name, .. } = &**inner {
+                        idents.insert(name.to_string());
+                    }
+                    Self::collect_value_used_stmt(inner, idents);
+                }
+                tishlang_ast::ExportDeclaration::Default(e) => Self::collect_value_used_expr(e, idents),
+                tishlang_ast::ExportDeclaration::ReExport { specifiers, .. } => {
+                    for sp in specifiers {
+                        if let tishlang_ast::ImportSpecifier::Named { name, .. } = sp {
+                            idents.insert(name.to_string());
+                        }
+                    }
+                }
+            },
+            other => Self::collect_stmt_idents(other, idents),
+        }
     }
 
     fn collect_expr_idents(expr: &Expr, idents: &mut HashSet<String>) {
