@@ -1166,6 +1166,9 @@ pub(crate) struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// Declared param types of each `native_fns` member, so a call site knows which argument slots
+    /// are `&TishStruct_…` (passed by reference) rather than a coerced numeric.
+    native_fn_param_types: std::collections::HashMap<String, Vec<RustType>>,
     /// Names ever used AS A VALUE (see [`Self::collect_value_used_expr`]). A `native_fns` member
     /// absent from this set needs no boxed `Value::native` wrapper in `run()`.
     value_used_names: std::collections::HashSet<String>,
@@ -1451,6 +1454,7 @@ impl Codegen {
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             value_used_names: std::collections::HashSet::new(),
+            native_fn_param_types: std::collections::HashMap::new(),
             native_fns_i32: std::collections::HashSet::new(),
             native_fn_abi_i32: false,
             native_fn_body_emit: false,
@@ -3327,7 +3331,37 @@ impl Codegen {
                 &program.statements,
                 &global_names,
                 &native_vec_names,
+                &self.type_aliases,
             );
+            self.native_fn_param_types = program
+                .statements
+                .iter()
+                .filter_map(|st| match st {
+                    Statement::FunDecl { name, params, .. }
+                        if self.native_fns.contains(name.as_ref()) =>
+                    {
+                        let tys = params
+                            .iter()
+                            .filter_map(|p| match p {
+                                FunParam::Simple(tp) => Some(
+                                    tp.type_ann
+                                        .as_ref()
+                                        .map(|a| {
+                                            RustType::from_annotation_with_aliases(
+                                                a,
+                                                &self.type_aliases,
+                                            )
+                                        })
+                                        .unwrap_or(RustType::F64),
+                                ),
+                                _ => None,
+                            })
+                            .collect();
+                        Some((name.to_string(), tys))
+                    }
+                    _ => None,
+                })
+                .collect();
             // Which names are ever used as a VALUE rather than only called. Drives the
             // boxed-wrapper elision at `Statement::FunDecl` — see `collect_value_used_expr`.
             self.value_used_names.clear();
@@ -3342,7 +3376,19 @@ impl Codegen {
                 .filter_map(|s| match s {
                     Statement::FunDecl { name, params, return_type, .. }
                         if self.native_fns.contains(name.as_ref())
-                            && Self::fn_sig_all_i32(params, return_type) =>
+                            && (Self::fn_sig_all_i32(params, return_type)
+                                // A struct-param fn: its struct slot is typed on its own, so
+                                // `fn_sig_all_i32` can never hold. Take the i32 return ABI when the
+                                // return is `: i32` and every NON-struct param is `: i32` too —
+                                // otherwise the body computes i32 while the signature says f64.
+                                || (return_type.as_ref().is_some_and(Self::ann_is_i32)
+                                    && params.iter().any(|p| matches!(p, FunParam::Simple(tp)
+                                        if tp.type_ann.as_ref().is_some_and(|a|
+                                            Self::ann_is_all_numeric_struct(a, &self.type_aliases))))
+                                    && params.iter().all(|p| matches!(p, FunParam::Simple(tp)
+                                        if tp.type_ann.as_ref().is_some_and(|a|
+                                            Self::ann_is_i32(a)
+                                                || Self::ann_is_all_numeric_struct(a, &self.type_aliases)))))) =>
                     {
                         Some(name.to_string())
                     }
@@ -9412,12 +9458,28 @@ impl Codegen {
                         let i32_abi = self.native_fns_i32.contains(fname.as_ref());
                         let want =
                             if i32_abi { RustType::I32 } else { RustType::F64 };
+                        let ptys = self.native_fn_param_types.get(fname.as_ref()).cloned();
                         let mut argc: Vec<String> = Vec::with_capacity(args.len());
                         let mut ok = true;
-                        for a in args {
+                        for (i, a) in args.iter().enumerate() {
                             if let CallArg::Expr(e) = a {
+                                // A struct slot takes a shared reference to the caller's struct;
+                                // coercing it to a number would be nonsense (and would not compile).
+                                let is_struct = matches!(
+                                    ptys.as_ref().and_then(|v| v.get(i)),
+                                    Some(RustType::Named { .. })
+                                );
                                 let (ac, at) = self.emit_typed_expr(e)?;
-                                argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                if is_struct {
+                                    if matches!(at, RustType::Named { .. }) {
+                                        argc.push(format!("&{}", ac));
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                } else {
+                                    argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                }
                             } else {
                                 ok = false;
                                 break;
@@ -19359,6 +19421,7 @@ impl Codegen {
         statements: &[Statement],
         globals: &std::collections::HashSet<String>,
         native_vec_names: &std::collections::HashSet<String>,
+        aliases: &std::collections::HashMap<String, RustType>,
     ) -> std::collections::HashSet<String> {
         use std::collections::HashSet;
         let mut cand: HashSet<String> = HashSet::new();
@@ -19377,7 +19440,10 @@ impl Codegen {
                 let params_ok = params.iter().all(|p| {
                     matches!(p, FunParam::Simple(tp)
                         if tp.default.is_none()
-                            && tp.type_ann.as_ref().map_or(true, Self::ann_is_number))
+                            && tp.type_ann.as_ref().map_or(true, |a| {
+                                Self::ann_is_number(a)
+                                    || Self::ann_is_all_numeric_struct(a, aliases)
+                            }))
                 });
                 // Return: an annotated `: number`, OR unannotated with all-numeric returns
                 // (verified in the fixpoint via `returns_numeric`), so the native `-> f64` holds.
@@ -19390,7 +19456,18 @@ impl Codegen {
                 // still has to prove the body native-safe and every return numeric — the annotation
                 // never decides that on its own (see `liar` in the issue).
                 let i32_ok = Self::fn_sig_all_i32(params, return_type);
-                let (params_ok, ret_ok) = (params_ok || i32_ok, ret_ok || i32_ok);
+                // A struct-param fn can never satisfy `fn_sig_all_i32` (its struct slot is not an
+                // `i32`), so an `: i32` return would reject it even though the return is perfectly
+                // native. Accept an i32 return for those; the f64 ABI carries it, and the existing
+                // all-i32 fast path is untouched for everyone else.
+                let has_struct_param = params.iter().any(|p| {
+                    matches!(p, FunParam::Simple(tp)
+                        if tp.type_ann.as_ref().is_some_and(|a| Self::ann_is_all_numeric_struct(a, aliases)))
+                });
+                let ret_ok = ret_ok
+                    || i32_ok
+                    || (has_struct_param && return_type.as_ref().is_some_and(Self::ann_is_i32));
+                let params_ok = params_ok || i32_ok;
                 // #320: 0-param numeric fns (e.g. k_nucleotide's `nextBase()` — mutates a numeric
                 // global, returns number) are eligible too; the fixpoint below still proves the body
                 // native-safe + all-numeric-returns, so `fn name_native() -> f64` is sound.
@@ -19444,6 +19521,20 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
+                let sparams: HashSet<String> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => tp.type_ann.as_ref().and_then(|a| {
+                            Self::ann_is_all_numeric_struct(a, aliases)
+                                .then(|| tp.name.to_string())
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                Self::struct_params_with(|s| {
+                    s.clear();
+                    s.extend(sparams.iter().cloned());
+                });
                 let nums = Self::native_fn_numeric_locals(
                     body,
                     &pnames,
@@ -19451,9 +19542,10 @@ impl Codegen {
                     &cand,
                     native_vec_names,
                 );
-                if !Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names)
-                    || !Self::returns_numeric(body, &pnames, &cand, globals, &nums)
-                {
+                let ok = Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names)
+                    && Self::returns_numeric(body, &pnames, &cand, globals, &nums);
+                Self::struct_params_with(|s| s.clear());
+                if !ok {
                     remove.push(name.to_string());
                 }
             }
@@ -19649,6 +19741,55 @@ impl Codegen {
     }
 
     /// Numeric locals in an M5-eligible fn body (params + fixpoint literal/copy seeds).
+    /// The current function's params that are annotated with a type alias whose fields are ALL
+    /// numeric, so `p.field` is a machine-word load. Set for the duration of one function's
+    /// native-safety proof (`collect_native_fns`) and read by the proof's leaf predicates.
+    ///
+    /// A side-channel rather than a threaded argument on purpose: the proof is five mutually
+    /// recursive static helpers, and widening all of their signatures to carry a set that only two
+    /// leaves consult is a large diff for no added safety. Codegen is single-threaded; the set is
+    /// cleared after each function.
+    ///
+    /// ⚠️ ALL-NUMERIC FIELDS IS THE INVARIANT THAT MAKES A BARE NAME SET SOUND. Admit a struct with
+    /// a `string` field and `p.name` would be "numeric" here and emit Rust that does not compile.
+    /// The gate in `collect_native_fns` enforces it; do not relax one without the other.
+    fn struct_params_with<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R {
+        thread_local! {
+            static STRUCT_PARAMS: std::cell::RefCell<std::collections::HashSet<String>> =
+                std::cell::RefCell::new(std::collections::HashSet::new());
+        }
+        STRUCT_PARAMS.with(|c| f(&mut c.borrow_mut()))
+    }
+
+    /// `p.field` where `p` is one of [`Self::struct_params_with`]'s names.
+    fn is_struct_param_field(e: &Expr) -> bool {
+        let Expr::Member { object, prop, .. } = e else {
+            return false;
+        };
+        if !matches!(prop, MemberProp::Name { .. }) {
+            return false;
+        }
+        let Expr::Ident { name, .. } = object.as_ref() else {
+            return false;
+        };
+        Self::struct_params_with(|s| s.contains(name.as_ref()))
+    }
+
+    /// Every field of this annotation's aliased struct is a native NUMBER (the invariant above).
+    fn ann_is_all_numeric_struct(
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, RustType>,
+    ) -> bool {
+        matches!(
+            RustType::from_annotation_with_aliases(ann, aliases),
+            RustType::Named { ref fields, .. }
+                if !fields.is_empty()
+                    && fields.iter().all(|(_, t)| {
+                        matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int()
+                    })
+        )
+    }
+
     fn native_fn_numeric_locals(
         body: &Statement,
         params: &HashSet<String>,
@@ -19813,6 +19954,13 @@ impl Codegen {
         nums: &HashSet<String>,
         native_vec_names: &std::collections::HashSet<String>,
     ) -> bool {
+        // A field read off an all-numeric struct param is a plain numeric load — `p.x` on a
+        // `&TishStruct_P` is a machine word, not a boxed property lookup. Without this the proof
+        // rejects every object-taking fn, which is why typing a game's functions never produced a
+        // native lowering. See `STRUCT_PARAMS`.
+        if Self::is_struct_param_field(expr) {
+            return true;
+        }
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
             Expr::Ident { name, .. } => {
@@ -19947,6 +20095,10 @@ impl Codegen {
         globals: &std::collections::HashSet<String>,
         nums: &HashSet<String>,
     ) -> bool {
+        // `p.field` on an all-numeric struct param IS a number — see `struct_params_with`.
+        if Self::is_struct_param_field(e) {
+            return true;
+        }
         match e {
             Expr::Literal { value: Literal::Number(_), .. } => true,
             Expr::Ident { name, .. } => {
@@ -20192,12 +20344,28 @@ impl Codegen {
                 }
                 let i32_abi = self.native_fns_i32.contains(name.as_ref());
                 let abi = if i32_abi { "i32" } else { "f64" };
+                // Per-parameter type. A struct param lowers to `&TishStruct_<alias>` — one pointer,
+                // no boxing, and `p.field` becomes a machine-word load. Numeric params keep the
+                // single f64/i32 ABI. `mut` only on the numerics: a shared reference is not rebound.
                 let plist: Vec<String> = params
                     .iter()
                     .filter_map(|p| match p {
-                        FunParam::Simple(tp) => {
-                            Some(format!("mut {}: {}", Self::escape_ident(tp.name.as_ref()), abi))
-                        }
+                        FunParam::Simple(tp) => Some(
+                            match tp.type_ann.as_ref().map(|a| {
+                                RustType::from_annotation_with_aliases(a, &self.type_aliases)
+                            }) {
+                                Some(RustType::Named { name: sname, .. }) => format!(
+                                    "{}: &{}",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    crate::types::named_struct_ident(&sname)
+                                ),
+                                _ => format!(
+                                    "mut {}: {}",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    abi
+                                ),
+                            },
+                        ),
                         _ => None,
                     })
                     .collect();
@@ -20216,10 +20384,13 @@ impl Codegen {
                 self.type_context.push_scope();
                 for p in params {
                     if let FunParam::Simple(tp) = p {
-                        self.type_context.define(
-                            tp.name.as_ref(),
-                            if i32_abi { RustType::I32 } else { RustType::F64 },
-                        );
+                        let ty = match tp.type_ann.as_ref().map(|a| {
+                            RustType::from_annotation_with_aliases(a, &self.type_aliases)
+                        }) {
+                            Some(named @ RustType::Named { .. }) => named,
+                            _ => if i32_abi { RustType::I32 } else { RustType::F64 },
+                        };
+                        self.type_context.define(tp.name.as_ref(), ty);
                     }
                 }
                 let copy_suffix = if copy_idx == 0 { String::new() } else { format!("_r{}", copy_idx) };
@@ -26262,10 +26433,27 @@ impl Codegen {
                         };
                         let mut argc: Vec<String> = Vec::with_capacity(args.len());
                         let mut ok = true;
-                        for a in args {
+                        for (idx, a) in args.iter().enumerate() {
                             if let CallArg::Expr(e) = a {
+                                // A struct slot takes `&caller_struct`; coercing it to a number
+                                // would not compile. Mirrors the boxed-context call site.
+                                let is_struct = matches!(
+                                    self.native_fn_param_types
+                                        .get(fname.as_ref())
+                                        .and_then(|v| v.get(idx)),
+                                    Some(RustType::Named { .. })
+                                );
                                 let (ac, at) = self.emit_typed_expr(e)?;
-                                argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                if is_struct {
+                                    if matches!(at, RustType::Named { .. }) {
+                                        argc.push(format!("&{}", ac));
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                } else {
+                                    argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                }
                             } else {
                                 ok = false;
                                 break;
