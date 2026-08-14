@@ -1125,6 +1125,12 @@ pub(crate) struct Codegen {
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
+    /// Module-level bindings annotated with an ALL-NUMERIC struct alias (`const G: GS = {…}`).
+    /// name -> alias. These get a `Cell<TishStruct_…>` static instead of a local of `run()`, so a
+    /// lowered free `fn` can read and write module state — the thing that keeps a game's functions
+    /// boxed even after their params are typed. Same #594 machinery as numeric globals; the struct
+    /// is `Copy` because every field is a scalar.
+    module_struct_globals: std::collections::HashMap<String, String>,
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
     /// for direct indexing from native fns (fasta `codes`/`probs`).
     module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
@@ -1444,6 +1450,7 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
+            module_struct_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
             arrays_passed_to_calls: std::collections::HashSet::new(),
@@ -1817,7 +1824,16 @@ impl Codegen {
                 = &ty
             {
                 let struct_name = crate::types::named_struct_ident(&name);
-                self.write("#[derive(Clone, Debug, Default)]\n");
+                // An all-numeric struct is `Copy`, which is what lets a module-level binding of one
+                // live in a `Cell` static (the same machinery numeric globals use) instead of a
+                // local of `run()` — see `module_struct_statics`. Cheap and always sound: every
+                // field is a scalar.
+                let all_copy = fields.iter().all(|(_, t)| t.is_copy());
+                self.write(if all_copy {
+                    "#[derive(Clone, Copy, Debug, Default)]\n"
+                } else {
+                    "#[derive(Clone, Debug, Default)]\n"
+                });
                 self.write("#[allow(non_snake_case, non_camel_case_types)]\n");
                 self.write(&format!("pub struct {} {{\n", struct_name));
                 for (k, t) in fields {
@@ -1828,6 +1844,20 @@ impl Codegen {
                     ));
                 }
                 self.write("}\n\n");
+                if all_copy {
+                    // A const initializer so the binding can live in a `Cell` static (statics need
+                    // const init; `Default::default()` is not const). Zeroed like `Default`.
+                    self.write(&format!("impl {} {{\n", struct_name));
+                    self.write(&format!("    pub const DEFAULT: Self = Self {{\n"));
+                    for (k, t) in fields {
+                        self.write(&format!(
+                            "        {}: {},\n",
+                            crate::types::field_ident(k),
+                            t.default_value()
+                        ));
+                    }
+                    self.write("    };\n}\n\n");
+                }
                 // A `TishStruct` impl so this struct can be boxed BY REFERENCE into a `Value`
                 // (`Value::from_struct` → `Value::Struct` on GBA) instead of serialised to a hashmap
                 // object — property access on the boxed value then dispatches here (a small match,
@@ -3274,6 +3304,44 @@ impl Codegen {
                 }
                 self.writeln("");
             }
+            self.module_struct_globals = program
+                .statements
+                .iter()
+                .filter_map(|st| match st {
+                    Statement::VarDecl { name, type_ann: Some(ann), .. } => {
+                        match RustType::from_annotation_with_aliases(ann, &self.type_aliases) {
+                            RustType::Named { name: sname, ref fields }
+                                if !fields.is_empty()
+                                    && fields.iter().all(|(_, t)| t.is_copy()) =>
+                            {
+                                Some((name.to_string(), sname.to_string()))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !self.module_struct_globals.is_empty() {
+                for (name, alias) in self.module_struct_globals.clone() {
+                    let st = crate::types::named_struct_ident(&alias);
+                    let g = Self::native_global_static(&name);
+                    if gba {
+                        self.writeln(&format!(
+                            "static {}: tishlang_runtime::SingleCore<core::cell::Cell<{}>> = \
+                             tishlang_runtime::SingleCore::new(core::cell::Cell::new({}::DEFAULT));",
+                            g, st, st
+                        ));
+                    } else {
+                        self.writeln(&format!(
+                            "thread_local! {{ static {}: std::cell::Cell<{}> = \
+                             const {{ std::cell::Cell::new({}::DEFAULT) }}; }}",
+                            g, st, st
+                        ));
+                    }
+                }
+                self.writeln("");
+            }
             self.module_const_f64_arrays =
                 Self::collect_module_const_f64_arrays(&program.statements);
             self.module_const_f64_cum = Self::collect_module_const_cum(
@@ -3849,7 +3917,9 @@ impl Codegen {
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
         let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
         for v in &top_level_mutated {
-            if !self.native_numeric_globals.contains_key(v) {
+            if !self.native_numeric_globals.contains_key(v)
+                && !self.module_struct_globals.contains_key(v)
+            {
                 self.refcell_wrapped_vars.insert(v.clone());
             }
         }
@@ -4518,6 +4588,7 @@ impl Codegen {
                 if matches!(op, CompoundOp::Add)
                     && self.type_context.get_type(name.as_ref()) == RustType::String
                     && !self.native_numeric_globals.contains_key(name.as_ref())
+                    && !self.module_struct_globals.contains_key(name.as_ref())
                 {
                     let n = Self::escape_ident(name.as_ref());
                     let target = if self.refcell_wrapped_vars.contains(name.as_ref()) {
@@ -6292,6 +6363,19 @@ impl Codegen {
                     }
                 }
 
+                // A module-level all-numeric struct binding has a `Cell` static home; seed it
+                // here instead of declaring a local, so a lowered free `fn` and `run()` see the
+                // same state. (Only at module scope — a same-named local elsewhere is unaffected.)
+                if self.function_scope_stack.len() <= 1 {
+                    if self.module_struct_globals.contains_key(name.as_ref()) {
+                        if let Some(e) = init.as_ref() {
+                            let v = self.emit_native_expr(e, &rust_type)?;
+                            let g = Self::native_global_static(name.as_ref());
+                            self.writeln(&format!("{}.with(|c| c.set({}));", g, v));
+                        }
+                        return Ok(());
+                    }
+                }
                 if rust_type.is_native() {
                     // Generate native typed variable
                     let expr_str = match init.as_ref() {
@@ -7172,6 +7256,7 @@ impl Codegen {
                         ]
                         .contains(&name.as_str())
                             && !self.native_numeric_globals.contains_key(name.as_str())
+                            && !self.module_struct_globals.contains_key(name.as_str())
                     })
                     .collect();
 
@@ -7742,6 +7827,7 @@ impl Codegen {
             let n = name.as_ref();
             let is_plain_value = !self.refcell_wrapped_vars.contains(n)
                 && !self.native_numeric_globals.contains_key(n)
+                && !self.module_struct_globals.contains_key(n)
                 && self.module_const_f64_array_rust_ref(n).is_none()
                 && !self.usize_var_subst.contains_key(n)
                 && !self.type_context.get_type(n).is_native();
@@ -9544,6 +9630,30 @@ impl Codegen {
                     if let (Expr::Ident { name: var_name, .. }, MemberProp::Name { name: prop_name, .. }) =
                         (object.as_ref(), prop)
                     {
+                        // A module-level all-numeric struct global lives in a `Cell` static, not a
+                        // local of `run()` — that is what lets a lowered free `fn` reach module
+                        // state at all. Read the field straight out of it.
+                        if let Some(alias) = self.module_struct_globals.get(var_name.as_ref()) {
+                            if let Some(RustType::Named { fields, .. }) =
+                                self.type_aliases.get(alias.as_str()).map(|t| match t {
+                                    RustType::Object(f) => RustType::Named {
+                                        name: alias.as_str().into(),
+                                        fields: f.clone(),
+                                    },
+                                    other => other.clone(),
+                                })
+                            {
+                                if let Some((_, fty)) =
+                                    fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                                {
+                                    let get = Self::struct_global_field_get(
+                                        var_name.as_ref(),
+                                        prop_name.as_ref(),
+                                    );
+                                    return Ok(fty.to_value_expr(&get));
+                                }
+                            }
+                        }
                         let var_type = self.type_context.get_type(var_name.as_ref());
                         if let RustType::Named { fields, .. } = &var_type {
                             if let Some((_, field_ty)) =
@@ -14795,6 +14905,20 @@ impl Codegen {
                 let RustType::Named { fields, .. } = self.type_context.get_type(name.as_ref()) else {
                     return Ok(None);
                 };
+                // Store into the `Cell` static: read the `Copy` struct out, set the field, put it
+                // back. Same reachability reason as the read path above.
+                if self.module_struct_globals.contains_key(name.as_ref()) {
+                    if let Some((_, fty)) = fields.iter().find(|(k, _)| k.as_ref() == prop) {
+                        let fty = fty.clone();
+                        let coerced = self.emit_coerced_native(value, &fty)?;
+                        let code = Self::struct_global_field_set(name.as_ref(), prop, &coerced);
+                        return Ok(Some(if side_effect_only {
+                            code
+                        } else {
+                            format!("{{ {}; {} }}", code, Self::struct_global_field_get(name.as_ref(), prop))
+                        }));
+                    }
+                }
                 let place = if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     format!("(*{}.borrow_mut())", Self::escape_ident(name.as_ref()))
                 } else {
@@ -17032,6 +17156,26 @@ impl Codegen {
     }
 
     /// Read a native numeric global from its `thread_local Cell<f64>`.
+    /// Read one field of a module-level all-numeric struct global out of its `Cell` static.
+    /// `Copy` makes this a plain load — no borrow, no clone.
+    fn struct_global_field_get(name: &str, field: &str) -> String {
+        format!(
+            "{}.with(|c| c.get()).{}",
+            Self::native_global_static(name),
+            crate::types::field_ident(field)
+        )
+    }
+
+    /// Write one field: read the `Copy` struct out, set the field, put it back.
+    fn struct_global_field_set(name: &str, field: &str, val: &str) -> String {
+        format!(
+            "{}.with(|c| {{ let mut __t = c.get(); __t.{} = {}; c.set(__t); }})",
+            Self::native_global_static(name),
+            crate::types::field_ident(field),
+            val
+        )
+    }
+
     fn native_global_get(name: &str) -> String {
         format!(
             "{}.with(|c| c.get())",
@@ -19426,6 +19570,22 @@ impl Codegen {
         use std::collections::HashSet;
         let mut cand: HashSet<String> = HashSet::new();
         let mut decls: Vec<(&str, &Vec<FunParam>, &Statement)> = Vec::new();
+        // Module-level all-numeric struct bindings live in `Cell` statics, so a lowered free `fn`
+        // can reach them — `<G>.field` is a plain load, exactly like a struct param's field. Without
+        // this the proof rejects every function that reads module state, which is nearly all of a
+        // game's. Recomputed here rather than threaded in: same rule as `module_struct_globals`.
+        let struct_globals: HashSet<String> = statements
+            .iter()
+            .filter_map(|st| match st {
+                Statement::VarDecl { name, type_ann: Some(ann), .. } => matches!(
+                    RustType::from_annotation_with_aliases(ann, aliases),
+                    RustType::Named { ref fields, .. }
+                        if !fields.is_empty() && fields.iter().all(|(_, t)| t.is_copy())
+                )
+                .then(|| name.to_string()),
+                _ => None,
+            })
+            .collect();
         for s in statements {
             if let Statement::FunDecl {
                 async_: false,
@@ -19534,6 +19694,7 @@ impl Codegen {
                 Self::struct_params_with(|s| {
                     s.clear();
                     s.extend(sparams.iter().cloned());
+                    s.extend(struct_globals.iter().cloned());
                 });
                 let nums = Self::native_fn_numeric_locals(
                     body,
@@ -26604,6 +26765,24 @@ impl Codegen {
                                 format!("({}.len() as f64)", var_esc)
                             };
                             return Ok((code, RustType::F64));
+                        }
+                    }
+                    // A module-level all-numeric struct global lives in a `Cell` static, so a
+                    // lowered free `fn` can read it; a local of `run()` would be out of scope there.
+                    if let (RustType::Named { fields, .. }, true) = (
+                        &var_type,
+                        self.module_struct_globals.contains_key(var_name.as_ref()),
+                    ) {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(k, _)| k.as_ref() == prop_name.as_ref())
+                        {
+                            return Ok((
+                                Self::struct_global_field_get(
+                                    var_name.as_ref(),
+                                    prop_name.as_ref(),
+                                ),
+                                field_ty.clone(),
+                            ));
                         }
                     }
                     if let RustType::Named { fields, .. } = &var_type {
