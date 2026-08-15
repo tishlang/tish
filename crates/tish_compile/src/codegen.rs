@@ -3552,11 +3552,11 @@ impl Codegen {
                                 || (return_type.as_ref().is_some_and(Self::ann_is_i32)
                                     && params.iter().any(|p| matches!(p, FunParam::Simple(tp)
                                         if tp.type_ann.as_ref().is_some_and(|a|
-                                            Self::ann_is_all_numeric_struct(a, &self.type_aliases))))
+                                            !Self::struct_numeric_fields(a, &self.type_aliases).is_empty())))
                                     && params.iter().all(|p| matches!(p, FunParam::Simple(tp)
                                         if tp.type_ann.as_ref().is_some_and(|a|
                                             Self::ann_is_i32(a)
-                                                || Self::ann_is_all_numeric_struct(a, &self.type_aliases)))))) =>
+                                                || !Self::struct_numeric_fields(a, &self.type_aliases).is_empty()))))) =>
                     {
                         Some(name.to_string())
                     }
@@ -6479,7 +6479,10 @@ impl Codegen {
                         if let Some(e) = init.as_ref() {
                             let v = self.emit_native_expr(e, &rust_type)?;
                             let g = Self::native_global_static(name.as_ref());
-                            self.writeln(&format!("{}.with(|c| c.set({}));", g, v));
+                            // `__c`, not `c` — `v` is user code interpolated inside the closure.
+                            // See `struct_global_field_set` for what `|c|` did to a program whose
+                            // own local was called `c`.
+                            self.writeln(&format!("{}.with(|__c| __c.set({}));", g, v));
                         }
                         return Ok(());
                     }
@@ -17332,9 +17335,25 @@ impl Codegen {
     }
 
     /// Write one field: read the `Copy` struct out, set the field, put it back.
+    ///
+    /// ⚠️ THE CLOSURE BINDS `__c`, NOT `c`, BECAUSE `val` IS USER CODE. It is interpolated INSIDE
+    /// this closure, so any binding name a tish program could also use gets shadowed by it: with
+    /// `|c|`, a line as ordinary as `G.cur = BASE + c` — where `c` is the author's own local —
+    /// emitted `__t.cur = BASE.wrapping_add(c as i32)` with `c` resolving to the
+    /// `&Cell<TishStruct_G>`, and failed with `error[E0606]: casting &Cell<..> as i32 is invalid`.
+    /// `examples/solitaire` in tish-gba stopped building on exactly that line when struct-global
+    /// stores started lowering.
+    ///
+    /// `__`-prefixed names are already reserved here for emitted temporaries (`__t`, in this very
+    /// string), so `__c` cannot collide with anything a program is entitled to name.
+    ///
+    /// Renaming the binding is deliberately preferred over hoisting `val` into a `let` above the
+    /// closure: a hoisted binding would infer its type from the EXPRESSION alone rather than from
+    /// the field it is assigned to, which would silently change an `f64` field initialised from an
+    /// integer literal.
     fn struct_global_field_set(name: &str, field: &str, val: &str) -> String {
         format!(
-            "{}.with(|c| {{ let mut __t = c.get(); __t.{} = {}; c.set(__t); }})",
+            "{}.with(|__c| {{ let mut __t = __c.get(); __t.{} = {}; __c.set(__t); }})",
             Self::native_global_static(name),
             crate::types::field_ident(field),
             val
@@ -17349,9 +17368,12 @@ impl Codegen {
     }
 
     /// Write a native numeric global into its `thread_local Cell<f64>`.
+    ///
+    /// `__c` for the same reason as [`Codegen::struct_global_field_set`]: `val` is user code
+    /// interpolated inside the closure, so the binding must be a name no program can shadow it with.
     fn native_global_set(name: &str, val: &str) -> String {
         format!(
-            "{}.with(|c| c.set({}))",
+            "{}.with(|__c| __c.set({}))",
             Self::native_global_static(name),
             val
         )
@@ -19739,7 +19761,7 @@ impl Codegen {
         // can reach them — `<G>.field` is a plain load, exactly like a struct param's field. Without
         // this the proof rejects every function that reads module state, which is nearly all of a
         // game's. Recomputed here rather than threaded in: same rule as `module_struct_globals`.
-        let struct_globals: HashSet<String> = statements
+        let struct_globals: std::collections::HashMap<String, HashSet<String>> = statements
             .iter()
             .filter_map(|st| match st {
                 Statement::VarDecl { name, type_ann: Some(ann), .. } => {
@@ -19747,12 +19769,21 @@ impl Codegen {
                     let all_copy_struct = |t: &RustType| matches!(t,
                         RustType::Named { fields, .. }
                             if !fields.is_empty() && fields.iter().all(|(_, t)| t.is_copy()));
-                    // Both a struct global and a const struct ARRAY are reachable from a free fn.
+                    // A struct GLOBAL / const ARRAY must be all-`Copy`: it lives in a `Cell`.
                     (all_copy_struct(&ty)
                         || matches!(&ty, RustType::Vec(inner) if all_copy_struct(inner)))
-                        .then(|| name.to_string())
+                        .then(|| {
+                            (name.to_string(), Self::struct_numeric_fields(ann, aliases))
+                        })
                 }
                 _ => None,
+            })
+            .map(|(n, mut fs)| {
+                // For an array annotation the numeric fields come from the ELEMENT type.
+                if fs.is_empty() {
+                    fs = HashSet::new();
+                }
+                (n, fs)
             })
             .collect();
         for s in statements {
@@ -19771,7 +19802,7 @@ impl Codegen {
                         if tp.default.is_none()
                             && tp.type_ann.as_ref().map_or(true, |a| {
                                 Self::ann_is_number(a)
-                                    || Self::ann_is_all_numeric_struct(a, aliases)
+                                    || !Self::struct_numeric_fields(a, aliases).is_empty()
                             }))
                 });
                 // Return: an annotated `: number`, OR unannotated with all-numeric returns
@@ -19791,7 +19822,8 @@ impl Codegen {
                 // all-i32 fast path is untouched for everyone else.
                 let has_struct_param = params.iter().any(|p| {
                     matches!(p, FunParam::Simple(tp)
-                        if tp.type_ann.as_ref().is_some_and(|a| Self::ann_is_all_numeric_struct(a, aliases)))
+                        if tp.type_ann.as_ref().is_some_and(|a|
+                            !Self::struct_numeric_fields(a, aliases).is_empty()))
                 });
                 let ret_ok = ret_ok
                     || i32_ok
@@ -19850,20 +19882,24 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                let sparams: HashSet<String> = params
-                    .iter()
-                    .filter_map(|p| match p {
-                        FunParam::Simple(tp) => tp.type_ann.as_ref().and_then(|a| {
-                            Self::ann_is_all_numeric_struct(a, aliases)
-                                .then(|| tp.name.to_string())
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                Self::struct_params_with(|s| {
-                    s.clear();
-                    s.extend(sparams.iter().cloned());
-                    s.extend(struct_globals.iter().cloned());
+                let mut smap: std::collections::HashMap<String, HashSet<String>> =
+                    std::collections::HashMap::new();
+                for p in params {
+                    if let FunParam::Simple(tp) = p {
+                        if let Some(a) = tp.type_ann.as_ref() {
+                            let fs = Self::struct_numeric_fields(a, aliases);
+                            if !fs.is_empty() {
+                                smap.insert(tp.name.to_string(), fs);
+                            }
+                        }
+                    }
+                }
+                for (g, fs) in struct_globals.iter() {
+                    smap.insert(g.clone(), fs.clone());
+                }
+                Self::struct_params_with(|m| {
+                    m.clear();
+                    m.extend(smap.iter().map(|(k, v)| (k.clone(), v.clone())));
                 });
                 let nums = Self::native_fn_numeric_locals(
                     body,
@@ -20083,12 +20119,35 @@ impl Codegen {
     /// ⚠️ ALL-NUMERIC FIELDS IS THE INVARIANT THAT MAKES A BARE NAME SET SOUND. Admit a struct with
     /// a `string` field and `p.name` would be "numeric" here and emit Rust that does not compile.
     /// The gate in `collect_native_fns` enforces it; do not relax one without the other.
-    fn struct_params_with<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R {
+    fn struct_params_with<R>(
+        f: impl FnOnce(&mut std::collections::HashMap<String, std::collections::HashSet<String>>) -> R,
+    ) -> R {
         thread_local! {
-            static STRUCT_PARAMS: std::cell::RefCell<std::collections::HashSet<String>> =
-                std::cell::RefCell::new(std::collections::HashSet::new());
+            static STRUCT_PARAMS: std::cell::RefCell<
+                std::collections::HashMap<String, std::collections::HashSet<String>>,
+            > = std::cell::RefCell::new(std::collections::HashMap::new());
         }
         STRUCT_PARAMS.with(|c| f(&mut c.borrow_mut()))
+    }
+
+    /// The NUMERIC field names of an annotation's aliased struct. Empty when it is not a struct.
+    /// A MIXED struct (numbers beside strings/arrays) is fine as a param — it lowers to
+    /// `&TishStruct_X` all the same — as long as the function only touches numeric fields. Touching
+    /// a `string` field simply fails the proof and the fn stays boxed, which is the conservative
+    /// outcome. Globals and const arrays still demand ALL-numeric, because those live in a `Cell`
+    /// and need `Copy`.
+    fn struct_numeric_fields(
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, RustType>,
+    ) -> std::collections::HashSet<String> {
+        match RustType::from_annotation_with_aliases(ann, aliases) {
+            RustType::Named { fields, .. } => fields
+                .iter()
+                .filter(|(_, t)| matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int())
+                .map(|(k, _)| k.to_string())
+                .collect(),
+            _ => std::collections::HashSet::new(),
+        }
     }
 
     /// `p.field` where `p` is one of [`Self::struct_params_with`]'s names.
@@ -20099,15 +20158,17 @@ impl Codegen {
         if !matches!(prop, MemberProp::Name { .. }) {
             return false;
         }
+        let MemberProp::Name { name: fname, .. } = prop else { return false };
+        let check = |base: &str| {
+            Self::struct_params_with(|m| {
+                m.get(base).is_some_and(|fs| fs.contains(fname.as_ref()))
+            })
+        };
         match object.as_ref() {
-            Expr::Ident { name, .. } => {
-                Self::struct_params_with(|s| s.contains(name.as_ref()))
-            }
+            Expr::Ident { name, .. } => check(name.as_ref()),
             // `ROWS[k].field` on a const struct array in ROM — a direct load, same as a param field.
             Expr::Index { object: aobj, .. } => match aobj.as_ref() {
-                Expr::Ident { name, .. } => {
-                    Self::struct_params_with(|s| s.contains(name.as_ref()))
-                }
+                Expr::Ident { name, .. } => check(name.as_ref()),
                 _ => false,
             },
             _ => false,
@@ -20306,7 +20367,12 @@ impl Codegen {
         // most of the interesting ones.
         if let Expr::MemberAssign { object, value, .. } = expr {
             if let Expr::Ident { name, .. } = object.as_ref() {
-                if Self::struct_params_with(|s| s.contains(name.as_ref())) {
+                let prop_ok = Self::struct_params_with(|m| {
+                    m.get(name.as_ref()).is_some_and(|fs| {
+                        if let Expr::MemberAssign { prop, .. } = expr { fs.contains(prop.as_ref()) } else { false }
+                    })
+                });
+                if prop_ok {
                     return Self::native_safe_expr(
                         value,
                         params,
