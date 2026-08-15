@@ -3347,10 +3347,26 @@ impl Codegen {
                 }
                 self.writeln("");
             }
+            // Which names are ever used as a VALUE rather than only called / indexed. Computed here
+            // because the const-array hoist below needs it too.
+            self.value_used_names.clear();
+            for st in &program.statements {
+                Self::collect_value_used_stmt(st, &mut self.value_used_names);
+            }
             // Const arrays of an all-numeric struct: pure data, so they belong in ROM as a `const`
             // rather than being rebuilt into a `Vec` of boxed rows inside `run()` every boot.
             for st in &program.statements {
-                let Statement::VarDecl { name, type_ann: Some(ann), init: Some(init), .. } = st
+                // ⚠️ `const` ONLY, and never an empty literal. A `let` array is mutable — ui.tish's
+                // `let LN: LNode[] = []` is a POOL that `push`es — and hoisting one to a `const`
+                // static silently deletes the local it grows, which surfaces as E0425 on the
+                // generated Rust far from the declaration.
+                let Statement::VarDecl {
+                    name,
+                    mutable: false,
+                    type_ann: Some(ann),
+                    init: Some(init),
+                    ..
+                } = st
                 else {
                     continue;
                 };
@@ -3364,7 +3380,15 @@ impl Codegen {
                 else {
                     continue;
                 };
-                if fields.is_empty() || !fields.iter().all(|(_, t)| t.is_copy()) {
+                // ⚠️ Only when the NAME is never used as a value. A table that is also passed
+                // around (exported, handed to an init fn, stored in an object) still needs its
+                // boxed local — `content.spriteMap: SPRITE_MAP` is exactly that, and hoisting it
+                // deleted the binding the caller reads.
+                if fields.is_empty()
+                    || !fields.iter().all(|(_, t)| t.is_copy())
+                    || elements.is_empty()
+                    || self.value_used_names.contains(name.as_ref())
+                {
                     continue;
                 }
                 let st_name = crate::types::named_struct_ident(&alias);
@@ -3511,10 +3535,7 @@ impl Codegen {
                 .collect();
             // Which names are ever used as a VALUE rather than only called. Drives the
             // boxed-wrapper elision at `Statement::FunDecl` — see `collect_value_used_expr`.
-            self.value_used_names.clear();
-            for s in &program.statements {
-                Self::collect_value_used_stmt(s, &mut self.value_used_names);
-            }
+
             // Which of the survivors carry the all-`i32` signature. Computed AFTER the fixpoint,
             // so a function the proof rejected never reaches the i32 ABI either.
             self.native_fns_i32 = program
