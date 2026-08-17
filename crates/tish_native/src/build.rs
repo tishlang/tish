@@ -580,9 +580,23 @@ opt-level = 3
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
 
+    // Inherit the project's toolchain pin when it has one.
+    //
+    // rustup honours the `rust-toolchain.toml` NEAREST the directory cargo runs in, and this
+    // generated file sits in `.tish/gba/<name>/` — so it wins over the pin in the project's own
+    // checkout. Writing a bare `channel = "nightly"` here therefore made every GBA build float: the
+    // compiler could change under an unchanged checkout, and differ from CI or another machine, with
+    // nothing in the source to show it. Inheriting the project's channel makes the checkout the
+    // single source of truth; projects without a pin still get `nightly` exactly as before.
+    //
+    // Only the channel is inherited. `components` stays `rust-src` because that is what build-std
+    // needs — copying a project's `clippy`/`rustfmt` entries in would fail the ROM build whenever
+    // the pinned toolchain lacks a component the ROM never uses.
+    let channel =
+        find_project_toolchain_channel(&base).unwrap_or_else(|| "nightly".to_string());
     fs::write(
         build_dir.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"nightly\"\ncomponents = [\"rust-src\"]\n",
+        format!("[toolchain]\nchannel = \"{}\"\ncomponents = [\"rust-src\"]\n", channel),
     )
     .map_err(|e| format!("Cannot write rust-toolchain.toml: {}", e))?;
 
@@ -692,6 +706,45 @@ runner = ["mgba-qt", "-C", "logToStdout=1", "-C", "logLevel.gba.debug=127"]
         return Err("agb-gbafix failed to produce the ROM".to_string());
     }
     Ok(())
+}
+
+/// Find the toolchain channel the project pinned, searching `start` and its ancestors.
+///
+/// Mirrors rustup's own lookup: nearest ancestor wins, and both the TOML form and the legacy
+/// one-line `rust-toolchain` file are accepted. Returns `None` when no pin exists anywhere above the
+/// project, which is what keeps unpinned projects on plain `nightly`.
+///
+/// Deliberately a line scan rather than a TOML parse: this runs on every build, needs no new
+/// dependency, and a pin is always a single `channel = "…"` line in practice. Comment lines are
+/// skipped so prose mentioning a channel cannot be mistaken for the pin.
+fn find_project_toolchain_channel(start: &Path) -> Option<String> {
+    for dir in start.ancestors() {
+        for name in ["rust-toolchain.toml", "rust-toolchain"] {
+            let Ok(text) = fs::read_to_string(dir.join(name)) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("channel") {
+                    if let Some(value) = rest.trim_start().strip_prefix('=') {
+                        let value = value.trim().trim_matches('"').trim_matches('\'');
+                        if !value.is_empty() {
+                            return Some(value.to_string());
+                        }
+                    }
+                }
+            }
+            // Legacy form: the entire file is the toolchain name (no table, no assignment).
+            let bare = text.trim();
+            if !bare.is_empty() && !bare.contains('[') && !bare.contains('=') {
+                return Some(bare.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Remove a finished build's per-PID source directory (#384). Called only on SUCCESS, after the
@@ -870,6 +923,44 @@ tishlang_runtime = {{ path = {:?}{} }}
 #[cfg(test)]
 mod tests {
     use super::runtime_features_for_cargo;
+
+    /// The generated ROM crate must inherit the project's pin, or GBA builds float against whatever
+    /// nightly the machine last downloaded (see `find_project_toolchain_channel`).
+    #[test]
+    fn project_toolchain_channel_is_inherited_from_nearest_pin() {
+        use super::find_project_toolchain_channel;
+        use std::fs;
+        use std::path::PathBuf;
+        // Scratch under the workspace target/ (never /tmp), unique per case.
+        let base: PathBuf =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp_toolchain_test");
+        let nested = base.join("examples").join("game");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&nested).unwrap();
+
+        // No pin anywhere below the workspace: caller falls back to plain `nightly`.
+        assert_eq!(find_project_toolchain_channel(&nested), None);
+
+        // A pin several levels up is found, and prose in comments is not mistaken for it.
+        fs::write(
+            base.join("rust-toolchain.toml"),
+            "# do not use a bare channel = \"nightly\"\n[toolchain]\nchannel = \"nightly-2026-07-22\"\ncomponents = [\"rust-src\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            find_project_toolchain_channel(&nested).as_deref(),
+            Some("nightly-2026-07-22")
+        );
+
+        // Nearest ancestor wins, matching rustup's own lookup.
+        fs::write(nested.join("rust-toolchain"), "nightly-2026-01-01\n").unwrap();
+        assert_eq!(
+            find_project_toolchain_channel(&nested).as_deref(),
+            Some("nightly-2026-01-01")
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 
     /// #384: `cleanup_build_dir` removes a finished build's dir by default, and preserves it under
     /// `TISH_KEEP_BUILD_DIR=1`.
