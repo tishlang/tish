@@ -3381,14 +3381,18 @@ impl Codegen {
                                 // `fn_sig_all_i32` can never hold. Take the i32 return ABI when the
                                 // return is `: i32` and every NON-struct param is `: i32` too —
                                 // otherwise the body computes i32 while the signature says f64.
+                                // A struct param qualifies on ONE numeric field, matching the
+                                // candidacy gate. If this still demanded all-numeric, a mixed-struct
+                                // fn would lower its body to i32 arithmetic and then be handed the
+                                // f64 ABI — computing one thing and declaring another.
                                 || (return_type.as_ref().is_some_and(Self::ann_is_i32)
                                     && params.iter().any(|p| matches!(p, FunParam::Simple(tp)
                                         if tp.type_ann.as_ref().is_some_and(|a|
-                                            Self::ann_is_all_numeric_struct(a, &self.type_aliases))))
+                                            !Self::struct_numeric_fields(a, &self.type_aliases).is_empty())))
                                     && params.iter().all(|p| matches!(p, FunParam::Simple(tp)
                                         if tp.type_ann.as_ref().is_some_and(|a|
                                             Self::ann_is_i32(a)
-                                                || Self::ann_is_all_numeric_struct(a, &self.type_aliases)))))) =>
+                                                || !Self::struct_numeric_fields(a, &self.type_aliases).is_empty()))))) =>
                     {
                         Some(name.to_string())
                     }
@@ -19442,7 +19446,11 @@ impl Codegen {
                         if tp.default.is_none()
                             && tp.type_ann.as_ref().map_or(true, |a| {
                                 Self::ann_is_number(a)
-                                    || Self::ann_is_all_numeric_struct(a, aliases)
+                                    // At least one numeric field is enough to be a CANDIDATE. The
+                                    // fixpoint below still has to prove the body, and a read of a
+                                    // non-numeric field fails that proof — so admitting a mixed
+                                    // record here cannot lower anything that was not already sound.
+                                    || !Self::struct_numeric_fields(a, aliases).is_empty()
                             }))
                 });
                 // Return: an annotated `: number`, OR unannotated with all-numeric returns
@@ -19462,7 +19470,8 @@ impl Codegen {
                 // all-i32 fast path is untouched for everyone else.
                 let has_struct_param = params.iter().any(|p| {
                     matches!(p, FunParam::Simple(tp)
-                        if tp.type_ann.as_ref().is_some_and(|a| Self::ann_is_all_numeric_struct(a, aliases)))
+                        if tp.type_ann.as_ref()
+                            .is_some_and(|a| !Self::struct_numeric_fields(a, aliases).is_empty()))
                 });
                 let ret_ok = ret_ok
                     || i32_ok
@@ -19521,19 +19530,24 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
-                let sparams: HashSet<String> = params
+                // Each struct param maps to the fields that can lower — its NUMERIC ones. A param
+                // with no numeric field is left out entirely, so it reads exactly as "not a struct
+                // param" and nothing about it is native.
+                let sparams: std::collections::HashMap<String, HashSet<String>> = params
                     .iter()
                     .filter_map(|p| match p {
                         FunParam::Simple(tp) => tp.type_ann.as_ref().and_then(|a| {
-                            Self::ann_is_all_numeric_struct(a, aliases)
-                                .then(|| tp.name.to_string())
+                            let fs = Self::struct_numeric_fields(a, aliases);
+                            (!fs.is_empty()).then(|| (tp.name.to_string(), fs))
                         }),
                         _ => None,
                     })
                     .collect();
-                Self::struct_params_with(|s| {
-                    s.clear();
-                    s.extend(sparams.iter().cloned());
+                Self::struct_params_with(|m| {
+                    m.clear();
+                    for (k, v) in sparams.iter() {
+                        m.insert(k.clone(), v.clone());
+                    }
                 });
                 let nums = Self::native_fn_numeric_locals(
                     body,
@@ -19750,29 +19764,39 @@ impl Codegen {
     /// leaves consult is a large diff for no added safety. Codegen is single-threaded; the set is
     /// cleared after each function.
     ///
-    /// ⚠️ ALL-NUMERIC FIELDS IS THE INVARIANT THAT MAKES A BARE NAME SET SOUND. Admit a struct with
-    /// a `string` field and `p.name` would be "numeric" here and emit Rust that does not compile.
-    /// The gate in `collect_native_fns` enforces it; do not relax one without the other.
-    fn struct_params_with<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R {
+    /// ⚠️ THE FIELD SET IS WHAT MAKES THIS SOUND, AND IT REPLACED A BARE NAME SET FOR THAT REASON.
+    /// While the map held only names, admitting a struct with a `string` field would have made
+    /// `p.name` "numeric" here and emitted Rust that does not compile — so the gate demanded that
+    /// EVERY field be numeric, and one string disqualified the whole function. Carrying the numeric
+    /// fields per param removes that ceiling: `p.x` proves native and `p.name` does not, so a mixed
+    /// record lowers its arithmetic and a function that touches the string simply fails the proof
+    /// and stays boxed. Never widen this to a bare name test again.
+    fn struct_params_with<R>(
+        f: impl FnOnce(&mut std::collections::HashMap<String, HashSet<String>>) -> R,
+    ) -> R {
         thread_local! {
-            static STRUCT_PARAMS: std::cell::RefCell<std::collections::HashSet<String>> =
-                std::cell::RefCell::new(std::collections::HashSet::new());
+            static STRUCT_PARAMS:
+                std::cell::RefCell<std::collections::HashMap<String, HashSet<String>>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
         }
         STRUCT_PARAMS.with(|c| f(&mut c.borrow_mut()))
     }
 
-    /// `p.field` where `p` is one of [`Self::struct_params_with`]'s names.
+    /// `p.field` where `p` is one of [`Self::struct_params_with`]'s params AND `field` is one of its
+    /// NUMERIC fields. Both halves matter: the name alone would admit `p.name` on a mixed record.
     fn is_struct_param_field(e: &Expr) -> bool {
         let Expr::Member { object, prop, .. } = e else {
             return false;
         };
-        if !matches!(prop, MemberProp::Name { .. }) {
+        let MemberProp::Name { name: fname, .. } = prop else {
             return false;
-        }
+        };
         let Expr::Ident { name, .. } = object.as_ref() else {
             return false;
         };
-        Self::struct_params_with(|s| s.contains(name.as_ref()))
+        Self::struct_params_with(|m| {
+            m.get(name.as_ref()).is_some_and(|fs| fs.contains(fname.as_ref()))
+        })
     }
 
     /// Every field of this annotation's aliased struct is a native NUMBER (the invariant above).
@@ -19788,6 +19812,31 @@ impl Codegen {
                         matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int()
                     })
         )
+    }
+
+    /// The NUMERIC fields of this annotation's aliased struct, by name.
+    ///
+    /// [`Self::ann_is_all_numeric_struct`] asks a whole-struct question, and that is the ceiling on
+    /// what can lower: half of a game's record shapes carry a string, a null or an array beside
+    /// their numbers, and one such field disqualifies the whole function even when it only ever
+    /// touches the numeric ones. Answering per FIELD lets `m.x` lower while `m.name` does not — a
+    /// function that reads the string fails the proof exactly as it does today, so nothing that
+    /// lowers now stops lowering.
+    ///
+    /// An empty set means nothing here can lower: not a struct, or a struct with no numeric field.
+    /// Callers treat empty as "not a struct param", which keeps the conservative default.
+    fn struct_numeric_fields(
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, RustType>,
+    ) -> HashSet<String> {
+        match RustType::from_annotation_with_aliases(ann, aliases) {
+            RustType::Named { ref fields, .. } => fields
+                .iter()
+                .filter(|(_, t)| matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int())
+                .map(|(n, _)| n.to_string())
+                .collect(),
+            _ => HashSet::new(),
+        }
     }
 
     fn native_fn_numeric_locals(
