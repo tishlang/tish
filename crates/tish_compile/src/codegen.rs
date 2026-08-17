@@ -3052,6 +3052,79 @@ impl Codegen {
         }
     }
 
+    /// Reject a numeric return annotation that the body provably contradicts.
+    ///
+    /// ⚠️ THIS EXISTS BECAUSE THE ANNOTATION IS AN UNWRAP, NOT A DECLARATION. `: i32` makes codegen
+    /// emit `match v { Value::Number(n) => …, _ => panic!("expected number") }`, so a function
+    /// annotated `: i32` whose body does `return ""` compiles clean and then kills the ROM on a
+    /// device, with a message naming neither the function nor the line. That is a type error
+    /// discovered at runtime, on hardware, in a game — the worst possible place, and it cost a
+    /// debugging cycle on `examples/ffta-hud`'s `occupantAt`.
+    ///
+    /// The information was always here: `returns_numeric` walks these same return statements to
+    /// decide lowering. It found them non-numeric, silently declined to lower, and let the unwrap
+    /// through anyway. This turns that finding into a diagnostic.
+    ///
+    /// ⚠️ PROVABLE MISMATCH ONLY. "Could not prove numeric" is the common case for legitimate
+    /// dynamic code and must stay silent — erroring on it would reject most of a real program. Only
+    /// a literal of the wrong kind counts: `return "x"`, `return true`, `return [..]`, `return {..}`
+    /// under a numeric annotation. Anything computed is left alone.
+    fn check_return_annotations(&self, program: &Program) -> Result<(), CompileError> {
+        fn wrong_literal(e: &Expr) -> Option<&'static str> {
+            match e {
+                Expr::Literal { value: Literal::String(_), .. } => Some("a string"),
+                Expr::Literal { value: Literal::Bool(_), .. } => Some("a boolean"),
+                Expr::Array { .. } => Some("an array"),
+                Expr::Object { .. } => Some("an object"),
+                _ => None,
+            }
+        }
+        fn walk(s: &Statement, found: &mut Option<(&'static str, Option<Span>)>) {
+            if found.is_some() {
+                return;
+            }
+            match s {
+                Statement::Return { value: Some(e), span, .. } => {
+                    if let Some(kind) = wrong_literal(e) {
+                        *found = Some((kind, Some(*span)));
+                    }
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    statements.iter().for_each(|x| walk(x, found))
+                }
+                Statement::If { then_branch, else_branch, .. } => {
+                    walk(then_branch, found);
+                    if let Some(e) = else_branch.as_ref() {
+                        walk(e, found)
+                    }
+                }
+                Statement::While { body, .. } | Statement::For { body, .. } => walk(body, found),
+                _ => {}
+            }
+        }
+        for st in &program.statements {
+            if let Statement::FunDecl { name, return_type: Some(ann), body, .. } = st {
+                if !Self::ann_is_number(ann) && !Self::ann_is_i32(ann) {
+                    continue;
+                }
+                let mut found = None;
+                walk(body, &mut found);
+                if let Some((kind, span)) = found {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is annotated to return a number, but returns {}. A numeric return \
+                             annotation is compiled as an unwrap, so this would panic at runtime \
+                             (\"expected number\") instead of failing here.",
+                            name, kind
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// #615: the declared signature for `name` at EXACTLY `argc` arguments, plus the Rust symbol
     /// suffix to call it by. A name with a single declaration keeps the historical `<symbol>_typed`
     /// spelling, so every existing extension crate links unchanged; only a name that declares more
@@ -3101,6 +3174,7 @@ impl Codegen {
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
         self.collect_extern_fns(program);
+        self.check_return_annotations(program)?;
         if self.emit_mode == crate::NativeEmitMode::Gba {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
@@ -3327,6 +3401,24 @@ impl Codegen {
             let mut global_names: std::collections::HashSet<String> =
                 self.native_numeric_globals.keys().cloned().collect();
             global_names.extend(self.module_const_f64_arrays.keys().cloned());
+            // Publish the all-numeric externs before the proof runs, so a body calling into an
+            // extension crate is not rejected for the call alone. `is_numeric` covers f64, i32 and
+            // the narrow ints; anything else (string, array, struct) would need a boxing boundary
+            // inside a lowered fn, which defeats the purpose.
+            let numeric_externs: std::collections::HashSet<String> = self
+                .extern_fns
+                .iter()
+                .filter(|(_, sigs)| {
+                    sigs.iter().all(|s| {
+                        s.ret.is_numeric() && s.params.iter().all(|p| p.is_numeric())
+                    })
+                })
+                .map(|(n, _)| n.clone())
+                .collect();
+            Self::numeric_externs_with(|s| {
+                s.clear();
+                s.extend(numeric_externs.iter().cloned());
+            });
             self.native_fns = Self::collect_native_fns(
                 &program.statements,
                 &global_names,
@@ -19782,6 +19874,30 @@ impl Codegen {
         STRUCT_PARAMS.with(|c| f(&mut c.borrow_mut()))
     }
 
+    /// Declared externs whose signature is numbers in, a number out.
+    ///
+    /// A `declare fn` already resolves to a native Rust fn — the emitter calls
+    /// `<crate>::<symbol>_typed(..)` directly (see [`Self::extern_sig_for_arity`]). But the proof
+    /// only accepted calls to `cand` (the tish fns being lowered), so ANY function calling into an
+    /// extension crate was rejected and stayed boxed. On a game that is nearly everything: measured
+    /// on `examples/ffta-hud`, a fn doing `u.col * 100 + u.row` lowered while the one beside it
+    /// calling `tac_add_unit(u.col, u.row, …)` did not, purely because of the call.
+    ///
+    /// Only ALL-NUMERIC signatures qualify. An extern taking or returning a string, an array or a
+    /// struct is not callable from a lowered body without a boxing boundary, which is the thing
+    /// being removed.
+    ///
+    /// A thread-local for the same reason [`Self::struct_params_with`] is one: the proof is a set of
+    /// associated fns with no `&self`, and threading a new parameter through every one of them would
+    /// touch far more code than the fact being communicated.
+    fn numeric_externs_with<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
+        thread_local! {
+            static NUMERIC_EXTERNS: std::cell::RefCell<HashSet<String>> =
+                std::cell::RefCell::new(HashSet::new());
+        }
+        NUMERIC_EXTERNS.with(|c| f(&mut c.borrow_mut()))
+    }
+
     /// `p.field` where `p` is one of [`Self::struct_params_with`]'s params AND `field` is one of its
     /// NUMERIC fields. Both halves matter: the name alone would admit `p.name` on a mixed record.
     fn is_struct_param_field(e: &Expr) -> bool {
@@ -20084,7 +20200,13 @@ impl Codegen {
                 }
                 match callee.as_ref() {
                     Expr::Ident { name, .. } => {
-                        cand.contains(name.as_ref()) || native_vec_names.contains(name.as_ref())
+                        cand.contains(name.as_ref())
+                            || native_vec_names.contains(name.as_ref())
+                            // A numbers-in-number-out extern lowers to a direct
+                            // `<crate>::<symbol>_typed(..)` call, so it is native-safe. Without this
+                            // any fn touching an extension crate stayed boxed — which in a game is
+                            // most of them.
+                            || Self::numeric_externs_with(|s| s.contains(name.as_ref()))
                     }
                     Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                         matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
@@ -20193,7 +20315,12 @@ impl Codegen {
                     && Self::numeric_shaped(else_branch, params, cand, globals, nums)
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                // Same set as the safety proof: a numbers-in-number-out extern RETURNS a number, so
+                // `return tac_unit_hp(id)` is a numeric return and the fn keeps its native ABI.
+                Expr::Ident { name, .. } => {
+                    cand.contains(name.as_ref())
+                        || Self::numeric_externs_with(|s| s.contains(name.as_ref()))
+                }
                 Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                     matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
                         && matches!(
