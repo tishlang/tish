@@ -3409,24 +3409,16 @@ impl Codegen {
                 .extern_fns
                 .iter()
                 .filter(|(_, sigs)| {
-                    // ⚠️⚠️ DELIBERATELY F64-ONLY, WHICH MAKES THIS SET NEARLY EMPTY. See the note on
-                    // `numeric_externs_with`: widening this to `is_integer_scalar()` (i32 + narrow
-                    // ints) is correct in principle and DOES make fns lower — measured: 45 of 64
-                    // declares qualify in ffta-hud and `mpOf` emits a `*_native`. But it then breaks
-                    // the build, because a lowered fn with the f64 ABI does not coerce an
-                    // i32-returning extern at its RETURN site:
+                    // ⚠️ NOT `is_numeric()` ALONE — that matches F64 only (types.rs), while every GBA
+                    // `declare fn f(row: i32): i32` is `I32`. Filtering on it rejected all 64 declares
+                    // in ffta-hud (probed: numeric_externs=0) and made this whole relaxation inert.
+                    // Same predicate the rest of the proof uses: f64, i32, or a narrow storage int.
                     //
-                    //   fn uiKeys_native() -> f64 { return tish_agb::keys_edge_typed(); }
-                    //                                     ^ i32, expected f64  (E0308)
-                    //
-                    // The expression machinery already reports the extern's native return type
-                    // correctly (see the typed-extern arm in the native expression emitter); it is the
-                    // return emitter that needs to coerce to the callee's declared ABI. Fix that
-                    // first, then widen this predicate — not the other way round.
+                    // Widening this REQUIRES the f64 return coercion in `emit_native_fn_body` — an
+                    // i32 extern returned from an f64-ABI fn is otherwise emitted raw (E0308).
+                    let ok = |t: &RustType| t.is_numeric() || t.is_integer_scalar();
                     !sigs.is_empty()
-                        && sigs.iter().all(|s| {
-                            s.ret.is_numeric() && s.params.iter().all(|p| p.is_numeric())
-                        })
+                        && sigs.iter().all(|s| ok(&s.ret) && s.params.iter().all(ok))
                 })
                 .map(|(n, _)| n.clone())
                 .collect();
@@ -20790,6 +20782,20 @@ impl Codegen {
                     // An f64-typed expression returned from an `i32` fn takes the same ToInt32 the
                     // boxed path would have applied at the consumer.
                     format!("tishlang_runtime::to_int32({})", code)
+                } else if want == RustType::F64 && ty.is_integer_scalar() {
+                    // An INTEGER-typed expression returned from an `f64`-ABI fn. Widening is exact
+                    // (i32 and every narrow width fit in f64), and without it the body computes an
+                    // integer while the signature declares f64:
+                    //
+                    //   fn uiKeys_native() -> f64 { return tish_agb::keys_edge_typed(); }
+                    //                                      ^ i32, expected f64   (E0308)
+                    //
+                    // This was unreachable while the only integer-returning callees were fns the
+                    // proof had already typed; it became reachable when calls to i32 externs were
+                    // admitted as native-safe, because an extern reports its own declared return
+                    // type. `Fixed` is deliberately NOT covered — it is fixed-point, so `as f64`
+                    // would reinterpret the scale rather than convert it.
+                    format!("(({}) as f64)", code)
                 } else {
                     code
                 };
