@@ -19665,8 +19665,18 @@ impl Codegen {
                     &cand,
                     native_vec_names,
                 );
-                let ok = Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names)
-                    && Self::returns_numeric(body, &pnames, &cand, globals, &nums);
+                let safe = Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names);
+                let rets = Self::returns_numeric(body, &pnames, &cand, globals, &nums);
+                let ok = safe && rets;
+                if !ok && std::env::var("TISH_PROBE_LOWERING").as_deref() == Ok("1") {
+                    // Which HALF rejected it. "body not native-safe" and "a return is not numeric"
+                    // are entirely different fixes, and the fixpoint silently collapsed both into a
+                    // candidate quietly disappearing.
+                    eprintln!(
+                        "[probe] {} rejected: body_safe={} returns_numeric={}",
+                        name, safe, rets
+                    );
+                }
                 Self::struct_params_with(|s| s.clear());
                 if !ok {
                     remove.push(name.to_string());
@@ -20005,6 +20015,10 @@ impl Codegen {
                 ..
             } => {
                 let numeric = type_ann.as_ref().is_some_and(Self::ann_is_number)
+                    // `: i32` is a number too. Without this, `let j: i32 = …` was never seeded as a
+                    // numeric local, so every later use of `j` failed the safety proof and the whole
+                    // function stayed boxed — for an annotation the author added to make it FASTER.
+                    || type_ann.as_ref().is_some_and(Self::ann_is_i32)
                     || matches!(
                         init,
                         Some(Expr::Literal {
@@ -20024,7 +20038,13 @@ impl Codegen {
                         }) if matches!(
                             callee.as_ref(),
                             Expr::Ident { name: fnname, .. }
-                                if cand.contains(fnname.as_ref()) || native_vec_names.contains(fnname.as_ref())
+                                if cand.contains(fnname.as_ref())
+                                    || native_vec_names.contains(fnname.as_ref())
+                                    // A numbers-in-number-out extern yields a number, same as the
+                                    // safety proof and `numeric_shaped` already accept. Every
+                                    // analysis has to agree or a local initialised from an extern is
+                                    // numeric in one and unknown in another.
+                                    || Self::numeric_externs_with(|s| s.contains(fnname.as_ref()))
                         )
                     );
                 if numeric {
