@@ -3409,12 +3409,37 @@ impl Codegen {
                 .extern_fns
                 .iter()
                 .filter(|(_, sigs)| {
-                    sigs.iter().all(|s| {
-                        s.ret.is_numeric() && s.params.iter().all(|p| p.is_numeric())
-                    })
+                    // ⚠️⚠️ DELIBERATELY F64-ONLY, WHICH MAKES THIS SET NEARLY EMPTY. See the note on
+                    // `numeric_externs_with`: widening this to `is_integer_scalar()` (i32 + narrow
+                    // ints) is correct in principle and DOES make fns lower — measured: 45 of 64
+                    // declares qualify in ffta-hud and `mpOf` emits a `*_native`. But it then breaks
+                    // the build, because a lowered fn with the f64 ABI does not coerce an
+                    // i32-returning extern at its RETURN site:
+                    //
+                    //   fn uiKeys_native() -> f64 { return tish_agb::keys_edge_typed(); }
+                    //                                     ^ i32, expected f64  (E0308)
+                    //
+                    // The expression machinery already reports the extern's native return type
+                    // correctly (see the typed-extern arm in the native expression emitter); it is the
+                    // return emitter that needs to coerce to the callee's declared ABI. Fix that
+                    // first, then widen this predicate — not the other way round.
+                    !sigs.is_empty()
+                        && sigs.iter().all(|s| {
+                            s.ret.is_numeric() && s.params.iter().all(|p| p.is_numeric())
+                        })
                 })
                 .map(|(n, _)| n.clone())
                 .collect();
+            if std::env::var("TISH_PROBE_EXTERNS").as_deref() == Ok("1") {
+                let mut names: Vec<&String> = numeric_externs.iter().collect();
+                names.sort();
+                eprintln!(
+                    "[probe] extern_fns={} numeric_externs={} sample={:?}",
+                    self.extern_fns.len(),
+                    numeric_externs.len(),
+                    names.iter().take(8).collect::<Vec<_>>()
+                );
+            }
             Self::numeric_externs_with(|s| {
                 s.clear();
                 s.extend(numeric_externs.iter().cloned());
