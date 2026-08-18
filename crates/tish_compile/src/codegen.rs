@@ -3434,7 +3434,13 @@ impl Codegen {
             }
             Self::numeric_externs_with(|s| {
                 s.clear();
-                s.extend(numeric_externs.iter().cloned());
+                // `TISH_NO_EXTERN_LOWER=1` publishes an EMPTY set, which reverts this build to the
+                // pre-extern-admission behaviour without rebuilding the compiler. It exists so a ROM
+                // can be A/B'd against one binary: two 5-minute game builds instead of two toolchain
+                // rebuilds plus two game builds, and no edit to a shared checkout between them.
+                if std::env::var("TISH_NO_EXTERN_LOWER").as_deref() != Ok("1") {
+                    s.extend(numeric_externs.iter().cloned());
+                }
             });
             self.native_fns = Self::collect_native_fns(
                 &program.statements,
@@ -4403,6 +4409,10 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         RustType::F64.from_value_expr(&val_code)
+                    } else if val_ty.is_integer_scalar() {
+                        // An i32-typed value into an f64-backed global. Widening is exact; emitted
+                        // raw it is E0308.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -4519,6 +4529,17 @@ impl Codegen {
                         // `fixed` local must be lifted to `Fixed` — the RHS emitter reports numeric
                         // literals as F64, so without this a `fixed` reassignment mistypes (E0308).
                         format!("tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)", val_code)
+                    } else if rust_type == RustType::F64 && val_ty.is_integer_scalar() {
+                        // ⚠️ AN i32 VALUE INTO AN f64 LOCAL, IN STATEMENT POSITION. The COMPARISON
+                        // emitter already widens (`n > ((MAX_UNITS) as f64)`), so
+                        //
+                        //     if (n > MAX_UNITS) { n = MAX_UNITS }        packages/clansave
+                        //
+                        // compiled its test and rejected its assignment: `n = MAX_UNITS;`, expected
+                        // f64 found i32. Needs a native local AND an `: i32`-annotated global on the
+                        // right, which is why it stayed hidden until a game imported clansave beside
+                        // the rest of its packages. Widening is exact.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -10031,6 +10052,10 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         RustType::F64.from_value_expr(&val_code)
+                    } else if val_ty.is_integer_scalar() {
+                        // An i32-typed value into an f64-backed global. Widening is exact; emitted
+                        // raw it is E0308.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -10053,6 +10078,12 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         rust_type.from_value_expr(&val_code)
+                    } else if rust_type == RustType::F64 && val_ty.is_integer_scalar() {
+                        // ⚠️ An `: i32` global assigned into an f64-typed local. `let n = roster.len()`
+                        // infers f64, and `n = MAX_UNITS` (a `let MAX_UNITS: i32` in packages/clansave)
+                        // emitted `n = MAX_UNITS;` raw -- E0308, expected f64 found i32. Needs BOTH a
+                        // native local and an i32-annotated global, which is why so little hit it.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
