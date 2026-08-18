@@ -117,6 +117,7 @@ fn count(): number {
     for (let i: number = 0; i < 10; i = i + 1) { total = total + i }
     return total
 }
+console.log(count())
 "#;
         let program = parse(src_native).unwrap();
         let rust = compile(&program).unwrap();
@@ -124,9 +125,14 @@ fn count(): number {
             rust.contains("let mut total: f64"),
             "numeric-only reassignment keeps `total` native f64"
         );
+        // The boxing moved, it did not disappear. With the boxed wrapper elided for a fn every
+        // caller reaches directly, the f64 is wrapped at the CALL SITE
+        // (`Value::Number(count_native())`) instead of inside a wrapper's return. Either spelling
+        // satisfies what this is checking — that a native f64 crosses back to Value at the boundary
+        // — so accept both rather than pinning the assertion to one codegen shape.
         assert!(
-            rust.contains("Value::Number(total)"),
-            "f64 total is wrapped back to Value at the return boundary"
+            rust.contains("Value::Number(total)") || rust.contains("Value::Number(count_native())"),
+            "f64 total is wrapped back to Value at a boundary (wrapper return or call site)"
         );
     }
 

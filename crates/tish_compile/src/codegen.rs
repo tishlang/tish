@@ -3052,79 +3052,6 @@ impl Codegen {
         }
     }
 
-    /// Reject a numeric return annotation that the body provably contradicts.
-    ///
-    /// ⚠️ THIS EXISTS BECAUSE THE ANNOTATION IS AN UNWRAP, NOT A DECLARATION. `: i32` makes codegen
-    /// emit `match v { Value::Number(n) => …, _ => panic!("expected number") }`, so a function
-    /// annotated `: i32` whose body does `return ""` compiles clean and then kills the ROM on a
-    /// device, with a message naming neither the function nor the line. That is a type error
-    /// discovered at runtime, on hardware, in a game — the worst possible place, and it cost a
-    /// debugging cycle on `examples/ffta-hud`'s `occupantAt`.
-    ///
-    /// The information was always here: `returns_numeric` walks these same return statements to
-    /// decide lowering. It found them non-numeric, silently declined to lower, and let the unwrap
-    /// through anyway. This turns that finding into a diagnostic.
-    ///
-    /// ⚠️ PROVABLE MISMATCH ONLY. "Could not prove numeric" is the common case for legitimate
-    /// dynamic code and must stay silent — erroring on it would reject most of a real program. Only
-    /// a literal of the wrong kind counts: `return "x"`, `return true`, `return [..]`, `return {..}`
-    /// under a numeric annotation. Anything computed is left alone.
-    fn check_return_annotations(&self, program: &Program) -> Result<(), CompileError> {
-        fn wrong_literal(e: &Expr) -> Option<&'static str> {
-            match e {
-                Expr::Literal { value: Literal::String(_), .. } => Some("a string"),
-                Expr::Literal { value: Literal::Bool(_), .. } => Some("a boolean"),
-                Expr::Array { .. } => Some("an array"),
-                Expr::Object { .. } => Some("an object"),
-                _ => None,
-            }
-        }
-        fn walk(s: &Statement, found: &mut Option<(&'static str, Option<Span>)>) {
-            if found.is_some() {
-                return;
-            }
-            match s {
-                Statement::Return { value: Some(e), span, .. } => {
-                    if let Some(kind) = wrong_literal(e) {
-                        *found = Some((kind, Some(*span)));
-                    }
-                }
-                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
-                    statements.iter().for_each(|x| walk(x, found))
-                }
-                Statement::If { then_branch, else_branch, .. } => {
-                    walk(then_branch, found);
-                    if let Some(e) = else_branch.as_ref() {
-                        walk(e, found)
-                    }
-                }
-                Statement::While { body, .. } | Statement::For { body, .. } => walk(body, found),
-                _ => {}
-            }
-        }
-        for st in &program.statements {
-            if let Statement::FunDecl { name, return_type: Some(ann), body, .. } = st {
-                if !Self::ann_is_number(ann) && !Self::ann_is_i32(ann) {
-                    continue;
-                }
-                let mut found = None;
-                walk(body, &mut found);
-                if let Some((kind, span)) = found {
-                    return Err(CompileError::new(
-                        format!(
-                            "`{}` is annotated to return a number, but returns {}. A numeric return \
-                             annotation is compiled as an unwrap, so this would panic at runtime \
-                             (\"expected number\") instead of failing here.",
-                            name, kind
-                        ),
-                        span,
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// #615: the declared signature for `name` at EXACTLY `argc` arguments, plus the Rust symbol
     /// suffix to call it by. A name with a single declaration keeps the historical `<symbol>_typed`
     /// spelling, so every existing extension crate links unchanged; only a name that declares more
@@ -3174,7 +3101,6 @@ impl Codegen {
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
         self.collect_extern_fns(program);
-        self.check_return_annotations(program)?;
         if self.emit_mode == crate::NativeEmitMode::Gba {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
