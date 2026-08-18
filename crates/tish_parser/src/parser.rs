@@ -1178,7 +1178,6 @@ impl<'a> Parser<'a> {
         self.parse_type_params()?; // generic `fn f<T, U>(…)` — fn type params run gradually (boxed)
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::with_capacity(4);
-        let mut readonly_params: Vec<bool> = Vec::with_capacity(4);
         let mut rest_param = None;
         while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
             if matches!(self.peek_kind(), Some(TokenKind::Spread)) {
@@ -1206,21 +1205,6 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
-            // #672 — optional `readonly` marker: `declare fn f(readonly data: i32[])`.
-            // `readonly` is not a reserved word, so it is only a marker when an identifier follows
-            // it; `readonly: i32[]` stays an ordinary parameter named `readonly`.
-            let is_readonly = self
-                .peek()
-                .map(|t| {
-                    t.kind == TokenKind::Ident
-                        && t.literal.as_deref() == Some("readonly")
-                        && self.peek_ahead_kind(1) == Some(TokenKind::Ident)
-                })
-                .unwrap_or(false);
-            if is_readonly {
-                self.advance();
-            }
-            readonly_params.push(is_readonly);
             params.push(self.parse_fun_param()?);
             if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                 self.expect(TokenKind::Comma)?;
@@ -1247,7 +1231,6 @@ impl<'a> Parser<'a> {
             name,
             name_span,
             params,
-            readonly_params,
             rest_param,
             return_type,
             span: self.span_end(span_start),

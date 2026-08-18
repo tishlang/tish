@@ -775,7 +775,6 @@ impl Printer {
                 async_,
                 name,
                 params,
-                readonly_params,
                 rest_param,
                 return_type,
                 ..
@@ -788,9 +787,7 @@ impl Printer {
                 self.buf.push_str("fn ");
                 self.buf.push_str(name);
                 self.buf.push('(');
-                // #672 — the `readonly` marker is load-bearing (it is what lets an array handed to
-                // this native keep its typed representation), so formatting must not drop it.
-                self.param_list_marked(params, readonly_params, rest_param);
+                self.param_list(params, rest_param);
                 self.buf.push(')');
                 if let Some(rt) = return_type {
                     self.buf.push_str(": ");
@@ -1003,76 +1000,39 @@ impl Printer {
         self.buf.push('}');
     }
 
-    /// #672 — [`Self::param_list`] with per-parameter `readonly` markers (`declare fn` only).
-    fn param_list_marked(
-        &mut self,
-        params: &[FunParam],
-        readonly: &[bool],
-        rest: &Option<TypedParam>,
-    ) {
-        if !readonly.iter().any(|b| *b) {
-            return self.param_list(params, rest);
-        }
-        for (i, p) in params.iter().enumerate() {
-            if i > 0 {
-                self.buf.push_str(", ");
-            }
-            if readonly.get(i).copied().unwrap_or(false) {
-                self.buf.push_str("readonly ");
-            }
-            self.one_param(p);
-        }
-        if let Some(r) = rest {
-            if !params.is_empty() {
-                self.buf.push_str(", ");
-            }
-            self.buf.push_str("...");
-            self.buf.push_str(r.name.as_ref());
-            if let Some(t) = &r.type_ann {
-                self.buf.push_str(": ");
-                self.type_ann(t);
-            }
-        }
-    }
-
-    /// One formal parameter, without any leading marker.
-    fn one_param(&mut self, p: &FunParam) {
-        match p {
-            FunParam::Simple(tp) => {
-                self.buf.push_str(tp.name.as_ref());
-                if let Some(t) = &tp.type_ann {
-                    self.buf.push_str(": ");
-                    self.type_ann(t);
-                }
-                if let Some(e) = &tp.default {
-                    self.buf.push_str(" = ");
-                    self.expr(e);
-                }
-            }
-            FunParam::Destructure {
-                pattern,
-                type_ann,
-                default,
-            } => {
-                self.destruct_pat(pattern);
-                if let Some(t) = type_ann {
-                    self.buf.push_str(": ");
-                    self.type_ann(t);
-                }
-                if let Some(e) = default {
-                    self.buf.push_str(" = ");
-                    self.expr(e);
-                }
-            }
-        }
-    }
-
     fn param_list(&mut self, params: &[FunParam], rest: &Option<TypedParam>) {
         for (i, p) in params.iter().enumerate() {
             if i > 0 {
                 self.buf.push_str(", ");
             }
-            self.one_param(p);
+            match p {
+                FunParam::Simple(tp) => {
+                    self.buf.push_str(tp.name.as_ref());
+                    if let Some(t) = &tp.type_ann {
+                        self.buf.push_str(": ");
+                        self.type_ann(t);
+                    }
+                    if let Some(e) = &tp.default {
+                        self.buf.push_str(" = ");
+                        self.expr(e);
+                    }
+                }
+                FunParam::Destructure {
+                    pattern,
+                    type_ann,
+                    default,
+                } => {
+                    self.destruct_pat(pattern);
+                    if let Some(t) = type_ann {
+                        self.buf.push_str(": ");
+                        self.type_ann(t);
+                    }
+                    if let Some(e) = default {
+                        self.buf.push_str(" = ");
+                        self.expr(e);
+                    }
+                }
+            }
         }
         if let Some(r) = rest {
             if !params.is_empty() {

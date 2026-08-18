@@ -350,90 +350,15 @@ fn read_facade_agb_version(facade_path: &Path) -> Option<String> {
     None
 }
 
-/// Cargo `[profile.*]` blocks for the nested GBA crate.
+/// Build a Game Boy Advance ROM from generated `#![no_std]` Rust.
 ///
-/// #581 — the default used to be `lto = "fat"` + `codegen-units = 1`, which dominates wall-clock on
-/// the ~20k-line `run()` a real game generates, and every `tish build --target gba` paid it. Thin
-/// LTO across 8 CGUs keeps most of the size/speed win and lets rustc parallelize; fat LTO stays one
-/// env var away for a ship build.
+/// Emits an agb-style cargo project (nightly + build-std + `thumbv4t-none-eabi` +
+/// `gba.ld`) that links the `tishlang_runtime_gba` facade under the `tishlang_runtime`
+/// name (the `package =` rename), builds it, then runs `agb-gbafix` on the ELF.
 ///
-/// Env knobs (checked here, not by cargo):
-/// - `TISH_FAST_NATIVE_BUILD=1` — iteration profile: no LTO, opt-level 1, many codegen-units.
-///   Same flag as desktop native; use this for day-to-day GBA work.
-/// - `TISH_GBA_FAT_LTO=1` — old ship profile: fat LTO + single CGU (slow; smallest/fastest ROM).
-/// - default — thin LTO, opt-level 3, 8 CGUs, no debuginfo. Much faster than fat LTO while still
-///   producing a solid ROM.
-/// - `TISH_GBA_DEBUG=1` — keep debuginfo in the release profile (slower link; for mgba backtraces).
-fn gba_cargo_profiles_toml() -> String {
-    let debug = if std::env::var("TISH_GBA_DEBUG").as_deref() == Ok("1") {
-        "true"
-    } else {
-        "false"
-    };
-    if std::env::var("TISH_FAST_NATIVE_BUILD").as_deref() == Ok("1") {
-        return format!(
-            r#"[profile.dev]
-opt-level = 1
-debug = {debug}
-
-[profile.dev.build-override]
-opt-level = 1
-
-[profile.release]
-opt-level = 1
-lto = false
-codegen-units = 16
-incremental = true
-debug = {debug}
-panic = "abort"
-
-[profile.release.build-override]
-opt-level = 1
-"#
-        );
-    }
-    if std::env::var("TISH_GBA_FAT_LTO").as_deref() == Ok("1") {
-        return format!(
-            r#"[profile.dev]
-opt-level = 3
-debug = {debug}
-
-[profile.dev.build-override]
-opt-level = 3
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-debug = {debug}
-panic = "abort"
-
-[profile.release.build-override]
-opt-level = 3
-"#
-        );
-    }
-    format!(
-        r#"[profile.dev]
-opt-level = 3
-debug = {debug}
-
-[profile.dev.build-override]
-opt-level = 3
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 8
-debug = {debug}
-panic = "abort"
-
-[profile.release.build-override]
-opt-level = 3
-"#
-    )
-}
-
+/// Runs its own `cargo build` (NOT `run_cargo_build`) so the `.cargo/config.toml`
+/// rustflags (`-Tgba.ld`, `-Ctarget-cpu=arm7tdmi`) apply — `run_cargo_build` sets a
+/// `RUSTFLAGS` env that would shadow them.
 /// Read `version = "…"` from the `[package]` section of a crate's `Cargo.toml`.
 fn read_crate_version(crate_dir: &Path) -> Option<String> {
     let toml = fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
@@ -550,17 +475,6 @@ tishlang_runtime = {{ path = {runtime:?}{version}{features} }}
     Ok(())
 }
 
-/// Build a Game Boy Advance ROM from generated `#![no_std]` Rust.
-///
-/// Emits an agb-style cargo project (nightly + build-std + `thumbv4t-none-eabi` +
-/// `gba.ld`) that links the `tishlang_runtime_gba` facade under the `tishlang_runtime`
-/// name (the `package =` rename), builds it, then runs `agb-gbafix` on the ELF.
-///
-/// Runs its own `cargo build` (NOT `run_cargo_build`) so the `.cargo/config.toml`
-/// rustflags (`-Tgba.ld`, `-Ctarget-cpu=arm7tdmi`) apply — `run_cargo_build` sets a
-/// `RUSTFLAGS` env that would shadow them.
-///
-/// Profiles come from [`gba_cargo_profiles_toml`].
 fn build_gba_rom(
     rust_code: &str,
     native_modules: Vec<ResolvedNativeModule>,
@@ -629,7 +543,6 @@ fn build_gba_rom(
     }
 
     let facade = facade_path.display().to_string().replace('\\', "/");
-    let profiles = gba_cargo_profiles_toml();
     let cargo_toml = format!(
         r#"[package]
 name = "tish_output"
@@ -648,7 +561,20 @@ path = "src/main.rs"
 tishlang_runtime = {{ package = "tishlang_runtime_gba", path = {facade:?} }}
 agb = "{agb_version}"
 {more_deps}
-{profiles}
+[profile.dev]
+opt-level = 3
+debug = true
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
+
+[profile.release.build-override]
+opt-level = 3
 "#,
     );
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
@@ -988,68 +914,5 @@ mod tests {
         // `full` expands to every RUNTIME_CARGO_FEATURES entry; redundant `http` must not duplicate.
         assert_eq!(f.len(), super::RUNTIME_CARGO_FEATURES.len());
         assert_eq!(f.iter().filter(|x| *x == "http").count(), 1);
-    }
-
-    // #581 — the GBA ROM profile policy. The default used to be fat LTO + 1 CGU, so every
-    // `tish build --target gba` paid a full fat-LTO link over the ~20k-line `run()` a real game
-    // generates. These assert the policy rather than the wall-clock (which is machine-dependent):
-    // thin by default, fat still reachable, and a genuinely fast iteration profile.
-    //
-    // Serialized because they mutate process-wide env; `gba_cargo_profiles_toml` reads it directly.
-    #[test]
-    fn gba_profiles_follow_581_policy() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let restore = |k: &str, v: Option<String>| match v {
-            Some(v) => std::env::set_var(k, v),
-            None => std::env::remove_var(k),
-        };
-        let keys = ["TISH_GBA_FAT_LTO", "TISH_FAST_NATIVE_BUILD", "TISH_GBA_DEBUG"];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-        for k in keys {
-            std::env::remove_var(k);
-        }
-
-        let default = super::gba_cargo_profiles_toml();
-        assert!(
-            default.contains(r#"lto = "thin""#) && default.contains("codegen-units = 8"),
-            "default ROM profile must be thin LTO across 8 CGUs, not fat + 1 (#581):\n{default}"
-        );
-        assert!(
-            !default.contains(r#"lto = "fat""#),
-            "fat LTO must be opt-in, not the default (#581):\n{default}"
-        );
-        assert!(
-            default.contains("debug = false"),
-            "release debuginfo must be opt-in via TISH_GBA_DEBUG (#581)"
-        );
-
-        std::env::set_var("TISH_GBA_FAT_LTO", "1");
-        let ship = super::gba_cargo_profiles_toml();
-        assert!(
-            ship.contains(r#"lto = "fat""#) && ship.contains("codegen-units = 1"),
-            "TISH_GBA_FAT_LTO=1 must still reach the smallest-ROM profile (#581):\n{ship}"
-        );
-        std::env::remove_var("TISH_GBA_FAT_LTO");
-
-        std::env::set_var("TISH_FAST_NATIVE_BUILD", "1");
-        let fast = super::gba_cargo_profiles_toml();
-        assert!(
-            fast.contains("lto = false") && fast.contains("opt-level = 1"),
-            "TISH_FAST_NATIVE_BUILD=1 is the iteration profile — no LTO, opt-level 1 (#581):\n{fast}"
-        );
-        std::env::remove_var("TISH_FAST_NATIVE_BUILD");
-
-        std::env::set_var("TISH_GBA_DEBUG", "1");
-        assert!(
-            super::gba_cargo_profiles_toml().contains("debug = true"),
-            "TISH_GBA_DEBUG=1 must keep release debuginfo (#581)"
-        );
-
-        for (k, v) in saved {
-            restore(k, v);
-        }
     }
 }

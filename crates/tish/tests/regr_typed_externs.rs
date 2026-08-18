@@ -57,31 +57,3 @@ fn untyped_extern_call_stays_boxed() {
         "untyped extern `greet` must stay boxed (no `greet_typed` direct call).\n{rust}"
     );
 }
-
-/// #675 — a `declare fn` with a NON-SCALAR parameter must not register a typed extern.
-///
-/// `is_native()` only asks "is it not `Value`", so an array parameter passed the eligibility check,
-/// registered a typed extern, and routed the call to a `<name>_typed` sibling that cannot exist:
-///
-/// ```text
-/// error[E0425]: cannot find function `grid_from_gids_typed` in crate `tish_gba_game_engine`
-/// ```
-///
-/// That made #672's `readonly` unusable on exactly the natives it was built for — an array sink —
-/// because declaring the function to carry the marker also opted it into a dispatch it can never
-/// satisfy. Declaration (metadata for the aliasing analysis) and dispatch are now independent.
-#[test]
-fn array_param_declaration_does_not_register_a_typed_extern() {
-    let rust = emit_fixture();
-    assert!(
-        !rust.contains("sink_typed"),
-        "`sink(n: number, readonly data: number[])` has an array parameter, so there is no scalar \
-         ABI to generate a `sink_typed` sibling from — the call must stay on the boxed namespace \
-         path. Routing it to `sink_typed` is a hard E0425 in the generated program (#675).\n{rust}"
-    );
-    // ...and the scalar declaration in the same file must still lower directly.
-    assert!(
-        rust.contains("add_typed"),
-        "narrowing the eligibility check must not cost the scalar case its direct typed call.\n{rust}"
-    );
-}

@@ -1,13 +1,7 @@
-import { greet, add, sink } from 'cargo:demo_shim'
+import { greet, add } from 'cargo:demo_shim'
 
 console.log(greet('from cargo'))
 
 // `add` has a typed signature shipped in the crate's `tish.d.tish` (auto-loaded) — this call lowers
 // to a direct `demo_shim::add_typed(2, 3)`, not the boxed namespace-object dispatch.
 console.log(add(2, 3))
-
-// #675: `sink` takes an array, so its declaration must not route the call to a `sink_typed`
-// sibling that cannot exist — it stays on the boxed path.
-let buf: number[] = []
-buf.push(1)
-sink(1, buf)

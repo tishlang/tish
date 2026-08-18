@@ -30,60 +30,11 @@ pub use tishlang_core::{
     has_pending_throw, set_pending_throw, stack_overflow_error, take_pending_throw, CallDepthGuard,
 };
 
-unsafe extern "C" {
-    /// End of the `.iwram` output section — provided by agb's `gba.ld`. IWRAM runs
-    /// 0x0300_0000..0x0300_8000; agb's code/data occupies the bottom and the user
-    /// stack grows DOWN from 0x0300_7F00 toward this address. Anything below it is
-    /// live agb data (the audio mixer's buffers among them), so this is the real
-    /// bottom of the stack.
-    static __iwram_end: u8;
-}
-
-/// Headroom kept above [`__iwram_end`] (#655): must cover the frames emitted between
-/// two guard checks plus the bail path that parks the `RangeError`. Boxed `Value`
-/// frames on GBA run a few hundred bytes each, and the total stack is under 32 KB,
-/// so this is deliberately small relative to the host's 256 KB margin.
-const GBA_STACK_MARGIN: usize = 2 * 1024;
-
-/// #655 — is the GBA stack nearly exhausted? The host probe (`stacker::remaining_stack`)
-/// needs `std` and reports no bounds here, so its `None → floor 1` fallback made the
-/// guard dead code on the one target where overflow is unrecoverable: there is no MMU
-/// and no guard page, so the stack silently grows down into agb's IWRAM data and the
-/// corruption surfaces frames later as an illegal opcode somewhere unrelated.
-///
-/// The bounds ARE known statically here — the linker hands us the IWRAM extent — so
-/// this is a link-time constant plus a pointer compare, about the cost of the
-/// thread-local read it replaces on the host.
-#[inline]
-pub fn stack_low() -> bool {
-    let anchor = 0u8;
-    let sp = &anchor as *const u8 as usize;
-    let floor = (&raw const __iwram_end) as usize + GBA_STACK_MARGIN;
-    sp < floor
-}
-
-/// Enter a boxed user-fn call frame, or trip the recursion guard. Trips on EITHER the
-/// counted ceiling (`tishlang_core`) or real stack pressure ([`stack_low`]) — on a
-/// 32 KB IWRAM stack the counted default is far out of reach, so pressure is the
-/// trigger that actually fires. On trip: parks the catchable `RangeError` and returns
-/// `None`, exactly as on the host.
+/// Enter a boxed user-fn call frame or trip the recursion guard. On GBA there is
+/// no stack-pressure probe (no `std`), so this is just the counted-depth guard.
 #[inline]
 pub fn enter_call_guarded() -> Option<CallDepthGuard> {
-    if stack_low() {
-        set_pending_throw(stack_overflow_error());
-        return None;
-    }
     tishlang_core::enter_call_guarded()
-}
-
-/// #655 — bail path for a tripped typed-fn recursion guard (GBA mirror of the host's
-/// `recursion_tripped_f64`): park the catchable `RangeError` and unwind the numeric
-/// frame with NaN until the first `Value` frame's pending-throw checkpoint raises it.
-#[cold]
-#[inline(never)]
-pub fn recursion_tripped_f64() -> f64 {
-    set_pending_throw(stack_overflow_error());
-    f64::NAN
 }
 
 // ── Error type for throw/return non-local control flow ───────────────────────

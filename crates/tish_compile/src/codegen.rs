@@ -1000,18 +1000,6 @@ struct ParamUse {
     /// could mutate the array, and a write to the caller's array would be lost on the owned copy.
     /// `classify_vec_param` ignores this field; only `native_arr_param_fns` reads it.
     forwarded: bool,
-    /// #663 — one entry per site that set `forwarded`, naming the callee and argument position
-    /// where determinable. Populated at the same place as `forwarded`, so it is exactly as complete.
-    forward_sites: Vec<ForwardSite>,
-}
-
-/// #663 — where a bare array argument was handed to a callee.
-#[derive(Debug, Clone, PartialEq)]
-enum ForwardSite {
-    /// `f(arr)` with `f` a plain identifier — the body may be inspectable.
-    Named(String, usize),
-    /// A method call, computed callee, or native-module member: the body is not visible.
-    Opaque,
 }
 
 /// #175 — kind of one parameter of a native-vec free fn (spectral_norm/queens shape).
@@ -3011,19 +2999,6 @@ impl Codegen {
             };
             // Every parameter must be a simple, explicitly-typed native scalar; a `Value` param (an
             // untyped one) means the direct call would gain nothing, so keep the whole fn boxed.
-            //
-            // #675 — "native" is not the same as "has a scalar ABI". `is_native()` is merely
-            // `!= Value`, so an `i32[]` parameter passed it, registered a typed extern, and the call
-            // was routed to a `<name>_typed` sibling that cannot exist:
-            //
-            //     error[E0425]: cannot find function `grid_from_gids_typed`
-            //
-            // That made #672's `readonly` unusable on exactly the natives it was built for — an
-            // array sink — because declaring the function to carry the marker also opted it into a
-            // dispatch it can never satisfy. The two are now independent: a declaration with a
-            // non-scalar parameter still contributes its `readonly` flags to the aliasing analysis,
-            // it just does not register a typed extern, so the CALL stays on the boxed namespace
-            // path it uses today (it runs once per level; nobody is trying to speed it up).
             let mut ptys = Vec::with_capacity(params.len());
             let mut ok = true;
             for p in params {
@@ -3031,7 +3006,7 @@ impl Codegen {
                     FunParam::Simple(tp) if tp.default.is_none() => match &tp.type_ann {
                         Some(ann) => {
                             let ty = RustType::from_annotation(ann);
-                            if ty.is_native() && Self::has_scalar_extern_abi(&ty) {
+                            if ty.is_native() {
                                 ptys.push(ty);
                             } else {
                                 ok = false;
@@ -3312,12 +3287,8 @@ impl Codegen {
             if self.emit_mode == crate::NativeEmitMode::Gba {
                 let mut array_names: Vec<String> = Vec::new();
                 Self::collect_annotated_array_names(&program.statements, &mut array_names);
-                let ro_natives = Self::collect_declared_readonly_params(&program.statements);
-                self.arrays_passed_to_calls = Self::collect_escaping_array_names(
-                    &program.statements,
-                    &array_names,
-                    &ro_natives,
-                );
+                self.arrays_passed_to_calls =
+                    Self::collect_escaping_array_names(&program.statements, &array_names);
             }
             // Pick the integer representation where the values allow it. GBA only: off-target the
             // `f64` layout is free and eligibility must stay byte-identical to before.
@@ -3376,11 +3347,9 @@ impl Codegen {
                 Self::collect_native_lcg_fns(&program.statements, &self.native_fns);
             // #381 — fns on a call-graph cycle get guarded rotation copies (default ON;
             // TISH_NATIVE_RECUR_GUARD=0 restores the plain unguarded emission).
-            // #655: GBA was excluded because the no_std runtime had no stack-pressure probe.
-            // `tishlang_runtime_gba` now derives a real floor from the link map (`__iwram_end`),
-            // and it matters MORE here than on the host: 32 KB of IWRAM, no MMU, no guard page,
-            // so an unguarded overflow silently overwrites agb's live data instead of faulting.
-            self.native_recur_fns = if crate::native_recur_guard_enabled() {
+            self.native_recur_fns = if crate::native_recur_guard_enabled()
+                && self.emit_mode != crate::NativeEmitMode::Gba
+            {
                 Self::compute_native_recur_fns(&program.statements, &self.native_fns)
             } else {
                 std::collections::HashMap::new()
@@ -7160,24 +7129,11 @@ impl Codegen {
 
                 // Rebind outer vars to Rc<RefCell<>> with _cell suffix.
                 // If outer scope already has the var as RefCell, just clone it.
-                //
-                // #654: a READ-ONLY outer var is never assigned anywhere in the defining scope
-                // (that is exactly what keeps it out of `rc_cell_storage`), so the cell can never
-                // change and the indirection buys nothing — it cost a `VmRef` allocation per
-                // closure plus a `RefCell` borrow on EVERY call, to re-fetch a value that was
-                // already fixed. Snapshot it by value instead. This is invisible in the source: a
-                // fn that mentions six named constants was measurably slower than one that inlined
-                // the same six literals, which pushed authors toward magic numbers.
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     if self.rc_cell_storage_contains(outer_var) {
                         self.writeln(&format!(
                             "let {}_cell = {}.clone();",
-                            var_escaped, var_escaped
-                        ));
-                    } else if read_only_outer_vars.contains(outer_var) {
-                        self.writeln(&format!(
-                            "let {}_capt = {}.clone();",
                             var_escaped, var_escaped
                         ));
                     } else {
@@ -7190,20 +7146,12 @@ impl Codegen {
 
                 self.writeln(&format!("let {} = {{", name_str));
                 self.indent += 1;
-                // Clone RefCell for outer vars so closure can capture (#654: read-only vars carry
-                // their snapshot in instead — no cell exists for them).
+                // Clone RefCell for outer vars so closure can capture
                 for outer_var in &outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
-                    let suffix = if !self.rc_cell_storage_contains(outer_var)
-                        && read_only_outer_vars.contains(outer_var)
-                    {
-                        "capt"
-                    } else {
-                        "cell"
-                    };
                     self.writeln(&format!(
-                        "let {}_{} = {}_{}.clone();",
-                        var_escaped, suffix, var_escaped, suffix
+                        "let {}_cell = {}_cell.clone();",
+                        var_escaped, var_escaped
                     ));
                 }
                 // Clone the cell so the closure can reference the function recursively
@@ -7380,19 +7328,11 @@ impl Codegen {
                         var_escaped, var_escaped
                     ));
                 }
-                // Read-only outer vars: bind from the captured snapshot (#654 — no cell, no borrow).
-                // `read_only_outer_vars` already excludes everything in `rc_cell_storage`, so every
-                // name here was given a `_capt` snapshot above.
+                // Read-only outer vars: Value binding from borrow (avoids param-shadow issues)
                 for outer_var in &read_only_outer_vars {
                     let var_escaped = Self::escape_ident(outer_var);
                     self.writeln(&format!(
-                        // #669 — `let mut`: an immutable capture can still be handed to a native-vec
-                        // fn as `&mut Vec` (`mutate_nv(&mut U)`), and a non-`mut` binding makes that
-                        // `error[E0596]: cannot borrow as mutable` — a hard compile failure on an
-                        // ordinary shape (an array passed to a fn that writes an element). The
-                        // generated crate is `#![allow(unused, ...)]`, which covers `unused_mut`, so
-                        // this is silent where the binding is never mutated.
-                        "let mut {} = {}_capt.clone();",
+                        "let {} = (*{}_cell.borrow()).clone();",
                         var_escaped, var_escaped
                     ));
                 }
@@ -8284,22 +8224,7 @@ impl Codegen {
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
                     let var_type = self.type_context.get_type(name.as_ref());
                     if var_type.is_native() {
-                        // #665 — READ WITHOUT HOLDING THE GUARD. `(*cell.borrow())` puts the guard
-                        // in a temporary whose lifetime runs to the end of the enclosing STATEMENT,
-                        // so in argument position it is still held while `value_call` runs the
-                        // callee — and a callee that assigns this same module variable panics on
-                        // `borrow_mut`. The shape is ordinary (`setG(g)`, `descend(seed)`), it fails
-                        // inside the callee rather than at the call, and the panic names vmref.rs
-                        // rather than anything in the program.
-                        //
-                        // `vm_read` copies out and drops the guard at its own return — the boxed
-                        // branch below has always used it, for the same hazard one build config
-                        // over (two reads of one cell under `send-values` self-deadlock). The
-                        // argument is passed by value either way, so this is not a semantic change.
-                        var_type.to_value_expr(&format!(
-                            "tishlang_runtime::vm_read(&{})",
-                            escaped
-                        ))
+                        var_type.to_value_expr(&format!("(*{}.borrow())", escaped))
                     } else {
                         format!("tishlang_runtime::vm_read(&{})", escaped)
                     }
@@ -8429,26 +8354,6 @@ impl Codegen {
                                         // `get_prop`-ing every field back out. emit_native_expr falls
                                         // back to the typed/value path for non-literal args.
                                         let native_val = self.emit_native_expr(e, elem_type.as_ref())?;
-                                        // #669 — PUSHING A BARE VARIABLE MOVES IT. For a non-`Copy`
-                                        // element type (`Value`, `String`, an aggregate) the bare
-                                        // identifier is moved into the Vec, so a second push of the
-                                        // same variable is a use-after-move:
-                                        //
-                                        //     while (i < 4) { C.push(i); D.push(i); i = i + 1 }
-                                        //     error[E0382]: use of moved value: `i`
-                                        //
-                                        // A hard compile failure in the generated program, and the
-                                        // shape is ordinary — filling two arrays from one counter.
-                                        // Giving each loop its own counter avoids it, which is why
-                                        // it reads as arbitrary. `Copy` elements (the numeric
-                                        // scalars) are unaffected and keep the bare move.
-                                        let native_val = if !elem_type.is_copy()
-                                            && matches!(e, Expr::Ident { .. })
-                                        {
-                                            format!("{}.clone()", native_val)
-                                        } else {
-                                            native_val
-                                        };
                                         push_stmts.push(format!("{}.push({});", base, native_val));
                                     }
                                 }
@@ -9710,16 +9615,9 @@ impl Codegen {
                 }
             }
             Expr::Index { optional, .. } if !optional => {
-                // #658 — an out-of-range read of a promoted module array must answer `null`, the
-                // same as interp/vm/node. Going through the typed path and wrapping would report
-                // the sentinel (NaN before, 0 after the integer-domain change) as a real element.
-                if let Some(v) = self.emit_module_const_index_as_value(expr)? {
-                    v
-                } else {
-                    // Try native Vec<T> fast path via emit_typed_expr; wrap result.
-                    let (code, ty) = self.emit_typed_expr(expr)?;
-                    if ty.is_native() { ty.to_value_expr(&code) } else { code }
-                }
+                // Try native Vec<T> fast path via emit_typed_expr; wrap result.
+                let (code, ty) = self.emit_typed_expr(expr)?;
+                if ty.is_native() { ty.to_value_expr(&code) } else { code }
             }
             Expr::Index {
                 object,
@@ -14539,16 +14437,6 @@ impl Codegen {
                 val_code
             } else if val_ty == RustType::Value {
                 elem_type.from_value_expr(&val_code)
-            } else if *elem_type.as_ref() == RustType::Value && val_ty.is_native() {
-                // #669 — BOX A NATIVE VALUE INTO A BOXED ARRAY. The array lowered to `Vec<Value>`
-                // (it escapes, or its elements are not uniformly numeric) while the RHS stayed
-                // native, and this arm passed the raw `f64`/`i32` straight through:
-                //
-                //     (*WARM.borrow_mut())[__i] = __v;   // expected `Value`, found `f64`
-                //
-                // A hard `E0308` in the generated program rather than a slow path — `WARM[i] = …`
-                // simply would not build once the array was boxed for any reason.
-                val_ty.to_value_expr(&val_code)
             } else {
                 val_code
             }
@@ -19120,58 +19008,7 @@ impl Codegen {
     ///
     /// Over-approximating only costs an array its native lowering. Under-approximating brings back a
     /// silently wrong result, so the bias is deliberate.
-    /// #675 — does this type have a by-value scalar ABI a typed extern can be generated for?
-    ///
-    /// The numeric scalars, `Fixed`, `bool` and `String` cross the extern boundary as themselves.
-    /// An aggregate — an array (`Vec`), an object/struct, a tuple, an `Option`/`Boxed` wrapper —
-    /// does not: there is no `<name>_typed` sibling to call, and routing to one is a hard
-    /// `E0425` in the generated program. Distinct from [`RustType::is_native`], which only asks
-    /// "is it not `Value`" and therefore says yes to all of these.
-    fn has_scalar_extern_abi(ty: &RustType) -> bool {
-        matches!(
-            ty,
-            RustType::F64
-                | RustType::I32
-                | RustType::Fixed
-                | RustType::Bool
-                | RustType::String
-                | RustType::Unit
-        ) || ty.is_narrow_int()
-    }
-
-    /// #672 — per-parameter `readonly` flags from each `declare fn`, keyed by function name.
-    ///
-    /// A `cargo:` native's body is invisible, so #663 has to assume the worst and box any array
-    /// handed to one — on every read, everywhere in the program, for a call that typically runs once
-    /// per level. But a native's contract is already written down; `readonly` lets the crate author
-    /// state the part the compiler cannot see: this parameter is read during the call, not retained
-    /// and not written through. Opt-in, because a native that DOES mutate its argument must keep
-    /// today's behaviour and silence has to keep meaning "assume it might".
-    fn collect_declared_readonly_params(
-        stmts: &[Statement],
-    ) -> std::collections::HashMap<String, Vec<bool>> {
-        let mut out: std::collections::HashMap<String, Vec<bool>> =
-            std::collections::HashMap::new();
-        for s in stmts {
-            if let Statement::DeclareFun {
-                name,
-                readonly_params,
-                ..
-            } = s
-            {
-                if readonly_params.iter().any(|b| *b) {
-                    out.insert(name.to_string(), readonly_params.clone());
-                }
-            }
-        }
-        out
-    }
-
-    fn collect_escaping_array_names(
-        stmts: &[Statement],
-        names: &[String],
-        ro_natives: &std::collections::HashMap<String, Vec<bool>>,
-    ) -> std::collections::HashSet<String> {
+    fn collect_escaping_array_names(stmts: &[Statement], names: &[String]) -> std::collections::HashSet<String> {
         // `for_each_stmt_expr` deliberately does NOT descend into `FunDecl` bodies, so the forwarding
         // call is normally invisible to it — the array is declared inside a function and passed
         // inside that same function, which is exactly the reported shape. Gather nested bodies as
@@ -19218,99 +19055,11 @@ impl Codegen {
             // is about. Using it deopted arrays that are legitimately native
             // (`numeric_returning_fn_keeps_pushed_array_native`). #597 is specifically "passed as a
             // call argument", which is what `forwarded` means.
-            //
-            // #663: being forwarded is not by itself an aliasing hazard — it is a hazard only if
-            // the CALLEE can mutate the array or let it escape. When every forwarding site targets
-            // a local fn whose corresponding parameter provably does neither, boxing the array buys
-            // nothing and costs a boxed read on every OTHER access, which is usually a hot loop
-            // while the call that caused it may run once per level.
-            if f.forwarded
-                && !Self::forward_sites_are_harmless(stmts, &f.forward_sites, ro_natives)
-            {
+            if f.forwarded {
                 out.insert(n.clone());
             }
         }
         out
-    }
-
-    /// #663 — can every call that received this array be trusted not to alias or mutate it?
-    ///
-    /// True only when EVERY recorded site names a locally-declared `fn` (so the body is visible)
-    /// and that fn's parameter in the receiving position is neither written, escaped, nor forwarded
-    /// onward. Anything opaque — a `cargo:` native, a method call, a value-position callee, an
-    /// unknown arity — is false, and the array keeps today's conservative boxing.
-    ///
-    /// Being forwarded is not by itself an aliasing hazard; it is one only if the callee can write
-    /// through the reference or let it escape. Boxing on the mere fact of a call costs a boxed read
-    /// on every OTHER access — usually a hot loop, while the call that caused it may run once.
-    fn forward_sites_are_harmless(
-        stmts: &[Statement],
-        sites: &[ForwardSite],
-        ro_natives: &std::collections::HashMap<String, Vec<bool>>,
-    ) -> bool {
-        if sites.is_empty() {
-            return false; // `forwarded` was set but nothing was recorded — do not assume safety
-        }
-        for site in sites {
-            let ForwardSite::Named(callee, pos) = site else {
-                return false; // opaque callee
-            };
-            // #672 — a native whose `declare fn` marks this parameter `readonly`. The body is
-            // still invisible, but the contract is declared, and that is exactly the fact #663 was
-            // missing rather than something it decided against.
-            if ro_natives
-                .get(callee)
-                .and_then(|flags| flags.get(*pos))
-                .copied()
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let Some((params, body)) = Self::find_local_fn(stmts, callee) else {
-                return false; // an import, an unmarked native, or a value-position closure
-            };
-            let Some(FunParam::Simple(tp)) = params.get(*pos) else {
-                return false; // rest/destructured param, or fewer params than args
-            };
-            let mut pu = ParamUse::default();
-            Self::for_each_stmt_expr(body, &mut |e| {
-                Self::scan_param_use(e, tp.name.as_ref(), false, &mut pu)
-            });
-            if pu.is_mut || pu.escaped || pu.forwarded {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// #663 — locate a top-level `fn NAME` so its parameter uses can be inspected. Only top-level
-    /// declarations: a nested one is not reliably the callee at an arbitrary call site.
-    fn find_local_fn<'a>(
-        stmts: &'a [Statement],
-        name: &str,
-    ) -> Option<(&'a [FunParam], &'a Statement)> {
-        for s in stmts {
-            let inner = match s {
-                Statement::Export { declaration, .. } => match declaration.as_ref() {
-                    tishlang_ast::ExportDeclaration::Named(inner) => inner.as_ref(),
-                    _ => continue,
-                },
-                other => other,
-            };
-            if let Statement::FunDecl {
-                name: fname,
-                params,
-                rest_param: None,
-                body,
-                ..
-            } = inner
-            {
-                if fname.as_ref() == name {
-                    return Some((params.as_slice(), body.as_ref()));
-                }
-            }
-        }
-        None
     }
 
     fn for_each_expr_root(stmts: &[Statement], f: &mut dyn FnMut(&Expr)) {
@@ -22261,23 +22010,6 @@ impl Codegen {
                         CallArg::Expr(Expr::Ident { name, .. }) if name.as_ref() == p => {
                             // forward (native-vec re-borrows; arr-param owned-copy must reject).
                             f.forwarded = true;
-                            // #663 — record WHERE it was forwarded, so a caller can ask whether the
-                            // callee could actually alias or mutate it. Recorded here, at the one
-                            // site that sets `forwarded`, so the record can never be less complete
-                            // than the flag itself — a separate AST walk could miss an expression
-                            // variant and silently call a real forward "harmless".
-                            match callee.as_ref() {
-                                Expr::Ident { name: cn, .. } => {
-                                    f.forward_sites.push(ForwardSite::Named(
-                                        cn.to_string(),
-                                        args.iter()
-                                            .position(|x| std::ptr::eq(x, a))
-                                            .unwrap_or(usize::MAX),
-                                    ));
-                                }
-                                // Method call, computed callee, native module member: body unknown.
-                                _ => f.forward_sites.push(ForwardSite::Opaque),
-                            }
                         }
                         CallArg::Expr(e) | CallArg::Spread(e) => {
                             Self::scan_param_use(e, p, false, f)
@@ -25668,68 +25400,6 @@ impl Codegen {
         }
     }
 
-    /// #658 — a promoted module-array read in VALUE position, whose index is not provably in
-    /// range. The typed path has to answer with an in-band sentinel (there is no `i32` or `f64`
-    /// that means "absent"), and wrapping that sentinel would report it as a real element: `NaN`
-    /// before the integer-domain change, `0` after. Neither is what an out-of-range read means, and
-    /// neither matches what every other backend says:
-    ///
-    /// ```text
-    /// let LIT: i32[] = [...]
-    /// console.log(LIT[999999])     // interp / vm / node -> null,  native -> NaN
-    /// ```
-    ///
-    /// In value position the representation is a `Value`, so the sentinel is unnecessary — the
-    /// bounds check can yield `Value::Null` directly and native finally agrees with the rest.
-    /// Returns `None` for anything this does not apply to (proven in-bounds, not a promoted array),
-    /// leaving the fast typed path exactly as it is.
-    fn emit_module_const_index_as_value(
-        &mut self,
-        expr: &Expr,
-    ) -> Result<Option<String>, CompileError> {
-        let Expr::Index { object, index, optional, .. } = expr else {
-            return Ok(None);
-        };
-        if *optional {
-            return Ok(None);
-        }
-        let Expr::Ident { name, .. } = object.as_ref() else {
-            return Ok(None);
-        };
-        let Some(static_name) = Self::module_const_array_static(
-            &self.module_const_f64_arrays,
-            &self.module_const_f64_aliases,
-            name.as_ref(),
-        ) else {
-            return Ok(None);
-        };
-        // A proven-in-range read cannot reach the sentinel — leave it on the direct-load path.
-        if self.index_in_bounds(index, name.as_ref()) {
-            return Ok(None);
-        }
-        let idx_usize = self.emit_index_usize(index)?;
-        let is_int = self.module_const_int_statics.contains(&static_name);
-        let elem = if is_int {
-            format!("Value::Number({}[_i] as f64)", static_name)
-        } else {
-            format!("Value::Number({}[_i])", static_name)
-        };
-        let const_len = self
-            .cum_static_and_len(name.as_ref())
-            .map(|(_, n)| n)
-            .or_else(|| self.module_const_f64_arrays.get(name.as_ref()).map(|v| v.len()))
-            .unwrap_or(0);
-        let bound = if const_len > 0 {
-            const_len.to_string()
-        } else {
-            format!("{}.len()", static_name)
-        };
-        Ok(Some(format!(
-            "{{ let _i = {}; if _i < {} {{ {} }} else {{ Value::Null }} }}",
-            idx_usize, bound, elem
-        )))
-    }
-
     fn emit_typed_expr(&mut self, expr: &Expr) -> Result<(String, RustType), CompileError> {
         match expr {
             // ── literals ─────────────────────────────────────────────────────────
@@ -26107,17 +25777,8 @@ impl Codegen {
                 }
 
                 // Fall back: convert both sides to Value and use the runtime.
-                // #658 — an operand that is an unproven promoted-array read must become `null` out
-                // of range, not the boxed in-band sentinel. Boxing here is exactly the conversion
-                // that would turn "absent" into a real `0` (or, before, `NaN`).
-                let lv = match self.emit_module_const_index_as_value(left)? {
-                    Some(v) => v,
-                    None => Self::box_operand_for_runtime(left, &l, &lt),
-                };
-                let rv = match self.emit_module_const_index_as_value(right)? {
-                    Some(v) => v,
-                    None => Self::box_operand_for_runtime(right, &r, &rt),
-                };
+                let lv = Self::box_operand_for_runtime(left, &l, &lt);
+                let rv = Self::box_operand_for_runtime(right, &r, &rt);
                 let result = self.emit_binop(&lv, *op, &rv, *span)?;
                 Ok((result, RustType::Value))
             }
@@ -26181,55 +25842,26 @@ impl Codegen {
                                         .map(|v| v.len())
                                 })
                                 .unwrap_or(0);
-                            // #658 — THE BOUNDS-CHECKED FALLBACK STAYS IN THE INTEGER DOMAIN TOO.
-                            //
-                            // The previous note here reasoned that out-of-range "still has to be
-                            // able to answer NaN, and there is no i32 that means absent". The
-                            // premise does not survive checking what the other backends answer:
-                            //
-                            //     let LIT: i32[] = [...]
-                            //     console.log(LIT[999999])
-                            //     interp / vm / node -> null      native -> NaN
-                            //
-                            // So `NaN` is not a semantic being preserved — it is already a
-                            // native-only divergence, and no backend agrees with it. Keeping the
-                            // f64 round trip to protect it bought nothing and cost two soft-float
-                            // calls per element on a chip with no FPU: `G_LIT[_i] as f64` widening
-                            // on the way out and `as i32` narrowing at the consumer. Measured in
-                            // the report at ~25 ticks/element against ~0.4 for the identical read
-                            // behind a mask, where the index happens to be provably in range.
-                            //
-                            // An integer consumer is unaffected either way — `f64::NAN as i32` is
-                            // already 0 in Rust, which is exactly the sentinel used here, so the
-                            // common case is byte-identical and simply loses the conversions. Only
-                            // a read that reaches a BOXED context can tell the difference, and
-                            // there it trades one wrong answer (NaN) for another (0); neither
-                            // matches the `null` every other backend gives. That divergence is
-                            // pre-existing and tracked separately — it is not what this path is
-                            // for, and it is not made worse by removing the conversions.
-                            if is_int {
-                                let access = if const_len > 0 {
-                                    format!(
-                                        "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ 0 }} }}",
-                                        idx_usize, const_len, static_name
-                                    )
-                                } else {
-                                    format!(
-                                        "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ 0 }} }}",
-                                        idx_usize, static_name, static_name
-                                    )
-                                };
-                                return Ok((access, RustType::I32));
-                            }
+                            // OUT-OF-RANGE STAYS f64. An unproven index still has to be able to
+                            // answer `NaN`, and there is no `i32` that means "absent" — picking a
+                            // sentinel here would silently turn a missing element into a real value.
+                            // So the bounds-checked form keeps today's exact semantics and only the
+                            // STORAGE narrows; the integer win is claimed above, where the index is
+                            // proven and no sentinel is reachable.
+                            let elem = if is_int {
+                                format!("{}[_i] as f64", static_name)
+                            } else {
+                                format!("{}[_i]", static_name)
+                            };
                             let access = if const_len > 0 {
                                 format!(
-                                    "{{ let _i = {}; if _i < {} {{ {}[_i] }} else {{ f64::NAN }} }}",
-                                    idx_usize, const_len, static_name
+                                    "{{ let _i = {}; if _i < {} {{ {} }} else {{ f64::NAN }} }}",
+                                    idx_usize, const_len, elem
                                 )
                             } else {
                                 format!(
-                                    "{{ let _i = {}; if _i < {}.len() {{ {}[_i] }} else {{ f64::NAN }} }}",
-                                    idx_usize, static_name, static_name
+                                    "{{ let _i = {}; if _i < {}.len() {{ {} }} else {{ f64::NAN }} }}",
+                                    idx_usize, static_name, elem
                                 )
                             };
                             return Ok((access, RustType::F64));
