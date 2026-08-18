@@ -392,7 +392,22 @@ opt-level = 1
 "#
         );
     }
-    if std::env::var("TISH_GBA_FAT_LTO").as_deref() == Ok("1") {
+    // ⚠️ THIN LTO IS OPT-IN, AND THE REASON IS STACK, NOT SPEED. Less inlining means bigger frames,
+    // and a GBA has 32 KB of IWRAM for the whole stack. Measured on tish-gba's examples/ffta, same
+    // source, cold build dir:
+    //
+    //     profile   run()     factory   combined   vs 32,512 B usable stack
+    //     fat       23,604 +   7,452  =  31,056    fits, 1,456 B spare
+    //     thin      25,436 +   9,068  =  34,504    OVER by 1,992 B
+    //
+    // And it does not trap. The deepest SP under thin is 0x02FFF838; the GBA mirrors EWRAM every
+    // 256 KB, so that aliases 0x0203F838 — the top of the heap. The stack writes into allocated
+    // memory and the ROM keeps running, which is far worse to diagnose than a crash.
+    //
+    // The build-time win thin was introduced for is real but example-dependent: on a small ROM
+    // (examples/ffta-hud) it was 70s vs 86s with a 37 KB smaller output and byte-identical frames;
+    // on ffta itself it was SLOWER, 148s vs 137s. So it is offered, not defaulted.
+    if std::env::var("TISH_GBA_THIN_LTO").as_deref() == Ok("1") {
         return format!(
             r#"[profile.dev]
 opt-level = 3
@@ -403,8 +418,8 @@ opt-level = 3
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 debug = {debug}
 panic = "abort"
 
@@ -413,6 +428,8 @@ opt-level = 3
 "#
         );
     }
+    // Default: fat LTO, one codegen unit — the smallest frames, which is what fits in IWRAM.
+    // `TISH_GBA_FAT_LTO=1` is still accepted and is now a no-op, so existing scripts keep working.
     format!(
         r#"[profile.dev]
 opt-level = 3
@@ -423,8 +440,8 @@ opt-level = 3
 
 [profile.release]
 opt-level = 3
-lto = "thin"
-codegen-units = 8
+lto = "fat"
+codegen-units = 1
 debug = {debug}
 panic = "abort"
 

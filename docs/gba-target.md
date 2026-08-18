@@ -74,7 +74,7 @@ serverless/desktop compile.
 | `tish_compile/src/lib.rs` | `NativeEmitMode::Gba` variant | An enum discriminant. |
 | `tish_compile/src/codegen.rs` | ~24 `emit_mode == Gba` sites: no_std header, the `#[agb::entry] agb_main` entry, `gba_no_std_rewrite` (std→core post-pass), scheme-module emission, perf-pass/PropIC/OnceLock gating | All **string** emission — no agb dependency. |
 | `tish_compile/src/types.rs` + `codegen.rs` | `RustType::Fixed` + the `fixed` lowering (emits the `tishlang_runtime::Fixed` alias) | Activates only on a `fixed` annotation. Emits the facade alias, not `agb::` directly. |
-| `tish_native/src/{config.rs,build.rs}` | `NativeBuildConfig::gba()`, `build_gba_rom` (thumbv4t scaffold, `gba.ld`, `agb-gbafix`) | The build driver. Shells out; links no agb into the compiler. The agb **version** is read from the facade's `Cargo.toml` (`read_facade_agb_version`), not hardcoded — one source of truth. Nested GBA `Cargo.toml` profiles: default **thin** LTO; `TISH_FAST_NATIVE_BUILD=1` disables LTO for iteration; `TISH_GBA_FAT_LTO=1` restores fat LTO for ship builds; `TISH_GBA_DEBUG=1` keeps release debuginfo. |
+| `tish_native/src/{config.rs,build.rs}` | `NativeBuildConfig::gba()`, `build_gba_rom` (thumbv4t scaffold, `gba.ld`, `agb-gbafix`) | The build driver. Shells out; links no agb into the compiler. The agb **version** is read from the facade's `Cargo.toml` (`read_facade_agb_version`), not hardcoded — one source of truth. Nested GBA `Cargo.toml` profiles: default **fat** LTO (smallest stack frames — see "Why fat is the default again"); `TISH_GBA_THIN_LTO=1` opts into thin/8-CGU for faster iteration where stack headroom allows; `TISH_FAST_NATIVE_BUILD=1` disables LTO entirely; `TISH_GBA_DEBUG=1` keeps release debuginfo. |
 | `tish/src/main.rs` | `--target gba` CLI handling | Selects `NativeBuildConfig::gba()`. |
 
 ### Known couplings (candidates to push further out)
@@ -104,14 +104,44 @@ Three profiles, selected by env var:
 
 | profile | selected by | `opt-level` / LTO / CGUs |
 |---|---|---|
-| **default** | — | 3 / thin / 8 |
-| ship | `TISH_GBA_FAT_LTO=1` | 3 / fat / 1 |
+| **default** | — | 3 / **fat** / 1 |
+| thin | `TISH_GBA_THIN_LTO=1` | 3 / thin / 8 |
 | iteration | `TISH_FAST_NATIVE_BUILD=1` | 1 / none / 16, incremental |
+
+`TISH_GBA_FAT_LTO=1` is still accepted and is now a no-op, so scripts that set it keep working.
 
 `TISH_GBA_DEBUG=1` keeps release debuginfo (for mgba backtraces); it is off by default.
 
-The default used to be the ship profile, so every `tish build --target gba` paid fat LTO over the
-single ~20k-line `run()` a real game generates.
+### ⚠️ Why fat is the default again: thin LTO costs STACK
+
+Thin LTO was briefly the default (#581, #664) to cut the fat-LTO link over the single ~20k-line
+`run()` a real game generates. It was reverted as the default because **less inlining means bigger
+stack frames, and a GBA has 32 KB of IWRAM for the entire stack.**
+
+Measured on tish-gba's `examples/ffta` — same source, cold build dir, frames read out of the ROM's
+own prologues:
+
+| profile | `run()` | shell factory | combined | vs 32,512 B usable |
+|---|---:|---:|---:|---|
+| fat | 23,604 | 7,452 | **31,056** | fits, 1,456 B spare |
+| thin | 25,436 | 9,068 | **34,504** | **over by 1,992 B** |
+
+⚠️ **And it does not trap.** The deepest SP under thin is `0x02FFF838`; the GBA mirrors EWRAM every
+256 KB, so that address aliases `0x0203F838` — the top of the heap. The stack writes into allocated
+memory and the ROM keeps running. That is far worse than a crash: the corruption surfaces later,
+somewhere unrelated. (See #655 — the stack-overflow guard cannot currently fire on GBA, which is what
+would otherwise name this.)
+
+The build-time win is real but example-dependent, so it is offered rather than defaulted:
+
+| example | thin | fat | notes |
+|---|---:|---:|---|
+| `ffta-hud` (small) | **70 s** | 86 s | thin also 37 KB smaller, frames byte-identical |
+| `ffta` (large) | 148 s | **137 s** | thin SLOWER here, both from cold |
+
+**Use `TISH_GBA_THIN_LTO=1` when iterating on a ROM with stack headroom to spare.** Check headroom
+before adopting it: read the `sub sp` / `add sp` constant out of `run()`'s prologue and add the
+frame of any factory it calls, since both are live at once.
 
 Measured on a synthetic 400-fn ROM (14,173-line generated `main.rs`), incremental rebuild after a
 source change, isolated build dir per profile — note this box was at load average 17, so the
