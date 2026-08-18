@@ -7233,8 +7233,25 @@ impl Codegen {
                 // wrapper and its cell are permanent slots in the enclosing frame, and for module
                 // fns that frame is `run()`, which on GBA holds every one of them at once against a
                 // 29 KB IWRAM stack. Skipping it is what makes "type your functions" actually pay.
+                // ⚠️ AND ONLY WHEN EVERY CALL SITE CAN ACTUALLY BE DIRECT. A fn taking a STRUCT
+                // still falls back to `value_call` when the argument is a plain boxed local --
+                // `area(r)` in tests/core/struct_return does exactly that while `area(makeRect(..))`
+                // lowers, so one call site needed the wrapper the other made look dead (E0425).
+                // Restricting the elision to all-scalar parameter lists keeps the win for the
+                // numeric fns it was written for and stops guessing about the rest.
+                let all_scalar_params = self
+                    .native_fn_param_types
+                    .get(name.as_ref())
+                    .map(|ps| {
+                        ps.iter().all(|p| {
+                            matches!(p, RustType::F64 | RustType::I32 | RustType::Bool)
+                                || p.is_narrow_int()
+                        })
+                    })
+                    .unwrap_or(false);
                 if self.native_fns.contains(name.as_ref())
                     && !self.value_used_names.contains(name.as_ref())
+                    && all_scalar_params
                 {
                     return Ok(());
                 }
@@ -10609,8 +10626,12 @@ impl Codegen {
     fn collect_value_used_expr(expr: &Expr, idents: &mut HashSet<String>) {
         match expr {
             Expr::Call { callee, args, .. } => {
-                // The callee slot of a direct call is NOT a value use.
-                if !matches!(&**callee, Expr::Ident { .. }) {
+                // The callee slot of a direct call is NOT a value use -- UNLESS the call cannot be
+                // emitted as a direct one. A SPREAD call always goes through `value_call`, which
+                // needs the boxed binding by name, so eliding the wrapper leaves `let _callee =
+                // (sum3).clone()` referring to nothing (E0425, tests/core/spread).
+                let spreads = args.iter().any(|a| matches!(a, CallArg::Spread(_)));
+                if !matches!(&**callee, Expr::Ident { .. }) || spreads {
                     Self::collect_value_used_expr(callee, idents);
                 }
                 for arg in args {
