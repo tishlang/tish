@@ -1166,6 +1166,12 @@ pub(crate) struct Codegen {
     /// free `fn f_native(f64,..)->f64` (all params `: number`, returns `number`, native-safe
     /// body). Direct calls to these route to the native fn, bypassing the boxed `value_call`.
     native_fns: std::collections::HashSet<String>,
+    /// Declared param types of each `native_fns` member, so a call site knows which argument slots
+    /// are `&TishStruct_…` (passed by reference) rather than a coerced numeric.
+    native_fn_param_types: std::collections::HashMap<String, Vec<RustType>>,
+    /// Names ever used AS A VALUE (see [`Self::collect_value_used_expr`]). A `native_fns` member
+    /// absent from this set needs no boxed `Value::native` wrapper in `run()`.
+    value_used_names: std::collections::HashSet<String>,
     /// Set while emitting the body of an i32-ABI native fn, so `return` coerces to `i32`.
     native_fn_abi_i32: bool,
     /// The subset of `native_fns` emitted with an `fn(i32, ..) -> i32` signature instead of the
@@ -1447,6 +1453,8 @@ impl Codegen {
             collection_instance_locals: std::collections::HashSet::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
+            value_used_names: std::collections::HashSet::new(),
+            native_fn_param_types: std::collections::HashMap::new(),
             native_fns_i32: std::collections::HashSet::new(),
             native_fn_abi_i32: false,
             native_fn_body_emit: false,
@@ -3044,6 +3052,79 @@ impl Codegen {
         }
     }
 
+    /// Reject a numeric return annotation that the body provably contradicts.
+    ///
+    /// ⚠️ THIS EXISTS BECAUSE THE ANNOTATION IS AN UNWRAP, NOT A DECLARATION. `: i32` makes codegen
+    /// emit `match v { Value::Number(n) => …, _ => panic!("expected number") }`, so a function
+    /// annotated `: i32` whose body does `return ""` compiles clean and then kills the ROM on a
+    /// device, with a message naming neither the function nor the line. That is a type error
+    /// discovered at runtime, on hardware, in a game — the worst possible place, and it cost a
+    /// debugging cycle on `examples/ffta-hud`'s `occupantAt`.
+    ///
+    /// The information was always here: `returns_numeric` walks these same return statements to
+    /// decide lowering. It found them non-numeric, silently declined to lower, and let the unwrap
+    /// through anyway. This turns that finding into a diagnostic.
+    ///
+    /// ⚠️ PROVABLE MISMATCH ONLY. "Could not prove numeric" is the common case for legitimate
+    /// dynamic code and must stay silent — erroring on it would reject most of a real program. Only
+    /// a literal of the wrong kind counts: `return "x"`, `return true`, `return [..]`, `return {..}`
+    /// under a numeric annotation. Anything computed is left alone.
+    fn check_return_annotations(&self, program: &Program) -> Result<(), CompileError> {
+        fn wrong_literal(e: &Expr) -> Option<&'static str> {
+            match e {
+                Expr::Literal { value: Literal::String(_), .. } => Some("a string"),
+                Expr::Literal { value: Literal::Bool(_), .. } => Some("a boolean"),
+                Expr::Array { .. } => Some("an array"),
+                Expr::Object { .. } => Some("an object"),
+                _ => None,
+            }
+        }
+        fn walk(s: &Statement, found: &mut Option<(&'static str, Option<Span>)>) {
+            if found.is_some() {
+                return;
+            }
+            match s {
+                Statement::Return { value: Some(e), span, .. } => {
+                    if let Some(kind) = wrong_literal(e) {
+                        *found = Some((kind, Some(*span)));
+                    }
+                }
+                Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                    statements.iter().for_each(|x| walk(x, found))
+                }
+                Statement::If { then_branch, else_branch, .. } => {
+                    walk(then_branch, found);
+                    if let Some(e) = else_branch.as_ref() {
+                        walk(e, found)
+                    }
+                }
+                Statement::While { body, .. } | Statement::For { body, .. } => walk(body, found),
+                _ => {}
+            }
+        }
+        for st in &program.statements {
+            if let Statement::FunDecl { name, return_type: Some(ann), body, .. } = st {
+                if !Self::ann_is_number(ann) && !Self::ann_is_i32(ann) {
+                    continue;
+                }
+                let mut found = None;
+                walk(body, &mut found);
+                if let Some((kind, span)) = found {
+                    return Err(CompileError::new(
+                        format!(
+                            "`{}` is annotated to return a number, but returns {}. A numeric return \
+                             annotation is compiled as an unwrap, so this would panic at runtime \
+                             (\"expected number\") instead of failing here.",
+                            name, kind
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// #615: the declared signature for `name` at EXACTLY `argc` arguments, plus the Rust symbol
     /// suffix to call it by. A name with a single declaration keeps the historical `<symbol>_typed`
     /// spelling, so every existing extension crate links unchanged; only a name that declares more
@@ -3093,6 +3174,7 @@ impl Codegen {
         self.program_fun_decl_names = tishlang_ui::jsx::collect_fun_decl_names(program);
         self.program_uses_document = crate::resolve::program_uses_document(program);
         self.collect_extern_fns(program);
+        self.check_return_annotations(program)?;
         if self.emit_mode == crate::NativeEmitMode::Gba {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
@@ -3319,11 +3401,88 @@ impl Codegen {
             let mut global_names: std::collections::HashSet<String> =
                 self.native_numeric_globals.keys().cloned().collect();
             global_names.extend(self.module_const_f64_arrays.keys().cloned());
+            // Publish the all-numeric externs before the proof runs, so a body calling into an
+            // extension crate is not rejected for the call alone. `is_numeric` covers f64, i32 and
+            // the narrow ints; anything else (string, array, struct) would need a boxing boundary
+            // inside a lowered fn, which defeats the purpose.
+            let numeric_externs: std::collections::HashSet<String> = self
+                .extern_fns
+                .iter()
+                .filter(|(_, sigs)| {
+                    // ⚠️ NOT `is_numeric()` ALONE — that matches F64 only (types.rs), while every GBA
+                    // `declare fn f(row: i32): i32` is `I32`. Filtering on it rejected all 64 declares
+                    // in ffta-hud (probed: numeric_externs=0) and made this whole relaxation inert.
+                    // Same predicate the rest of the proof uses: f64, i32, or a narrow storage int.
+                    //
+                    // Widening this REQUIRES the f64 return coercion in `emit_native_fn_body` — an
+                    // i32 extern returned from an f64-ABI fn is otherwise emitted raw (E0308).
+                    let ok = |t: &RustType| t.is_numeric() || t.is_integer_scalar();
+                    !sigs.is_empty()
+                        && sigs.iter().all(|s| ok(&s.ret) && s.params.iter().all(ok))
+                })
+                .map(|(n, _)| n.clone())
+                .collect();
+            if std::env::var("TISH_PROBE_EXTERNS").as_deref() == Ok("1") {
+                let mut names: Vec<&String> = numeric_externs.iter().collect();
+                names.sort();
+                eprintln!(
+                    "[probe] extern_fns={} numeric_externs={} sample={:?}",
+                    self.extern_fns.len(),
+                    numeric_externs.len(),
+                    names.iter().take(8).collect::<Vec<_>>()
+                );
+            }
+            Self::numeric_externs_with(|s| {
+                s.clear();
+                // `TISH_NO_EXTERN_LOWER=1` publishes an EMPTY set, which reverts this build to the
+                // pre-extern-admission behaviour without rebuilding the compiler. It exists so a ROM
+                // can be A/B'd against one binary: two 5-minute game builds instead of two toolchain
+                // rebuilds plus two game builds, and no edit to a shared checkout between them.
+                if std::env::var("TISH_NO_EXTERN_LOWER").as_deref() != Ok("1") {
+                    s.extend(numeric_externs.iter().cloned());
+                }
+            });
             self.native_fns = Self::collect_native_fns(
                 &program.statements,
                 &global_names,
                 &native_vec_names,
+                &self.type_aliases,
             );
+            self.native_fn_param_types = program
+                .statements
+                .iter()
+                .filter_map(|st| match st {
+                    Statement::FunDecl { name, params, .. }
+                        if self.native_fns.contains(name.as_ref()) =>
+                    {
+                        let tys = params
+                            .iter()
+                            .filter_map(|p| match p {
+                                FunParam::Simple(tp) => Some(
+                                    tp.type_ann
+                                        .as_ref()
+                                        .map(|a| {
+                                            RustType::from_annotation_with_aliases(
+                                                a,
+                                                &self.type_aliases,
+                                            )
+                                        })
+                                        .unwrap_or(RustType::F64),
+                                ),
+                                _ => None,
+                            })
+                            .collect();
+                        Some((name.to_string(), tys))
+                    }
+                    _ => None,
+                })
+                .collect();
+            // Which names are ever used as a VALUE rather than only called. Drives the
+            // boxed-wrapper elision at `Statement::FunDecl` — see `collect_value_used_expr`.
+            self.value_used_names.clear();
+            for s in &program.statements {
+                Self::collect_value_used_stmt(s, &mut self.value_used_names);
+            }
             // Which of the survivors carry the all-`i32` signature. Computed AFTER the fixpoint,
             // so a function the proof rejected never reaches the i32 ABI either.
             self.native_fns_i32 = program
@@ -3332,7 +3491,23 @@ impl Codegen {
                 .filter_map(|s| match s {
                     Statement::FunDecl { name, params, return_type, .. }
                         if self.native_fns.contains(name.as_ref())
-                            && Self::fn_sig_all_i32(params, return_type) =>
+                            && (Self::fn_sig_all_i32(params, return_type)
+                                // A struct-param fn: its struct slot is typed on its own, so
+                                // `fn_sig_all_i32` can never hold. Take the i32 return ABI when the
+                                // return is `: i32` and every NON-struct param is `: i32` too —
+                                // otherwise the body computes i32 while the signature says f64.
+                                // A struct param qualifies on ONE numeric field, matching the
+                                // candidacy gate. If this still demanded all-numeric, a mixed-struct
+                                // fn would lower its body to i32 arithmetic and then be handed the
+                                // f64 ABI — computing one thing and declaring another.
+                                || (return_type.as_ref().is_some_and(Self::ann_is_i32)
+                                    && params.iter().any(|p| matches!(p, FunParam::Simple(tp)
+                                        if tp.type_ann.as_ref().is_some_and(|a|
+                                            !Self::struct_numeric_fields(a, &self.type_aliases).is_empty())))
+                                    && params.iter().all(|p| matches!(p, FunParam::Simple(tp)
+                                        if tp.type_ann.as_ref().is_some_and(|a|
+                                            Self::ann_is_i32(a)
+                                                || !Self::struct_numeric_fields(a, &self.type_aliases).is_empty()))))) =>
                     {
                         Some(name.to_string())
                     }
@@ -4234,6 +4409,10 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         RustType::F64.from_value_expr(&val_code)
+                    } else if val_ty.is_integer_scalar() {
+                        // An i32-typed value into an f64-backed global. Widening is exact; emitted
+                        // raw it is E0308.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -4350,6 +4529,17 @@ impl Codegen {
                         // `fixed` local must be lifted to `Fixed` — the RHS emitter reports numeric
                         // literals as F64, so without this a `fixed` reassignment mistypes (E0308).
                         format!("tishlang_runtime::Fixed::from_raw((({}) * 256.0) as i32)", val_code)
+                    } else if rust_type == RustType::F64 && val_ty.is_integer_scalar() {
+                        // ⚠️ AN i32 VALUE INTO AN f64 LOCAL, IN STATEMENT POSITION. The COMPARISON
+                        // emitter already widens (`n > ((MAX_UNITS) as f64)`), so
+                        //
+                        //     if (n > MAX_UNITS) { n = MAX_UNITS }        packages/clansave
+                        //
+                        // compiled its test and rejected its assignment: `n = MAX_UNITS;`, expected
+                        // f64 found i32. Needs a native local AND an `: i32`-annotated global on the
+                        // right, which is why it stayed hidden until a game imported clansave beside
+                        // the rest of its packages. Widening is exact.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -7037,6 +7227,17 @@ impl Codegen {
                 {
                     return Ok(());
                 }
+                // Same idea, wider: this fn already has a native lowering (`<name>_native`) that
+                // every direct call routes to, and nothing in the program uses the NAME as a value
+                // — so the boxed `Value::native` wrapper is dead weight. It is not free weight: the
+                // wrapper and its cell are permanent slots in the enclosing frame, and for module
+                // fns that frame is `run()`, which on GBA holds every one of them at once against a
+                // 29 KB IWRAM stack. Skipping it is what makes "type your functions" actually pay.
+                if self.native_fns.contains(name.as_ref())
+                    && !self.value_used_names.contains(name.as_ref())
+                {
+                    return Ok(());
+                }
                 // Use Rc<RefCell<>> pattern to allow recursive function calls
                 // The function can reference itself through the cell
                 let name_raw = name.as_ref();
@@ -9391,12 +9592,28 @@ impl Codegen {
                         let i32_abi = self.native_fns_i32.contains(fname.as_ref());
                         let want =
                             if i32_abi { RustType::I32 } else { RustType::F64 };
+                        let ptys = self.native_fn_param_types.get(fname.as_ref()).cloned();
                         let mut argc: Vec<String> = Vec::with_capacity(args.len());
                         let mut ok = true;
-                        for a in args {
+                        for (i, a) in args.iter().enumerate() {
                             if let CallArg::Expr(e) = a {
+                                // A struct slot takes a shared reference to the caller's struct;
+                                // coercing it to a number would be nonsense (and would not compile).
+                                let is_struct = matches!(
+                                    ptys.as_ref().and_then(|v| v.get(i)),
+                                    Some(RustType::Named { .. })
+                                );
                                 let (ac, at) = self.emit_typed_expr(e)?;
-                                argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                if is_struct {
+                                    if matches!(at, RustType::Named { .. }) {
+                                        argc.push(format!("&{}", ac));
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                } else {
+                                    argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                }
                             } else {
                                 ok = false;
                                 break;
@@ -9835,6 +10052,10 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         RustType::F64.from_value_expr(&val_code)
+                    } else if val_ty.is_integer_scalar() {
+                        // An i32-typed value into an f64-backed global. Widening is exact; emitted
+                        // raw it is E0308.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -9857,6 +10078,12 @@ impl Codegen {
                         val_code
                     } else if val_ty == RustType::Value {
                         rust_type.from_value_expr(&val_code)
+                    } else if rust_type == RustType::F64 && val_ty.is_integer_scalar() {
+                        // ⚠️ An `: i32` global assigned into an f64-typed local. `let n = roster.len()`
+                        // infers f64, and `n = MAX_UNITS` (a `let MAX_UNITS: i32` in packages/clansave)
+                        // emitted `n = MAX_UNITS;` raw -- E0308, expected f64 found i32. Needs BOTH a
+                        // native local and an i32-annotated global, which is why so little hit it.
+                        format!("(({}) as f64)", val_code)
                     } else {
                         val_code
                     };
@@ -10365,6 +10592,122 @@ impl Codegen {
             ArrowBody::Block(stmt) => Self::collect_stmt_idents(stmt, &mut idents),
         }
         idents
+    }
+
+    /// Names used AS A VALUE — i.e. everywhere except the callee slot of a direct `f(..)` call.
+    /// A module fn that is only ever called directly needs no boxed `Value::native` wrapper: the
+    /// native lowering (`f_native`) already serves every call site, and the wrapper is a permanent
+    /// slot in `run()`'s stack frame. On GBA `run()` holds every module fn at once — 605 of them in
+    /// `examples/ffta` — against a 29 KB IWRAM stack, so dropping the unused wrappers is the
+    /// difference between a game fitting and overwriting the audio mixer.
+    ///
+    /// ⚠️ CONSERVATIVE BY CONSTRUCTION. Anything this does not structurally recurse through falls
+    /// back to [`Self::collect_expr_idents`], which marks every name inside as value-used — that
+    /// only forfeits the optimisation, it never removes a wrapper something needs. And if it ever
+    /// were wrong, the generated Rust names a binding that does not exist: a loud `E0425` at build
+    /// time, not a silently wrong ROM.
+    fn collect_value_used_expr(expr: &Expr, idents: &mut HashSet<String>) {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                // The callee slot of a direct call is NOT a value use.
+                if !matches!(&**callee, Expr::Ident { .. }) {
+                    Self::collect_value_used_expr(callee, idents);
+                }
+                for arg in args {
+                    match arg {
+                        CallArg::Expr(e) | CallArg::Spread(e) => {
+                            Self::collect_value_used_expr(e, idents)
+                        }
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_value_used_expr(left, idents);
+                Self::collect_value_used_expr(right, idents);
+            }
+            Expr::Unary { operand, .. } => Self::collect_value_used_expr(operand, idents),
+            Expr::Conditional {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_expr(then_branch, idents);
+                Self::collect_value_used_expr(else_branch, idents);
+            }
+            Expr::Member { object, prop, .. } => {
+                Self::collect_value_used_expr(object, idents);
+                if let MemberProp::Expr(e) = prop {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Expr::Index { object, index, .. } => {
+                Self::collect_value_used_expr(object, idents);
+                Self::collect_value_used_expr(index, idents);
+            }
+            other => Self::collect_expr_idents(other, idents),
+        }
+    }
+
+    /// Statement-level driver for [`Self::collect_value_used_expr`]. Mirrors the shape of
+    /// [`Self::collect_stmt_idents`]; unknown statement forms fall back to it (conservative).
+    fn collect_value_used_stmt(stmt: &Statement, idents: &mut HashSet<String>) {
+        match stmt {
+            Statement::ExprStmt { expr, .. } => Self::collect_value_used_expr(expr, idents),
+            Statement::VarDecl { init, .. } => {
+                if let Some(e) = init {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Statement::Return { value, .. } => {
+                if let Some(e) = value {
+                    Self::collect_value_used_expr(e, idents);
+                }
+            }
+            Statement::Block { statements, .. } | Statement::Multi { statements, .. } => {
+                for s in statements {
+                    Self::collect_value_used_stmt(s, idents);
+                }
+            }
+            Statement::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_stmt(then_branch, idents);
+                if let Some(s) = else_branch {
+                    Self::collect_value_used_stmt(s, idents);
+                }
+            }
+            Statement::While { cond, body, .. } => {
+                Self::collect_value_used_expr(cond, idents);
+                Self::collect_value_used_stmt(body, idents);
+            }
+            Statement::FunDecl { body, .. } => Self::collect_value_used_stmt(body, idents),
+            // ⚠️ An EXPORTED fn must keep its boxed wrapper: the module namespace hands it out as
+            // a `Value`, and an importer may do anything with it. Mark the exported name itself as
+            // value-used, then walk the declaration normally.
+            Statement::Export { declaration, .. } => match &**declaration {
+                tishlang_ast::ExportDeclaration::Named(inner) => {
+                    if let Statement::FunDecl { name, .. } = &**inner {
+                        idents.insert(name.to_string());
+                    }
+                    Self::collect_value_used_stmt(inner, idents);
+                }
+                tishlang_ast::ExportDeclaration::Default(e) => Self::collect_value_used_expr(e, idents),
+                tishlang_ast::ExportDeclaration::ReExport { specifiers, .. } => {
+                    for sp in specifiers {
+                        if let tishlang_ast::ImportSpecifier::Named { name, .. } = sp {
+                            idents.insert(name.to_string());
+                        }
+                    }
+                }
+            },
+            other => Self::collect_stmt_idents(other, idents),
+        }
     }
 
     fn collect_expr_idents(expr: &Expr, idents: &mut HashSet<String>) {
@@ -19222,6 +19565,7 @@ impl Codegen {
         statements: &[Statement],
         globals: &std::collections::HashSet<String>,
         native_vec_names: &std::collections::HashSet<String>,
+        aliases: &std::collections::HashMap<String, RustType>,
     ) -> std::collections::HashSet<String> {
         use std::collections::HashSet;
         let mut cand: HashSet<String> = HashSet::new();
@@ -19240,7 +19584,14 @@ impl Codegen {
                 let params_ok = params.iter().all(|p| {
                     matches!(p, FunParam::Simple(tp)
                         if tp.default.is_none()
-                            && tp.type_ann.as_ref().map_or(true, Self::ann_is_number))
+                            && tp.type_ann.as_ref().map_or(true, |a| {
+                                Self::ann_is_number(a)
+                                    // At least one numeric field is enough to be a CANDIDATE. The
+                                    // fixpoint below still has to prove the body, and a read of a
+                                    // non-numeric field fails that proof — so admitting a mixed
+                                    // record here cannot lower anything that was not already sound.
+                                    || !Self::struct_numeric_fields(a, aliases).is_empty()
+                            }))
                 });
                 // Return: an annotated `: number`, OR unannotated with all-numeric returns
                 // (verified in the fixpoint via `returns_numeric`), so the native `-> f64` holds.
@@ -19253,7 +19604,19 @@ impl Codegen {
                 // still has to prove the body native-safe and every return numeric — the annotation
                 // never decides that on its own (see `liar` in the issue).
                 let i32_ok = Self::fn_sig_all_i32(params, return_type);
-                let (params_ok, ret_ok) = (params_ok || i32_ok, ret_ok || i32_ok);
+                // A struct-param fn can never satisfy `fn_sig_all_i32` (its struct slot is not an
+                // `i32`), so an `: i32` return would reject it even though the return is perfectly
+                // native. Accept an i32 return for those; the f64 ABI carries it, and the existing
+                // all-i32 fast path is untouched for everyone else.
+                let has_struct_param = params.iter().any(|p| {
+                    matches!(p, FunParam::Simple(tp)
+                        if tp.type_ann.as_ref()
+                            .is_some_and(|a| !Self::struct_numeric_fields(a, aliases).is_empty()))
+                });
+                let ret_ok = ret_ok
+                    || i32_ok
+                    || (has_struct_param && return_type.as_ref().is_some_and(Self::ann_is_i32));
+                let params_ok = params_ok || i32_ok;
                 // #320: 0-param numeric fns (e.g. k_nucleotide's `nextBase()` — mutates a numeric
                 // global, returns number) are eligible too; the fixpoint below still proves the body
                 // native-safe + all-numeric-returns, so `fn name_native() -> f64` is sound.
@@ -19307,6 +19670,25 @@ impl Codegen {
                 }
                 let pnames: HashSet<String> =
                     params.iter().flat_map(|p| p.bound_names()).map(|n| n.to_string()).collect();
+                // Each struct param maps to the fields that can lower — its NUMERIC ones. A param
+                // with no numeric field is left out entirely, so it reads exactly as "not a struct
+                // param" and nothing about it is native.
+                let sparams: std::collections::HashMap<String, HashSet<String>> = params
+                    .iter()
+                    .filter_map(|p| match p {
+                        FunParam::Simple(tp) => tp.type_ann.as_ref().and_then(|a| {
+                            let fs = Self::struct_numeric_fields(a, aliases);
+                            (!fs.is_empty()).then(|| (tp.name.to_string(), fs))
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                Self::struct_params_with(|m| {
+                    m.clear();
+                    for (k, v) in sparams.iter() {
+                        m.insert(k.clone(), v.clone());
+                    }
+                });
                 let nums = Self::native_fn_numeric_locals(
                     body,
                     &pnames,
@@ -19314,9 +19696,20 @@ impl Codegen {
                     &cand,
                     native_vec_names,
                 );
-                if !Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names)
-                    || !Self::returns_numeric(body, &pnames, &cand, globals, &nums)
-                {
+                let safe = Self::native_safe_stmt(body, &pnames, &cand, globals, &nums, native_vec_names);
+                let rets = Self::returns_numeric(body, &pnames, &cand, globals, &nums);
+                let ok = safe && rets;
+                if !ok && std::env::var("TISH_PROBE_LOWERING").as_deref() == Ok("1") {
+                    // Which HALF rejected it. "body not native-safe" and "a return is not numeric"
+                    // are entirely different fixes, and the fixpoint silently collapsed both into a
+                    // candidate quietly disappearing.
+                    eprintln!(
+                        "[probe] {} rejected: body_safe={} returns_numeric={}",
+                        name, safe, rets
+                    );
+                }
+                Self::struct_params_with(|s| s.clear());
+                if !ok {
                     remove.push(name.to_string());
                 }
             }
@@ -19512,6 +19905,114 @@ impl Codegen {
     }
 
     /// Numeric locals in an M5-eligible fn body (params + fixpoint literal/copy seeds).
+    /// The current function's params that are annotated with a type alias whose fields are ALL
+    /// numeric, so `p.field` is a machine-word load. Set for the duration of one function's
+    /// native-safety proof (`collect_native_fns`) and read by the proof's leaf predicates.
+    ///
+    /// A side-channel rather than a threaded argument on purpose: the proof is five mutually
+    /// recursive static helpers, and widening all of their signatures to carry a set that only two
+    /// leaves consult is a large diff for no added safety. Codegen is single-threaded; the set is
+    /// cleared after each function.
+    ///
+    /// ⚠️ THE FIELD SET IS WHAT MAKES THIS SOUND, AND IT REPLACED A BARE NAME SET FOR THAT REASON.
+    /// While the map held only names, admitting a struct with a `string` field would have made
+    /// `p.name` "numeric" here and emitted Rust that does not compile — so the gate demanded that
+    /// EVERY field be numeric, and one string disqualified the whole function. Carrying the numeric
+    /// fields per param removes that ceiling: `p.x` proves native and `p.name` does not, so a mixed
+    /// record lowers its arithmetic and a function that touches the string simply fails the proof
+    /// and stays boxed. Never widen this to a bare name test again.
+    fn struct_params_with<R>(
+        f: impl FnOnce(&mut std::collections::HashMap<String, HashSet<String>>) -> R,
+    ) -> R {
+        thread_local! {
+            static STRUCT_PARAMS:
+                std::cell::RefCell<std::collections::HashMap<String, HashSet<String>>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        STRUCT_PARAMS.with(|c| f(&mut c.borrow_mut()))
+    }
+
+    /// Declared externs whose signature is numbers in, a number out.
+    ///
+    /// A `declare fn` already resolves to a native Rust fn — the emitter calls
+    /// `<crate>::<symbol>_typed(..)` directly (see [`Self::extern_sig_for_arity`]). But the proof
+    /// only accepted calls to `cand` (the tish fns being lowered), so ANY function calling into an
+    /// extension crate was rejected and stayed boxed. On a game that is nearly everything: measured
+    /// on `examples/ffta-hud`, a fn doing `u.col * 100 + u.row` lowered while the one beside it
+    /// calling `tac_add_unit(u.col, u.row, …)` did not, purely because of the call.
+    ///
+    /// Only ALL-NUMERIC signatures qualify. An extern taking or returning a string, an array or a
+    /// struct is not callable from a lowered body without a boxing boundary, which is the thing
+    /// being removed.
+    ///
+    /// A thread-local for the same reason [`Self::struct_params_with`] is one: the proof is a set of
+    /// associated fns with no `&self`, and threading a new parameter through every one of them would
+    /// touch far more code than the fact being communicated.
+    fn numeric_externs_with<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
+        thread_local! {
+            static NUMERIC_EXTERNS: std::cell::RefCell<HashSet<String>> =
+                std::cell::RefCell::new(HashSet::new());
+        }
+        NUMERIC_EXTERNS.with(|c| f(&mut c.borrow_mut()))
+    }
+
+    /// `p.field` where `p` is one of [`Self::struct_params_with`]'s params AND `field` is one of its
+    /// NUMERIC fields. Both halves matter: the name alone would admit `p.name` on a mixed record.
+    fn is_struct_param_field(e: &Expr) -> bool {
+        let Expr::Member { object, prop, .. } = e else {
+            return false;
+        };
+        let MemberProp::Name { name: fname, .. } = prop else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = object.as_ref() else {
+            return false;
+        };
+        Self::struct_params_with(|m| {
+            m.get(name.as_ref()).is_some_and(|fs| fs.contains(fname.as_ref()))
+        })
+    }
+
+    /// Every field of this annotation's aliased struct is a native NUMBER (the invariant above).
+    fn ann_is_all_numeric_struct(
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, RustType>,
+    ) -> bool {
+        matches!(
+            RustType::from_annotation_with_aliases(ann, aliases),
+            RustType::Named { ref fields, .. }
+                if !fields.is_empty()
+                    && fields.iter().all(|(_, t)| {
+                        matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int()
+                    })
+        )
+    }
+
+    /// The NUMERIC fields of this annotation's aliased struct, by name.
+    ///
+    /// [`Self::ann_is_all_numeric_struct`] asks a whole-struct question, and that is the ceiling on
+    /// what can lower: half of a game's record shapes carry a string, a null or an array beside
+    /// their numbers, and one such field disqualifies the whole function even when it only ever
+    /// touches the numeric ones. Answering per FIELD lets `m.x` lower while `m.name` does not — a
+    /// function that reads the string fails the proof exactly as it does today, so nothing that
+    /// lowers now stops lowering.
+    ///
+    /// An empty set means nothing here can lower: not a struct, or a struct with no numeric field.
+    /// Callers treat empty as "not a struct param", which keeps the conservative default.
+    fn struct_numeric_fields(
+        ann: &TypeAnnotation,
+        aliases: &std::collections::HashMap<String, RustType>,
+    ) -> HashSet<String> {
+        match RustType::from_annotation_with_aliases(ann, aliases) {
+            RustType::Named { ref fields, .. } => fields
+                .iter()
+                .filter(|(_, t)| matches!(t, RustType::F64 | RustType::I32) || t.is_narrow_int())
+                .map(|(n, _)| n.to_string())
+                .collect(),
+            _ => HashSet::new(),
+        }
+    }
+
     fn native_fn_numeric_locals(
         body: &Statement,
         params: &HashSet<String>,
@@ -19545,6 +20046,10 @@ impl Codegen {
                 ..
             } => {
                 let numeric = type_ann.as_ref().is_some_and(Self::ann_is_number)
+                    // `: i32` is a number too. Without this, `let j: i32 = …` was never seeded as a
+                    // numeric local, so every later use of `j` failed the safety proof and the whole
+                    // function stayed boxed — for an annotation the author added to make it FASTER.
+                    || type_ann.as_ref().is_some_and(Self::ann_is_i32)
                     || matches!(
                         init,
                         Some(Expr::Literal {
@@ -19564,7 +20069,13 @@ impl Codegen {
                         }) if matches!(
                             callee.as_ref(),
                             Expr::Ident { name: fnname, .. }
-                                if cand.contains(fnname.as_ref()) || native_vec_names.contains(fnname.as_ref())
+                                if cand.contains(fnname.as_ref())
+                                    || native_vec_names.contains(fnname.as_ref())
+                                    // A numbers-in-number-out extern yields a number, same as the
+                                    // safety proof and `numeric_shaped` already accept. Every
+                                    // analysis has to agree or a local initialised from an extern is
+                                    // numeric in one and unknown in another.
+                                    || Self::numeric_externs_with(|s| s.contains(fnname.as_ref()))
                         )
                     );
                 if numeric {
@@ -19676,6 +20187,13 @@ impl Codegen {
         nums: &HashSet<String>,
         native_vec_names: &std::collections::HashSet<String>,
     ) -> bool {
+        // A field read off an all-numeric struct param is a plain numeric load — `p.x` on a
+        // `&TishStruct_P` is a machine word, not a boxed property lookup. Without this the proof
+        // rejects every object-taking fn, which is why typing a game's functions never produced a
+        // native lowering. See `STRUCT_PARAMS`.
+        if Self::is_struct_param_field(expr) {
+            return true;
+        }
         match expr {
             Expr::Literal { value, .. } => matches!(value, Literal::Number(_) | Literal::Bool(_)),
             Expr::Ident { name, .. } => {
@@ -19750,7 +20268,13 @@ impl Codegen {
                 }
                 match callee.as_ref() {
                     Expr::Ident { name, .. } => {
-                        cand.contains(name.as_ref()) || native_vec_names.contains(name.as_ref())
+                        cand.contains(name.as_ref())
+                            || native_vec_names.contains(name.as_ref())
+                            // A numbers-in-number-out extern lowers to a direct
+                            // `<crate>::<symbol>_typed(..)` call, so it is native-safe. Without this
+                            // any fn touching an extension crate stayed boxed — which in a game is
+                            // most of them.
+                            || Self::numeric_externs_with(|s| s.contains(name.as_ref()))
                     }
                     Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                         matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
@@ -19810,6 +20334,10 @@ impl Codegen {
         globals: &std::collections::HashSet<String>,
         nums: &HashSet<String>,
     ) -> bool {
+        // `p.field` on an all-numeric struct param IS a number — see `struct_params_with`.
+        if Self::is_struct_param_field(e) {
+            return true;
+        }
         match e {
             Expr::Literal { value: Literal::Number(_), .. } => true,
             Expr::Ident { name, .. } => {
@@ -19855,7 +20383,12 @@ impl Codegen {
                     && Self::numeric_shaped(else_branch, params, cand, globals, nums)
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Ident { name, .. } => cand.contains(name.as_ref()),
+                // Same set as the safety proof: a numbers-in-number-out extern RETURNS a number, so
+                // `return tac_unit_hp(id)` is a numeric return and the fn keeps its native ABI.
+                Expr::Ident { name, .. } => {
+                    cand.contains(name.as_ref())
+                        || Self::numeric_externs_with(|s| s.contains(name.as_ref()))
+                }
                 Expr::Member { object, prop: MemberProp::Name { name: m, .. }, .. } => {
                     matches!(object.as_ref(), Expr::Ident { name, .. } if name.as_ref() == "Math")
                         && matches!(
@@ -20055,12 +20588,28 @@ impl Codegen {
                 }
                 let i32_abi = self.native_fns_i32.contains(name.as_ref());
                 let abi = if i32_abi { "i32" } else { "f64" };
+                // Per-parameter type. A struct param lowers to `&TishStruct_<alias>` — one pointer,
+                // no boxing, and `p.field` becomes a machine-word load. Numeric params keep the
+                // single f64/i32 ABI. `mut` only on the numerics: a shared reference is not rebound.
                 let plist: Vec<String> = params
                     .iter()
                     .filter_map(|p| match p {
-                        FunParam::Simple(tp) => {
-                            Some(format!("mut {}: {}", Self::escape_ident(tp.name.as_ref()), abi))
-                        }
+                        FunParam::Simple(tp) => Some(
+                            match tp.type_ann.as_ref().map(|a| {
+                                RustType::from_annotation_with_aliases(a, &self.type_aliases)
+                            }) {
+                                Some(RustType::Named { name: sname, .. }) => format!(
+                                    "{}: &{}",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    crate::types::named_struct_ident(&sname)
+                                ),
+                                _ => format!(
+                                    "mut {}: {}",
+                                    Self::escape_ident(tp.name.as_ref()),
+                                    abi
+                                ),
+                            },
+                        ),
                         _ => None,
                     })
                     .collect();
@@ -20079,10 +20628,13 @@ impl Codegen {
                 self.type_context.push_scope();
                 for p in params {
                     if let FunParam::Simple(tp) = p {
-                        self.type_context.define(
-                            tp.name.as_ref(),
-                            if i32_abi { RustType::I32 } else { RustType::F64 },
-                        );
+                        let ty = match tp.type_ann.as_ref().map(|a| {
+                            RustType::from_annotation_with_aliases(a, &self.type_aliases)
+                        }) {
+                            Some(named @ RustType::Named { .. }) => named,
+                            _ => if i32_abi { RustType::I32 } else { RustType::F64 },
+                        };
+                        self.type_context.define(tp.name.as_ref(), ty);
                     }
                 }
                 let copy_suffix = if copy_idx == 0 { String::new() } else { format!("_r{}", copy_idx) };
@@ -20281,6 +20833,20 @@ impl Codegen {
                     // An f64-typed expression returned from an `i32` fn takes the same ToInt32 the
                     // boxed path would have applied at the consumer.
                     format!("tishlang_runtime::to_int32({})", code)
+                } else if want == RustType::F64 && ty.is_integer_scalar() {
+                    // An INTEGER-typed expression returned from an `f64`-ABI fn. Widening is exact
+                    // (i32 and every narrow width fit in f64), and without it the body computes an
+                    // integer while the signature declares f64:
+                    //
+                    //   fn uiKeys_native() -> f64 { return tish_agb::keys_edge_typed(); }
+                    //                                      ^ i32, expected f64   (E0308)
+                    //
+                    // This was unreachable while the only integer-returning callees were fns the
+                    // proof had already typed; it became reachable when calls to i32 externs were
+                    // admitted as native-safe, because an extern reports its own declared return
+                    // type. `Fixed` is deliberately NOT covered — it is fixed-point, so `as f64`
+                    // would reinterpret the scale rather than convert it.
+                    format!("(({}) as f64)", code)
                 } else {
                     code
                 };
@@ -26125,10 +26691,27 @@ impl Codegen {
                         };
                         let mut argc: Vec<String> = Vec::with_capacity(args.len());
                         let mut ok = true;
-                        for a in args {
+                        for (idx, a) in args.iter().enumerate() {
                             if let CallArg::Expr(e) = a {
+                                // A struct slot takes `&caller_struct`; coercing it to a number
+                                // would not compile. Mirrors the boxed-context call site.
+                                let is_struct = matches!(
+                                    self.native_fn_param_types
+                                        .get(fname.as_ref())
+                                        .and_then(|v| v.get(idx)),
+                                    Some(RustType::Named { .. })
+                                );
                                 let (ac, at) = self.emit_typed_expr(e)?;
-                                argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                if is_struct {
+                                    if matches!(at, RustType::Named { .. }) {
+                                        argc.push(format!("&{}", ac));
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                } else {
+                                    argc.push(self.coerce_native_arg(&ac, at, want.clone()));
+                                }
                             } else {
                                 ok = false;
                                 break;
