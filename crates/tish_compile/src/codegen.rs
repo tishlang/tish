@@ -3448,9 +3448,11 @@ impl Codegen {
                 Self::collect_native_lcg_fns(&program.statements, &self.native_fns);
             // #381 — fns on a call-graph cycle get guarded rotation copies (default ON;
             // TISH_NATIVE_RECUR_GUARD=0 restores the plain unguarded emission).
-            self.native_recur_fns = if crate::native_recur_guard_enabled()
-                && self.emit_mode != crate::NativeEmitMode::Gba
-            {
+            // #655: GBA was excluded because the no_std runtime had no stack-pressure probe.
+            // `tishlang_runtime_gba` now derives a real floor from the link map (`__iwram_end`),
+            // and it matters MORE here than on the host: 32 KB of IWRAM, no MMU, no guard page,
+            // so an unguarded overflow silently overwrites agb's live data instead of faulting.
+            self.native_recur_fns = if crate::native_recur_guard_enabled() {
                 Self::compute_native_recur_fns(&program.statements, &self.native_fns)
             } else {
                 std::collections::HashMap::new()
