@@ -1114,33 +1114,53 @@ mod tests {
             Some(v) => std::env::set_var(k, v),
             None => std::env::remove_var(k),
         };
-        let keys = ["TISH_GBA_FAT_LTO", "TISH_FAST_NATIVE_BUILD", "TISH_GBA_DEBUG"];
+        let keys = [
+            "TISH_GBA_FAT_LTO",
+            "TISH_GBA_THIN_LTO",
+            "TISH_FAST_NATIVE_BUILD",
+            "TISH_GBA_DEBUG",
+        ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         for k in keys {
             std::env::remove_var(k);
         }
 
+        // ⚠️ FAT IS THE DEFAULT, AND THE CONSTRAINT IS STACK, NOT LINK TIME. #581 briefly made thin
+        // the default; it costs ~3.4 KB of stack frame on a real ROM (measured on tish-gba's
+        // examples/ffta: 31,056 B combined under fat vs 34,504 under thin, against 32,512 usable),
+        // and the overflow does not trap — it aliases into EWRAM through the GBA's 256 KB mirror and
+        // corrupts the heap silently. See docs/gba-target.md.
         let default = super::gba_cargo_profiles_toml();
         assert!(
-            default.contains(r#"lto = "thin""#) && default.contains("codegen-units = 8"),
-            "default ROM profile must be thin LTO across 8 CGUs, not fat + 1 (#581):\n{default}"
+            default.contains(r#"lto = "fat""#) && default.contains("codegen-units = 1"),
+            "default ROM profile must be fat LTO + 1 CGU — smallest stack frames:\n{default}"
         );
         assert!(
-            !default.contains(r#"lto = "fat""#),
-            "fat LTO must be opt-in, not the default (#581):\n{default}"
+            !default.contains(r#"lto = "thin""#),
+            "thin LTO must be opt-in via TISH_GBA_THIN_LTO, not the default:\n{default}"
         );
         assert!(
             default.contains("debug = false"),
             "release debuginfo must be opt-in via TISH_GBA_DEBUG (#581)"
         );
 
+        // Legacy: scripts that set TISH_GBA_FAT_LTO=1 still get fat (now a no-op, not an error).
         std::env::set_var("TISH_GBA_FAT_LTO", "1");
         let ship = super::gba_cargo_profiles_toml();
         assert!(
             ship.contains(r#"lto = "fat""#) && ship.contains("codegen-units = 1"),
-            "TISH_GBA_FAT_LTO=1 must still reach the smallest-ROM profile (#581):\n{ship}"
+            "TISH_GBA_FAT_LTO=1 must keep working as a no-op:\n{ship}"
         );
         std::env::remove_var("TISH_GBA_FAT_LTO");
+
+        // The opt-in that #581 was really about: faster iteration where stack headroom allows.
+        std::env::set_var("TISH_GBA_THIN_LTO", "1");
+        let thin = super::gba_cargo_profiles_toml();
+        assert!(
+            thin.contains(r#"lto = "thin""#) && thin.contains("codegen-units = 8"),
+            "TISH_GBA_THIN_LTO=1 must select thin LTO across 8 CGUs:\n{thin}"
+        );
+        std::env::remove_var("TISH_GBA_THIN_LTO");
 
         std::env::set_var("TISH_FAST_NATIVE_BUILD", "1");
         let fast = super::gba_cargo_profiles_toml();
