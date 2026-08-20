@@ -1122,6 +1122,10 @@ pub(crate) struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// #684: module bindings whose `VmRef` cell is declared UP FRONT, at the top of `run()`, because
+    /// a closure emitted ABOVE the `let` writes (or reads) them. The `let` then assigns into the
+    /// pre-declared cell instead of creating one. See `collect_forward_referenced_cell_bindings`.
+    predeclared_cell_bindings: std::collections::HashSet<String>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
@@ -1443,6 +1447,7 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            predeclared_cell_bindings: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
@@ -3922,7 +3927,33 @@ impl Codegen {
         // above it establish. A literal cannot observe or disturb anything, so moving it is not
         // visible to the program.
         let reordered = Self::hoist_forward_referenced_module_bindings(&program.statements);
-        self.emit_statements_with_folds(reordered.as_deref().unwrap_or(&program.statements))?;
+        let module_stmts = reordered.as_deref().unwrap_or(&program.statements);
+        // #684 — the residue the hoist above cannot move: a module binding that is a capture cell
+        // AND is captured by a closure emitted before its `let`. Declaring the cell here, ahead of
+        // every statement, is what makes the capture resolvable in both directions; the `let` below
+        // assigns into it (see the `predeclared_cell_bindings` arm in `Statement::VarDecl`).
+        self.predeclared_cell_bindings =
+            Self::collect_forward_referenced_cell_bindings(module_stmts, &self.refcell_wrapped_vars);
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_const_f64_arrays.contains_key(n));
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_const_f64_aliases.contains_key(n));
+        let mut predeclared: Vec<String> = self.predeclared_cell_bindings.iter().cloned().collect();
+        predeclared.sort();
+        for name in &predeclared {
+            self.writeln(&format!(
+                "let {}: VmRef<Value> = VmRef::new(Value::Null);",
+                Self::escape_ident(name)
+            ));
+            // The cell holds a boxed `Value`: the binding's type is not known until its initialiser
+            // is emitted, and a forward capture needs the storage to exist before then.
+            self.type_context.define(name, RustType::Value);
+            self.rc_cell_storage_define(name);
+            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                scope.push(name.clone());
+            }
+        }
+        self.emit_statements_with_folds(module_stmts)?;
         if self.is_async {
             self.async_context_stack.pop();
         }
@@ -6214,6 +6245,25 @@ impl Codegen {
 
                 if self.int_i32_vec_locals.contains(name.as_ref()) {
                     rust_type = RustType::Vec(Box::new(RustType::I32));
+                }
+
+                // #684: the cell for this module binding was declared at the top of `run()` because a
+                // closure above the `let` captures it. Assign into that cell rather than shadowing it
+                // with a fresh `let` — a second `let` would leave the earlier closures pointing at a
+                // cell nothing ever writes.
+                if self.predeclared_cell_bindings.contains(name.as_ref())
+                    && self.outer_vars_stack.len() == 1
+                {
+                    self.type_context.define(name.as_ref(), RustType::Value);
+                    if let Some(init_e) = init.as_ref() {
+                        let val = self.emit_expr(init_e)?;
+                        self.writeln(&format!(
+                            "*{}.borrow_mut() = ({}).clone();",
+                            Self::escape_ident(name.as_ref()),
+                            val
+                        ));
+                    }
+                    return Ok(());
                 }
 
                 // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
@@ -17741,6 +17791,76 @@ impl Codegen {
             }
         }
         Some(out)
+    }
+
+    /// #684 — MODULE BINDINGS A CLOSURE ABOVE THEM TOUCHES, THAT THE HOIST CANNOT REACH.
+    ///
+    /// `hoist_forward_referenced_module_bindings` moves the declaration up, but only for a LITERAL
+    /// initialiser referenced from a top-level `FunDecl` — deliberately, since moving a call would
+    /// move its side effects. Everything else it leaves in place, and for a binding that is also a
+    /// capture cell (`refcell_wrapped_vars`) the result does not compile:
+    ///
+    /// ```text
+    /// let mk = [() => { function noteDeath(c) { deadCol = c } … }]   // *deadCol.borrow_mut() = …
+    /// export let deadCol: i32 = -1                                   // let deadCol = VmRef::new(..)
+    /// ```
+    ///
+    /// The write emits `*deadCol.borrow_mut()` because `refcell_wrapped_vars` — a whole-program
+    /// prepass — says the binding is a cell, while the capture list comes from `outer_vars_stack`,
+    /// which is built as statements are emitted and does not have the name yet. Nothing is captured,
+    /// nothing is in scope: `error[E0425]: cannot find value 'deadCol' in this scope`.
+    ///
+    /// The fix is not to move the declaration but to split it: declare the CELL up front (holding
+    /// `Value::Null`, which is what the binding's value is before its `let` runs anyway) and let the
+    /// `let` assign into it. Every closure — above or below — then captures the same cell, and the
+    /// initialiser stays exactly where the program put it.
+    ///
+    /// Only names declared EXACTLY ONCE at module level qualify: with two declarations a mention
+    /// above the second one refers to the first, and merging them into one cell would change which
+    /// value it sees (the same hazard the hoist documents).
+    fn collect_forward_referenced_cell_bindings(
+        stmts: &[Statement],
+        wrapped: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut decl_index: HashMap<String, usize> = HashMap::new();
+        let mut decl_counts: HashMap<String, usize> = HashMap::new();
+        for (i, s) in stmts.iter().enumerate() {
+            if let Statement::VarDecl { name, .. } = s {
+                *decl_counts.entry(name.to_string()).or_insert(0) += 1;
+                decl_index.entry(name.to_string()).or_insert(i);
+            }
+        }
+        let mut out = HashSet::new();
+        for (name, di) in &decl_index {
+            if !wrapped.contains(name.as_str()) {
+                continue;
+            }
+            if decl_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                continue;
+            }
+            if stmts
+                .iter()
+                .take(*di)
+                .any(|s| Self::stmt_closure_captures_ident(s, name))
+            {
+                out.insert(name.clone());
+            }
+        }
+        out
+    }
+
+    /// Does a CLOSURE inside this statement capture `name`? Straight-line code above a declaration
+    /// is deliberately not counted — there a mention is a genuine use-before-init, not a legal
+    /// forward reference, and must keep failing rather than silently reading `Value::Null`.
+    ///
+    /// Reuses the same walker `collect_vars_needing_capture_cell` uses to decide cell-ness in the
+    /// first place, so the two answers cannot drift apart.
+    fn stmt_closure_captures_ident(stmt: &Statement, name: &str) -> bool {
+        let mut block_vars = HashSet::new();
+        block_vars.insert(name.to_string());
+        let mut captured = HashSet::new();
+        Self::collect_captured_block_vars_from_statements(stmt, &block_vars, &mut captured);
+        captured.contains(name)
     }
 
     /// An initialiser that cannot observe or disturb program state, so moving it is invisible.

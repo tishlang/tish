@@ -1,0 +1,26 @@
+// #684 — a closure created ABOVE a module binding's `let`, which WRITES that binding.
+//
+// `deadCol` is a capture cell (a nested closure mutates it), but the arrow that mutates it is
+// emitted before the `let`. The native backend used to emit `*deadCol.borrow_mut() = …` against a
+// binding that did not exist yet — `error[E0425]: cannot find value 'deadCol' in this scope`.
+// The `let mk = [...]` wrapper is what puts the closure out of reach of the #629 hoist, which only
+// moves literal declarations referenced from a top-level `function`.
+let mk = [() => {
+  function noteDeath(c: i32) { deadCol = c }
+  function peek(): i32 { return deadCol }
+  return { noteDeath: noteDeath, peek: peek }
+}]
+
+const M = mk[0]()
+
+export let deadCol: i32 = -1
+
+export function noteDeath(c: i32) { return M.noteDeath(c) }
+export function peek(): i32 { return M.peek() }
+
+function main() {
+  console.log(deadCol)
+  noteDeath(7)
+  console.log(deadCol)
+  console.log(peek())
+}
