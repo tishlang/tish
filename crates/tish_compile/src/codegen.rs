@@ -3573,6 +3573,16 @@ impl Codegen {
         if self.emit_mode == crate::NativeEmitMode::RustLib {
             self.module_statics_on = false;
         }
+        if crate::module_statics_flag().unwrap_or(true) {
+            // The shim that keeps the builtin preamble's construction temporaries out of `run()`'s
+            // frame. Generic over the closure's return type so the ~40 builtin types never have to
+            // be spelled out; `#[inline(never)]` is the whole point — inlined, the temporaries come
+            // straight back.
+            self.writeln(
+                "#[inline(never)] fn __tish_no_inline<T>(f: impl FnOnce() -> T) -> T { f() }",
+            );
+            self.writeln("");
+        }
         if self.module_statics_on {
             self.module_fn_statics = self
                 .prescan_function_decls(&program.statements)
@@ -3594,6 +3604,29 @@ impl Codegen {
             self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
         }
         self.indent += 1;
+
+        // #682 — THE BUILTIN PREAMBLE IS BUILT IN ITS OWN FRAME.
+        //
+        // `console`, `Math`, `JSON`, `Array`, the nine TypedArray constructors and the rest are
+        // ~40 bindings, and each is built from a `Value::object(ObjectMap::from([ … ]))` whose pair
+        // array is a large STACK temporary. Measured on a hello-world, that preamble alone is
+        // 4,192 B of `run()`'s frame before a line of the program runs — 13% of the GBA's whole
+        // stack, for a fixed set of objects that never change.
+        //
+        // The bindings themselves are cheap (one `Value` each); it is the construction that is not.
+        // So the whole preamble is emitted into a closure handed to a `#[inline(never)]` shim: the
+        // temporaries live and die in that call's frame, and `run()` receives only the values.
+        // The shim is generic over the closure's return type, so nothing here has to spell out the
+        // ~40 types (`document` is a `VmRef<Value>`, the rest are `Value`s).
+        // Not gated on `module_statics_on`: a frame boundary has none of that switch's hazards —
+        // no per-thread storage, nothing published by name — so every target gets it. The kill
+        // switch still turns it off, so one flag restores the whole pre-#682 emission.
+        let preamble_buffered = crate::module_statics_flag().unwrap_or(true);
+        let saved_output = if preamble_buffered {
+            Some(std::mem::take(&mut self.output))
+        } else {
+            None
+        };
 
         // Before anything else: one namespace object per native module, shared by all of its imports.
         self.emit_native_namespace_preamble();
@@ -3920,6 +3953,11 @@ impl Codegen {
             self.writeln(
                 "let createRoot = Value::native(|args: &[Value]| native_create_root(args));",
             );
+        }
+
+        if let Some(saved) = saved_output {
+            let preamble = std::mem::replace(&mut self.output, saved);
+            self.emit_buffered_preamble(&preamble);
         }
 
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
@@ -17380,6 +17418,68 @@ impl Codegen {
             return true;
         }
         false
+    }
+
+    /// #682 — re-emit a buffered builtin preamble inside the `#[inline(never)]` shim, handing its
+    /// bindings back as a tuple. See the call site for why.
+    ///
+    /// The names come from the buffer itself rather than a hand-kept list: half the preamble is
+    /// feature-gated (`fs`, `http`, `timers`, JSX…), so what was actually emitted is the only
+    /// reliable answer. Only declarations at the preamble's own indent are taken — the `let`s
+    /// nested inside a `Value::object({ … })` block are that block's business.
+    fn emit_buffered_preamble(&mut self, preamble: &str) {
+        let base = "    ".repeat(self.indent);
+        let mut names: Vec<(bool, String)> = Vec::new();
+        for line in preamble.lines() {
+            let Some(rest) = line.strip_prefix(&base) else {
+                continue;
+            };
+            if rest.starts_with(' ') {
+                continue;
+            }
+            let Some(rest) = rest.strip_prefix("let ") else {
+                continue;
+            };
+            let (is_mut, rest) = match rest.strip_prefix("mut ") {
+                Some(r) => (true, r),
+                None => (false, rest),
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            // `let (a, b) = …` or a typed pattern would not round-trip through the tuple; the
+            // preamble emits neither, and anything unexpected is skipped rather than guessed at.
+            if name.is_empty() || !rest[name.len()..].trim_start().starts_with('=') {
+                continue;
+            }
+            if names.iter().any(|(_, n)| *n == name) {
+                continue;
+            }
+            names.push((is_mut, name));
+        }
+        if names.is_empty() {
+            self.output.push_str(preamble);
+            return;
+        }
+        let binds = names
+            .iter()
+            .map(|(m, n)| if *m { format!("mut {n}") } else { n.clone() })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let vals = names
+            .iter()
+            .map(|(_, n)| n.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.writeln(&format!(
+            "let ({binds}) = __tish_no_inline(|| {{"
+        ));
+        self.output.push_str(preamble);
+        self.indent += 1;
+        self.writeln(&format!("({vals})"));
+        self.indent -= 1;
+        self.writeln("});");
     }
 
     /// #682 — static name for a module-scope FUNCTION binding (`heroAnim` → `__TISH_GF_heroAnim`).

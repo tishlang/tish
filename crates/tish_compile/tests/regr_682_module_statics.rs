@@ -158,3 +158,32 @@ fn a_typed_module_binding_gets_a_typed_static() {
         run_body(&rust)
     );
 }
+
+/// The builtin preamble is built in its own frame. `console`, `Math`, `JSON`, the nine TypedArray
+/// constructors and the rest are ~40 bindings whose `ObjectMap::from([ … ])` pair arrays are large
+/// stack temporaries — 4,192 B of a hello-world's `run()` frame, 13% of the GBA's whole stack,
+/// before a line of the program runs.
+#[test]
+fn the_builtin_preamble_is_built_out_of_line() {
+    for (dir, mode) in [
+        ("regr682_pre_gba", NativeEmitMode::Gba),
+        ("regr682_pre_host", NativeEmitMode::DesktopBin),
+    ] {
+        let rust = compile_in(dir, mode);
+        assert!(
+            rust.contains(
+                "#[inline(never)] fn __tish_no_inline<T>(f: impl FnOnce() -> T) -> T { f() }"
+            ),
+            "the shim must be emitted ({mode:?}):\n{rust}"
+        );
+        let body = run_body(&rust);
+        assert!(
+            body.contains("= __tish_no_inline(|| {"),
+            "the preamble must be built through it ({mode:?}):\n{body}"
+        );
+        assert!(
+            body.contains("console") && body.contains("Math"),
+            "…and still bind the builtins ({mode:?}):\n{body}"
+        );
+    }
+}
