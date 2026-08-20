@@ -33,6 +33,26 @@ pub(crate) fn native_recur_guard_enabled() -> bool {
     std::env::var("TISH_NATIVE_RECUR_GUARD").map(|v| v != "0").unwrap_or(true)
 }
 
+/// #682 — MODULE-SCOPE STATE GETS A TOP-LEVEL HOME INSTEAD OF A `run()` STACK SLOT.
+///
+/// Every module in a program is flattened into one `run()`, so every top-level function's cell and
+/// boxed closure, every capture clone of them, and every module binding is a live local of a single
+/// frame. On a real GBA game that frame reached 27–30 KB against a 32.5 KB IWRAM stack, and it grows
+/// with program size — so the ROM stops booting and no further feature can be added.
+///
+/// Promoting those bindings to statics (`SingleCore` on GBA, `thread_local!` on the host) takes them
+/// out of the frame, and removes the per-closure `_cell`/`_ref` capture clones with them.
+///
+/// **Default ON.** `TISH_MODULE_STATICS=0` restores the pre-#682 emission for bisecting;
+/// `TISH_MODULE_STATICS=1` forces it on where the thread gate below would otherwise decline.
+pub(crate) fn module_statics_flag() -> Option<bool> {
+    match std::env::var("TISH_MODULE_STATICS").as_deref() {
+        Ok("0") => Some(false),
+        Ok(_) => Some(true),
+        Err(_) => None,
+    }
+}
+
 /// How generated Rust is linked (desktop binary vs embedded iOS staticlib vs GBA ROM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeEmitMode {

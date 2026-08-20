@@ -1126,6 +1126,12 @@ pub(crate) struct Codegen {
     /// a closure emitted ABOVE the `let` writes (or reads) them. The `let` then assigns into the
     /// pre-declared cell instead of creating one. See `collect_forward_referenced_cell_bindings`.
     predeclared_cell_bindings: std::collections::HashSet<String>,
+    /// #682: is the module-statics promotion active for this compile? Decided once in
+    /// `emit_program` from the target, the linked features and `TISH_MODULE_STATICS`.
+    module_statics_on: bool,
+    /// #682: top-level function names whose boxed closure lives in a module static (`GF_NAME`)
+    /// rather than a `run()` local. Reads resolve to the static, so nothing captures them.
+    module_fn_statics: std::collections::HashSet<String>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
@@ -1448,6 +1454,8 @@ impl Codegen {
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
             predeclared_cell_bindings: std::collections::HashSet::new(),
+            module_statics_on: false,
+            module_fn_statics: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
@@ -3537,6 +3545,36 @@ impl Codegen {
         }
         self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
         self.shift_half_of = Self::collect_shift_half_of(&program.statements);
+        // #682 — MODULE FUNCTIONS GET A TOP-LEVEL HOME. Every top-level fn currently contributes a
+        // `VmRef` cell, a boxed closure and one `_ref` clone per capturing sibling to `run()`'s
+        // single frame; on a real GBA game that frame is 27–30 KB against a 32.5 KB IWRAM stack and
+        // grows with program size. Parking the closure in a static takes all three out of the frame.
+        //
+        // OFF WHENEVER TISH CODE CAN RUN ON ANOTHER THREAD. The host storage is `thread_local!`
+        // (forced by `Value`: `send-values` is off unless `http` is on, so `VmRef` is
+        // `Rc<RefCell<_>>` and a plain `static` would not compile — the same constraint `RustLib`
+        // documents). A `serve` handler runs on a tokio worker, which would read that worker's
+        // *uninitialised* copy. `http`/`ws` are the only ways to get there, and the GBA — the target
+        // this exists for — has neither.
+        let threads_possible = self.program_may_call_tish_off_thread(program);
+        self.module_statics_on = crate::module_statics_flag()
+            .unwrap_or(self.emit_mode == crate::NativeEmitMode::Gba || !threads_possible);
+        // `RustLib` publishes its exports by naming the `run()` local, so its bindings must stay
+        // locals; the whole point there is that the frame outlives the call anyway.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            self.module_statics_on = false;
+        }
+        if self.module_statics_on {
+            self.module_fn_statics = self
+                .prescan_function_decls(&program.statements)
+                .into_iter()
+                .filter(|n| {
+                    !(self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(n))
+                })
+                .collect();
+            self.emit_module_fn_statics()?;
+        }
+
         // Gba mode is sync in P2 (real async lowering is P5); `std::error::Error` in
         // the signature is rewritten to `core::error::Error` by the no_std post-pass.
         if self.is_async && self.emit_mode != crate::NativeEmitMode::Gba {
@@ -3884,6 +3922,10 @@ impl Codegen {
             // #177: functions promoted to native aggregate free fns (`<name>_agg`) have their
             // boxed closure + cell suppressed — no boxed value exists to back-patch.
             if self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(func_name) {
+                continue;
+            }
+            // #682: promoted module fns live in `GF_NAME`, so they need no `run()` cell at all.
+            if self.is_module_fn_static(func_name) {
                 continue;
             }
             let escaped = Self::escape_ident(func_name);
@@ -7340,7 +7382,17 @@ impl Codegen {
                     }
                 }
 
-                self.writeln(&format!("let {} = {{", name_str));
+                // #682: a promoted module fn is BUILT INTO ITS STATIC, so neither the closure nor
+                // a `let` for it occupies a slot in `run()`'s frame.
+                let to_static = self.is_module_fn_static(name_raw);
+                if to_static {
+                    self.writeln(&format!(
+                        "{}.with(|c| *c.borrow_mut() = {{",
+                        Self::module_fn_static_name(name_raw)
+                    ));
+                } else {
+                    self.writeln(&format!("let {} = {{", name_str));
+                }
                 self.indent += 1;
                 // Clone RefCell for outer vars so closure can capture
                 for outer_var in &outer_vars {
@@ -7351,7 +7403,9 @@ impl Codegen {
                     ));
                 }
                 // Clone the cell so the closure can reference the function recursively
-                let needs_self_ref = referenced.contains(name_raw);
+                // A promoted fn reaches itself through its static; no `_ref` clone, and so no
+                // extra slot in the enclosing frame either.
+                let needs_self_ref = referenced.contains(name_raw) && !to_static;
                 if needs_self_ref {
                     self.writeln(&format!(
                         "let {}_ref = {}_cell.clone();",
@@ -7365,7 +7419,12 @@ impl Codegen {
                     .map(|scope| {
                         scope
                             .iter()
-                            .filter(|s| s.as_str() != name_raw && referenced.contains(s.as_str()))
+                            .filter(|s| {
+                                s.as_str() != name_raw
+                                    && referenced.contains(s.as_str())
+                                    // #682: a sibling in a static is read from the static.
+                                    && !self.is_module_fn_static(s.as_str())
+                            })
                             .cloned()
                             .collect()
                     })
@@ -7401,6 +7460,7 @@ impl Codegen {
                         for f in scope {
                             if f.as_str() != name_raw
                                 && referenced.contains(f.as_str())
+                                && !self.is_module_fn_static(f.as_str())
                                 && !sibling_fns.iter().any(|s| s == f)
                                 && !outer_vars.iter().any(|v| v == f)
                                 && !outer_params.iter().any(|p| p == f)
@@ -7819,12 +7879,16 @@ impl Codegen {
                 self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                 self.try_closure_depth = saved_try_depth;
                 self.indent -= 1;
-                self.writeln("};");
-                // Update the cell with the actual function value
-                self.writeln(&format!(
-                    "*{}_cell.borrow_mut() = {}.clone();",
-                    name_str, name_str
-                ));
+                if to_static {
+                    self.writeln("});");
+                } else {
+                    self.writeln("};");
+                    // Update the cell with the actual function value
+                    self.writeln(&format!(
+                        "*{}_cell.borrow_mut() = {}.clone();",
+                        name_str, name_str
+                    ));
+                }
             }
         }
         Ok(())
@@ -8415,6 +8479,11 @@ impl Codegen {
                 }
                 if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
                     return Ok(format!("Value::Number(({} as f64))", uv));
+                }
+                // #682: a module fn lives in `GF_NAME`, not in a local — and unlike a capture, the
+                // static is in scope at every depth, so nothing has to be threaded in to reach it.
+                if self.is_module_fn_static(name.as_ref()) {
+                    return Ok(Self::module_fn_static_read(name.as_ref()));
                 }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
@@ -17168,6 +17237,93 @@ impl Codegen {
             .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
             .collect();
         format!("G_{}", safe.to_uppercase())
+    }
+
+    /// #682 — does this program hand a tish closure to something that will call it on ANOTHER
+    /// thread? Those are the surfaces the host's `thread_local!` storage cannot serve: the worker
+    /// would read its own uninitialised copy of every module fn.
+    ///
+    /// Keyed on what the program NAMES, not on which capabilities are linked — `tish build` links
+    /// the whole capability set by default, so a feature test would switch this off for every
+    /// desktop program including the ones that never open a socket. Conservative in the safe
+    /// direction: a program that merely mentions one of these names keeps the old emission.
+    fn program_may_call_tish_off_thread(&self, program: &Program) -> bool {
+        let mut idents = HashSet::new();
+        for s in &program.statements {
+            Self::collect_stmt_idents(s, &mut idents);
+        }
+        // `serve(port, handler)` dispatches the handler on tokio workers; `serve(port, {onWorker})`
+        // builds one per accept thread. `Server`/`WebSocket`/`wsAccept` are the ws equivalents.
+        for n in ["serve", "Server", "WebSocket", "wsAccept"] {
+            if idents.contains(n) {
+                return true;
+            }
+        }
+        // `Promise.spawn` is an OS-thread spawn, and only exists in ws-linked programs. The member
+        // name is not an ident, so the receiver is what we can see.
+        if self.has_feature("ws") && idents.contains("Promise") {
+            return true;
+        }
+        false
+    }
+
+    /// #682 — static name for a module-scope FUNCTION binding (`heroAnim` → `GF_HEROANIM`).
+    /// A distinct prefix from `global_static_name`'s `G_`, so a program with both a numeric global
+    /// `x` and a function `x` (different namespaces in tish, same one in Rust) cannot collide.
+    fn module_fn_static_name(name: &str) -> String {
+        let esc = Self::escape_ident(name);
+        let raw = esc.strip_prefix("r#").unwrap_or(&esc);
+        let safe: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        format!("GF_{}", safe.to_uppercase())
+    }
+
+    /// Read a module fn out of its static. Emitted INSIDE closure bodies as well as at top level:
+    /// the read happens when the expression runs, by which time every module fn is installed.
+    fn module_fn_static_read(name: &str) -> String {
+        format!(
+            "{}.with(|c| (*c.borrow()).clone())",
+            Self::module_fn_static_name(name)
+        )
+    }
+
+    fn is_module_fn_static(&self, name: &str) -> bool {
+        self.module_statics_on && self.module_fn_statics.contains(name)
+    }
+
+    /// Declare one static per promoted module fn, before `run()`. `SingleCore` on GBA (no_std has
+    /// no `thread_local!`), `thread_local!` on the host — the same split #594 made for the numeric
+    /// globals, and for the same reason: `with()` mirrors `LocalKey::with`, so every read site is
+    /// written once and works on both.
+    fn emit_module_fn_statics(&mut self) -> Result<(), CompileError> {
+        if self.module_fn_statics.is_empty() {
+            return Ok(());
+        }
+        let mut names: Vec<String> = self.module_fn_statics.iter().cloned().collect();
+        names.sort();
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            for n in &names {
+                self.writeln(&format!(
+                    "static {}: tishlang_runtime::SingleCore<core::cell::RefCell<Value>> = \
+                     tishlang_runtime::SingleCore::new(core::cell::RefCell::new(Value::Null));",
+                    Self::module_fn_static_name(n)
+                ));
+            }
+        } else {
+            // ONE `thread_local!` PER STATIC, not one block listing them all: the macro recurses
+            // once per item, and a real program has hundreds of module fns — a single block blows
+            // rustc's default `recursion_limit = 128` before it ever type-checks.
+            for n in &names {
+                self.writeln(&format!(
+                    "thread_local! {{ static {}: std::cell::RefCell<Value> = const {{ std::cell::RefCell::new(Value::Null) }}; }}",
+                    Self::module_fn_static_name(n)
+                ));
+            }
+        }
+        self.writeln("");
+        Ok(())
     }
 
     fn native_global_static(name: &str) -> String {
