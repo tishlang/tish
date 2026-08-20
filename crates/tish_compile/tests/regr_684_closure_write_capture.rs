@@ -20,7 +20,13 @@ use tishlang_compile::{compile_project_full_emit, NativeEmitMode};
 
 const FIXTURE: &str = "../../tests/regression/closure_writes_module_let_684.tish";
 
+/// #682's module statics give the same binding a home that is in scope everywhere, which fixes
+/// this shape too. The pre-declaration below is what covers it everywhere the statics are OFF —
+/// the kill switch, `RustLib`, a program that can run tish on another thread, and any binding a
+/// local elsewhere shadows — so that is the mode these assertions pin. This whole file is its own
+/// test binary, so the env var cannot leak into another test's compile.
 fn rust_for(mode: NativeEmitMode) -> String {
+    std::env::set_var("TISH_MODULE_STATICS", "0");
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     compile_project_full_emit(&path, path.parent(), &[], true, mode, None)
         .expect("compile")
@@ -75,6 +81,7 @@ fn a_binding_with_no_forward_capture_is_untouched() {
          function main() { bump(3); console.log(deadCol) }\n",
     )
     .unwrap();
+    std::env::set_var("TISH_MODULE_STATICS", "0");
     let rust = compile_project_full_emit(
         &src,
         Some(dir.as_path()),

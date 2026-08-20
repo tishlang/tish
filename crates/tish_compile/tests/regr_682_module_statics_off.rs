@@ -42,7 +42,7 @@ fn the_kill_switch_restores_run_locals() {
     std::env::remove_var("TISH_MODULE_STATICS");
 
     assert!(
-        !rust.contains("static GF_"),
+        !rust.contains("static __TISH_GF_"),
         "the kill switch must emit no module-fn statics:\n{rust}"
     );
     let body = rust.split("fn run()").nth(1).expect("run()");

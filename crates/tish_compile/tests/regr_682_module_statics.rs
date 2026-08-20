@@ -52,14 +52,14 @@ fn gba_module_fns_live_in_singlecore_statics() {
     let rust = compile_in("regr682_gba", NativeEmitMode::Gba);
     assert!(
         rust.contains(
-            "static GF_TWICE: tishlang_runtime::SingleCore<core::cell::RefCell<Value>> = \
+            "static __TISH_GF_twice: tishlang_runtime::SingleCore<core::cell::RefCell<Value>> = \
              tishlang_runtime::SingleCore::new(core::cell::RefCell::new(Value::Null));"
         ),
         "expected a SingleCore static for `twice`:\n{rust}"
     );
     let body = run_body(&rust);
     assert!(
-        body.contains("GF_TWICE.with(|c| *c.borrow_mut() = {"),
+        body.contains("__TISH_GF_twice.with(|c| *c.borrow_mut() = {"),
         "the closure must be built INTO the static, not into a `run()` local:\n{body}"
     );
     assert!(
@@ -76,7 +76,7 @@ fn host_module_fns_live_in_thread_local_statics() {
     let rust = compile_in("regr682_host", NativeEmitMode::DesktopBin);
     assert!(
         rust.contains(
-            "thread_local! { static GF_TALLY: std::cell::RefCell<Value> = \
+            "thread_local! { static __TISH_GF_tally: std::cell::RefCell<Value> = \
              const { std::cell::RefCell::new(Value::Null) }; }"
         ),
         "expected a one-per-static thread_local for `tally`:\n{rust}"
@@ -101,7 +101,7 @@ fn a_sibling_call_reads_the_static_instead_of_capturing_a_ref() {
             mode,
         ));
         assert!(
-            body.contains("GF_TALLY.with(|c| (*c.borrow()).clone())"),
+            body.contains("__TISH_GF_tally.with(|c| (*c.borrow()).clone())"),
             "`twice` must reach `tally` through the static ({mode:?}):\n{body}"
         );
         assert!(
@@ -121,7 +121,7 @@ fn a_captured_module_binding_takes_its_cell_from_a_static() {
         ("regr682_var_host", NativeEmitMode::DesktopBin),
     ] {
         let rust = compile_in(dir, mode);
-        let handle = "GV_BAG.with(|c| c.get_or_init(|| VmRef::new(Value::Null)).clone())";
+        let handle = "__TISH_GV_bag.with(|c| c.get_or_init(|| VmRef::new(Value::Null)).clone())";
         assert!(
             rust.contains(handle),
             "`bag`'s cell must come from its static ({mode:?}):\n{rust}"
@@ -138,19 +138,23 @@ fn a_captured_module_binding_takes_its_cell_from_a_static() {
     }
 }
 
-/// A NATIVELY typed module binding keeps its representation. Boxing a `: i32` scalar into the one
-/// uniform `VmRef<Value>` static would trade a stack slot for a per-read `Value` clone on the GBA
-/// hot path — that binding's home belongs to the typed-lowering work (#631 / #647 / #654).
+/// A binding's TYPE is not an eligibility criterion: the static and its accessor are emitted after
+/// `run()`, from the type recorded when the `let` was emitted, so a natively-typed module binding
+/// keeps its native representation and still gets a static — no boxing, no per-read `Value` clone.
 #[test]
-fn a_natively_typed_module_binding_is_left_alone() {
+fn a_typed_module_binding_gets_a_typed_static() {
     let rust = compile_in("regr682_typed", NativeEmitMode::Gba);
     assert!(
-        !rust.contains("GV_HITS"),
-        "`hits: i32` must not be promoted into the boxed static:\n{rust}"
+        rust.contains("VmRef<i32>"),
+        "`hits: i32` must keep its native cell type:\n{rust}"
     );
     assert!(
-        run_body(&rust).contains("let hits_cell"),
-        "…and keeps today's capture-cell emission:\n{}",
+        rust.contains("static __TISH_GV_hits: tishlang_runtime::SingleCore<core::cell::OnceCell<VmRef<i32>>>"),
+        "…in a typed static:\n{rust}"
+    );
+    assert!(
+        !run_body(&rust).contains("let hits_cell"),
+        "and nothing threads a cell through the frame any more:\n{}",
         run_body(&rust)
     );
 }
