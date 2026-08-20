@@ -23,13 +23,14 @@ fn fixture(dir: &str, files: &[(&str, &str)]) -> PathBuf {
 
 const MOD: &str = "\
 export let hits: i32 = 0
-export function tally(a: i32): i32 { hits = hits + a; return hits }
+export let bag = { hits: 0, tag: \"b\" }
+export function tally(a: i32): i32 { hits = hits + a; bag = { hits: bag.hits + 1, tag: bag.tag }; return hits }
 export function twice(a: i32): i32 { return tally(a) + tally(a) }
 ";
 
 const ENTRY: &str = "\
-import { tally, twice, hits } from './pkg/m.tish'
-function main() { console.log(twice(2) + tally(1) + hits) }
+import { tally, twice, hits, bag } from './pkg/m.tish'
+function main() { console.log(twice(2) + tally(1) + hits + bag.hits) }
 ";
 
 fn compile_in(dir: &str, mode: NativeEmitMode) -> String {
@@ -108,4 +109,48 @@ fn a_sibling_call_reads_the_static_instead_of_capturing_a_ref() {
             "no `_ref` capture clone should survive ({mode:?}):\n{body}"
         );
     }
+}
+
+/// A module DATA binding that closures capture moves its CELL into a static. The static holds the
+/// `VmRef`, not the value, so every read/write site is unchanged — what goes away is the `_cell`
+/// clone each enclosing scope had to leave in its frame to thread the cell down.
+#[test]
+fn a_captured_module_binding_takes_its_cell_from_a_static() {
+    for (dir, mode) in [
+        ("regr682_var_gba", NativeEmitMode::Gba),
+        ("regr682_var_host", NativeEmitMode::DesktopBin),
+    ] {
+        let rust = compile_in(dir, mode);
+        let handle = "GV_BAG.with(|c| c.get_or_init(|| VmRef::new(Value::Null)).clone())";
+        assert!(
+            rust.contains(handle),
+            "`bag`'s cell must come from its static ({mode:?}):\n{rust}"
+        );
+        let body = run_body(&rust);
+        assert!(
+            !body.contains("let bag_cell"),
+            "no `_cell` clone should be threaded through the frame ({mode:?}):\n{body}"
+        );
+        assert!(
+            body.contains("*bag.borrow_mut()"),
+            "the write path is unchanged — it still sees a `VmRef` local ({mode:?}):\n{body}"
+        );
+    }
+}
+
+/// A NATIVELY typed module binding keeps its representation. Boxing a `: i32` scalar into the one
+/// uniform `VmRef<Value>` static would trade a stack slot for a per-read `Value` clone on the GBA
+/// hot path — that binding's home belongs to the typed-lowering work (#631 / #647 / #654).
+#[test]
+fn a_natively_typed_module_binding_is_left_alone() {
+    let rust = compile_in("regr682_typed", NativeEmitMode::Gba);
+    assert!(
+        !rust.contains("GV_HITS"),
+        "`hits: i32` must not be promoted into the boxed static:\n{rust}"
+    );
+    assert!(
+        run_body(&rust).contains("let hits_cell"),
+        "…and keeps today's capture-cell emission:\n{}",
+        run_body(&rust)
+    );
 }

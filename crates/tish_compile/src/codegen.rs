@@ -1132,6 +1132,9 @@ pub(crate) struct Codegen {
     /// #682: top-level function names whose boxed closure lives in a module static (`GF_NAME`)
     /// rather than a `run()` local. Reads resolve to the static, so nothing captures them.
     module_fn_statics: std::collections::HashSet<String>,
+    /// #682: module-level DATA bindings whose `VmRef<Value>` cell is held by a module static
+    /// (`GV_NAME`) instead of being threaded into every closure as a `_cell` clone.
+    module_var_statics: std::collections::HashSet<String>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
@@ -1456,6 +1459,7 @@ impl Codegen {
             predeclared_cell_bindings: std::collections::HashSet::new(),
             module_statics_on: false,
             module_fn_statics: std::collections::HashSet::new(),
+            module_var_statics: std::collections::HashSet::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
@@ -3974,8 +3978,32 @@ impl Codegen {
         // AND is captured by a closure emitted before its `let`. Declaring the cell here, ahead of
         // every statement, is what makes the capture resolvable in both directions; the `let` below
         // assigns into it (see the `predeclared_cell_bindings` arm in `Statement::VarDecl`).
+        // #682 — module DATA bindings whose cell moves into a static. Computed here because it
+        // needs `refcell_wrapped_vars`; the static ITEMS are emitted after `run()` (Rust items are
+        // order-independent, and this is the first point where the set is known).
+        if self.module_statics_on {
+            self.module_var_statics =
+                self.collect_module_var_statics(module_stmts, &self.refcell_wrapped_vars);
+            for name in self.module_var_statics.clone() {
+                // The handle is a `VmRef` local exactly as before, so every read/write site is
+                // unchanged — it just comes out of the static instead of down a capture chain.
+                self.writeln(&format!(
+                    "let {} = {};",
+                    Self::escape_ident(&name),
+                    Self::module_var_static_handle(&name)
+                ));
+                self.type_context.define(&name, RustType::Value);
+                self.rc_cell_storage_define(&name);
+                if let Some(scope) = self.outer_vars_stack.last_mut() {
+                    scope.push(name.clone());
+                }
+            }
+        }
         self.predeclared_cell_bindings =
             Self::collect_forward_referenced_cell_bindings(module_stmts, &self.refcell_wrapped_vars);
+        // A promoted binding already has its cell up front, from the static.
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_var_statics.contains(n));
         self.predeclared_cell_bindings
             .retain(|n| !self.module_const_f64_arrays.contains_key(n));
         self.predeclared_cell_bindings
@@ -4034,6 +4062,13 @@ impl Codegen {
         self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
+        // #682 — the module-data statics. Emitted here, after `run()`, because the eligible set is
+        // only known once `run()`'s capture prepass has run; Rust items are order-independent, so
+        // the reads above resolve to them regardless.
+        if self.module_statics_on {
+            self.writeln("");
+            self.emit_module_var_statics()?;
+        }
         if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
             self.writeln("");
             self.writeln("#[no_mangle]");
@@ -6293,7 +6328,8 @@ impl Codegen {
                 // closure above the `let` captures it. Assign into that cell rather than shadowing it
                 // with a fresh `let` — a second `let` would leave the earlier closures pointing at a
                 // cell nothing ever writes.
-                if self.predeclared_cell_bindings.contains(name.as_ref())
+                if (self.predeclared_cell_bindings.contains(name.as_ref())
+                    || self.is_module_var_static(name.as_ref()))
                     && self.outer_vars_stack.len() == 1
                 {
                     self.type_context.define(name.as_ref(), RustType::Value);
@@ -7321,6 +7357,10 @@ impl Codegen {
                             && !param_names.contains(name)
                             && !local_var_names.contains(name)
                     })
+                    // #682: a promoted module binding is reachable from its static at any depth,
+                    // so it is not captured — which is what removes the `_cell` clone this closure
+                    // would otherwise add to the ENCLOSING frame (for a module fn, `run()`'s).
+                    .filter(|name| !self.is_module_var_static(name))
                     .filter(|name| {
                         ![
                             "Boolean",
@@ -7575,6 +7615,29 @@ impl Codegen {
                 // check. This bounds boxed recursion (incl. mutual/dynamic) exactly like the VM.
                 if crate::native_recur_guard_enabled() {
                     self.writeln("let Some(_tish_depth) = tishlang_runtime::enter_call_guarded() else { return Value::Null; };");
+                }
+                // #682: a promoted module binding is fetched straight from its static. One local
+                // per referencing closure, and none at all in the frames in between — where the
+                // `_cell` chain used to leave one at every level.
+                if self.module_statics_on {
+                    let mut promoted: Vec<String> = self
+                        .module_var_statics
+                        .iter()
+                        .filter(|n| {
+                            referenced.contains(n.as_str())
+                                && !param_names.contains(n.as_str())
+                                && !local_var_names.contains(n.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    promoted.sort();
+                    for n in &promoted {
+                        self.writeln(&format!(
+                            "let {} = {};",
+                            Self::escape_ident(n),
+                            Self::module_var_static_handle(n)
+                        ));
+                    }
                 }
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -12435,6 +12498,8 @@ impl Codegen {
                 ]
                 .contains(&name.as_str())
                     && !self.native_numeric_globals.contains_key(name.as_str())
+                    // #682: reachable from its static at any depth — nothing to capture.
+                    && !self.is_module_var_static(name.as_str())
             })
             .collect();
 
@@ -12592,6 +12657,9 @@ impl Codegen {
                         // arrow whose grandparent-scope var was TLS-lowered). Same exclusion the
                         // FunDecl closure path and this fn's own outer_vars filter already apply.
                         && !self.native_numeric_globals.contains_key(name.as_str())
+                        // #682: same reason — a promoted module binding has no boxed local to
+                        // capture; the body reads its handle out of the static.
+                        && !self.is_module_var_static(name.as_str())
                 })
                 .cloned()
                 .collect()
@@ -12613,6 +12681,26 @@ impl Codegen {
         let saved_try_depth = self.try_closure_depth;
         self.try_closure_depth = 0;
 
+        // #682: same handle fetch as the FunDecl path — see the comment there.
+        if self.module_statics_on {
+            let mut promoted: Vec<&String> = self
+                .module_var_statics
+                .iter()
+                .filter(|n| {
+                    referenced.contains(n.as_str())
+                        && !param_names.contains(n.as_str())
+                        && !local_var_names.contains(n.as_str())
+                })
+                .collect();
+            promoted.sort();
+            for n in promoted {
+                code.push_str(&format!(
+                    "        let {} = {};\n",
+                    Self::escape_ident(n),
+                    Self::module_var_static_handle(n)
+                ));
+            }
+        }
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
@@ -17287,6 +17375,151 @@ impl Codegen {
             "{}.with(|c| (*c.borrow()).clone())",
             Self::module_fn_static_name(name)
         )
+    }
+
+    /// #682 — which module DATA bindings can move their cell into a static.
+    ///
+    /// Restricted to bindings that are ALREADY a `VmRef<Value>` cell (`wrapped`), because those are
+    /// the ones a closure capture threads through the frame — and because the static's type is then
+    /// known without re-running inference. Everything with a native representation is left exactly
+    /// as it is: a `: i32` module scalar or a `number[]` is the subject of separate typed-lowering
+    /// work (#631 / #647 / #654), and boxing it here to make it fit one uniform static would trade
+    /// a stack slot for a per-read `Value` clone on the GBA hot path.
+    ///
+    /// Excluded, in order: a name declared more than once at module level (the second `let` is a
+    /// different binding); a name bound anywhere else in the program (a parameter, a local `let`, a
+    /// `for…of` or `catch` binding), since the static read site has no scope information to know
+    /// which one it is looking at; and any name another static path already owns.
+    fn collect_module_var_statics(
+        &self,
+        stmts: &[Statement],
+        wrapped: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut decl_counts: HashMap<String, usize> = HashMap::new();
+        let mut candidates: Vec<(String, Option<TypeAnnotation>, bool)> = Vec::new();
+        for st in stmts {
+            if let Statement::VarDecl {
+                name,
+                type_ann,
+                init,
+                ..
+            } = st
+            {
+                *decl_counts.entry(name.to_string()).or_insert(0) += 1;
+                candidates.push((
+                    name.to_string(),
+                    type_ann.clone(),
+                    init.as_ref().is_some_and(Self::init_is_natively_shaped),
+                ));
+            }
+        }
+        // Every name bound anywhere OTHER than a module-level `let`.
+        let mut shadow: HashSet<String> = HashSet::new();
+        for st in stmts {
+            Self::collect_binding_names(st, &mut shadow);
+            // A module-level `let x` IS the declaration, not a shadow of it — every other `let`
+            // in the program is. (`collect_binding_names` above already covers the parameter,
+            // `for…of` and `catch` bindings an initialiser's arrow can introduce.)
+            if !matches!(st, Statement::VarDecl { .. }) {
+                Self::collect_local_var_names(st, &mut shadow);
+            }
+        }
+        let mut out = HashSet::new();
+        for (name, ann, native_init) in candidates {
+            if !wrapped.contains(&name)
+                || decl_counts.get(&name).copied().unwrap_or(0) > 1
+                || shadow.contains(&name)
+                || native_init
+                || self.native_numeric_globals.contains_key(&name)
+                || self.module_const_f64_arrays.contains_key(&name)
+                || self.module_const_f64_aliases.contains_key(&name)
+                || self.module_fn_statics.contains(&name)
+            {
+                continue;
+            }
+            if let Some(a) = &ann {
+                if RustType::from_annotation_with_aliases(a, &self.type_aliases)
+                    != RustType::Value
+                {
+                    continue;
+                }
+            }
+            out.insert(name);
+        }
+        out
+    }
+
+    /// An initialiser inference will give a NATIVE representation — a number/bool literal, or an
+    /// array of them. Such a binding stays a `VmRef<f64>` / `VmRef<Vec<f64>>` local; forcing it into
+    /// the uniform `VmRef<Value>` static would change its representation, not just its home.
+    fn init_is_natively_shaped(e: &Expr) -> bool {
+        match e {
+            Expr::Literal { value, .. } => !matches!(value, Literal::Null),
+            Expr::Unary { operand, .. } => Self::init_is_natively_shaped(operand),
+            Expr::Array { elements, .. } => elements.iter().all(|el| match el {
+                ArrayElement::Expr(e) => Self::init_is_natively_shaped(e),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    /// #682 — static name for a module-scope DATA binding (`deadCol` → `GV_DEADCOL`).
+    fn module_var_static_name(name: &str) -> String {
+        let esc = Self::escape_ident(name);
+        let raw = esc.strip_prefix("r#").unwrap_or(&esc);
+        let safe: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        format!("GV_{}", safe.to_uppercase())
+    }
+
+    /// Clone the binding's `VmRef` handle out of its static.
+    ///
+    /// The static holds the CELL, not the value, so every existing read/write site keeps working
+    /// verbatim — `(*x.borrow())`, `*x.borrow_mut() = …`, `vm_read(&x)` all still see a `VmRef`
+    /// local. What changes is where that local comes from: a closure now takes it straight from the
+    /// static instead of having it threaded in through one `_cell` clone per enclosing scope, and
+    /// each of those clones was a slot in `run()`'s frame.
+    ///
+    /// `OnceCell` rather than a plain value because `VmRef::new` is not const, and the handle must
+    /// exist before the binding's `let` runs — a closure created above it captures the same cell.
+    fn module_var_static_handle(name: &str) -> String {
+        format!(
+            "{}.with(|c| c.get_or_init(|| VmRef::new(Value::Null)).clone())",
+            Self::module_var_static_name(name)
+        )
+    }
+
+    fn is_module_var_static(&self, name: &str) -> bool {
+        self.module_statics_on && self.module_var_statics.contains(name)
+    }
+
+    fn emit_module_var_statics(&mut self) -> Result<(), CompileError> {
+        if self.module_var_statics.is_empty() {
+            return Ok(());
+        }
+        let mut names: Vec<String> = self.module_var_statics.iter().cloned().collect();
+        names.sort();
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            for n in &names {
+                self.writeln(&format!(
+                    "static {}: tishlang_runtime::SingleCore<core::cell::OnceCell<VmRef<Value>>> = \
+                     tishlang_runtime::SingleCore::new(core::cell::OnceCell::new());",
+                    Self::module_var_static_name(n)
+                ));
+            }
+        } else {
+            for n in &names {
+                self.writeln(&format!(
+                    "thread_local! {{ static {}: std::cell::OnceCell<VmRef<Value>> = const {{ std::cell::OnceCell::new() }}; }}",
+                    Self::module_var_static_name(n)
+                ));
+            }
+        }
+        self.writeln("");
+        Ok(())
     }
 
     fn is_module_fn_static(&self, name: &str) -> bool {
