@@ -1129,19 +1129,20 @@ pub(crate) struct Codegen {
     /// #682: is the module-statics promotion active for this compile? Decided once in
     /// `emit_program` from the target, the linked features and `TISH_MODULE_STATICS`.
     module_statics_on: bool,
-    /// #682: top-level function names whose boxed closure lives in a module static (`GF_NAME`)
-    /// rather than a `run()` local. Reads resolve to the static, so nothing captures them.
+    /// #682: top-level function names whose boxed closure lives in a module static
+    /// (`__TISH_GF_<name>`) rather than a `run()` local. Reads resolve to the static, so nothing
+    /// captures them.
     module_fn_statics: std::collections::HashSet<String>,
-    /// #682: module-level DATA bindings whose `VmRef<Value>` cell is held by a module static
-    /// (`GV_NAME`) instead of being threaded into every closure as a `_cell` clone.
+    /// #682: module-level DATA bindings whose `VmRef` cell is held by a module static
+    /// (`__TISH_GV_<name>`) instead of being threaded into every closure as a `_cell` clone.
     module_var_statics: std::collections::HashSet<String>,
     /// #682: emitting module top-level statements inside an out-of-line chunk closure. A top-level
     /// `return` ends the SCRIPT, so it must leave `run()` and not just the chunk — see
     /// `Statement::Try`'s top-level `_flow` arm.
     in_module_chunk: bool,
-    /// #682: the Rust type each promoted binding's cell actually holds, recorded when its `let` is
-    /// emitted. The accessor `fn` naming it is emitted after `run()`, so the type never has to be
-    /// predicted ahead of inference — only proved `Default`-safe by the eligibility gate.
+    /// #682: `(rust type, default value)` for each promoted binding's cell, recorded when its
+    /// `let` is emitted. The accessor `fn` naming both is emitted after `run()`, so the type never
+    /// has to be predicted ahead of inference.
     module_var_static_types: std::collections::HashMap<String, (String, String)>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
