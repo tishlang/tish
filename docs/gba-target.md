@@ -97,6 +97,44 @@ documented here so the boundary is honest; none breaks the "no agb dependency" i
 4. **Toolchain specifics** (`-Tgba.ld`, `-Ctarget-cpu=arm7tdmi`, `mgba-qt`, `agb-gbafix`) in
    `build_gba_rom`. Inherent to "produce a GBA ROM" — this is the compiler's build-driver job.
 
+## Where module state lives, and why `run()`'s frame stopped growing (#682)
+
+Every module of a program is flattened into one `run()`. Before #682 that meant a single stack frame
+held, at once: a `VmRef` cell and a boxed closure for **every top-level function in the whole
+program**, one `_cell`/`_ref` capture clone per closure per name it captured, every module binding,
+the ~40 builtin objects, and every top-level statement's temporaries. On a real game that frame was
+27–30 KB against 32,512 B of usable stack, and it grew with **code volume**, so the next feature
+wedged the ROM at boot.
+
+Module state now has a top-level home:
+
+| what | where it lives |
+|---|---|
+| a top-level `function` | `static __TISH_GF_<name>: SingleCore<RefCell<Value>>` |
+| a module binding a closure captures | `static __TISH_GV_<name>: SingleCore<OnceCell<VmRef<T>>>`, reached through `__tish_gv_<name>()` |
+| the builtin preamble (`console`, `Math`, `JSON`, the TypedArray constructors…) | built inside `__tish_no_inline`, so only the values land in `run()` |
+| each group of ~25 module top-level statements | built inside `__tish_no_inline_res`, returning only the bindings it declares |
+
+The statics are typed from the declaration, so a `: i32` module scalar keeps `VmRef<i32>` — nothing
+is boxed to fit one uniform static. Nothing is captured either: a static is in scope at any depth, so
+the `_cell` chains are gone from every frame in between.
+
+Measured on a synthetic 25-module / 326-function program, `run()`'s real frame (aarch64 release, the
+same prologue read the section below describes):
+
+| | `run()` frame | hello-world floor |
+|---|---:|---:|
+| before #682 | 19,200 B | 4,192 B |
+| after | **5,664 B** | **192 B** |
+
+`TISH_MODULE_STATICS=0` restores the previous emission for bisecting. The promotion is off wherever
+tish code can run on another thread (a program naming `serve`, `Server`, `WebSocket`, `wsAccept`, or
+`Promise` under `ws`), since the host storage is per-thread; the GBA has none of those. The
+out-of-line preamble and chunking are not thread-sensitive and apply everywhere.
+
+Related, still open: #631 / #647 / #654 want module state reachable from a *native free* `fn`, which
+these statics now make possible — that eligibility has deliberately not been relaxed here.
+
 ## ROM build profiles (#581)
 
 `gba_cargo_profiles_toml` in `tish_native/src/build.rs` writes the nested crate's `[profile.*]`.
