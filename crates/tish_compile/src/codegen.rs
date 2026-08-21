@@ -1122,6 +1122,24 @@ pub(crate) struct Codegen {
     /// Variables currently wrapped in Rc<RefCell<Value>> for mutable capture in closures
     /// These need special handling: reads via .borrow().clone(), writes via *var.borrow_mut()
     refcell_wrapped_vars: std::collections::HashSet<String>,
+    /// #684: module bindings whose `VmRef` cell is declared UP FRONT, at the top of `run()`, because
+    /// a closure emitted ABOVE the `let` writes (or reads) them. The `let` then assigns into the
+    /// pre-declared cell instead of creating one. See `collect_forward_referenced_cell_bindings`.
+    predeclared_cell_bindings: std::collections::HashSet<String>,
+    /// #682: is the module-statics promotion active for this compile? Decided once in
+    /// `emit_program` from the target, the linked features and `TISH_MODULE_STATICS`.
+    module_statics_on: bool,
+    /// #682: top-level function names whose boxed closure lives in a module static
+    /// (`__TISH_GF_<name>`) rather than a `run()` local. Reads resolve to the static, so nothing
+    /// captures them.
+    module_fn_statics: std::collections::HashSet<String>,
+    /// #682: module-level DATA bindings whose `VmRef` cell is held by a module static
+    /// (`__TISH_GV_<name>`) instead of being threaded into every closure as a `_cell` clone.
+    module_var_statics: std::collections::HashSet<String>,
+    /// #682: `(rust type, default value)` for each promoted binding's cell, recorded when its
+    /// `let` is emitted. The accessor `fn` naming both is emitted after `run()`, so the type never
+    /// has to be predicted ahead of inference.
+    module_var_static_types: std::collections::HashMap<String, (String, String)>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
     native_numeric_globals: std::collections::HashMap<String, f64>,
@@ -1443,6 +1461,11 @@ impl Codegen {
             outer_params_stack: Vec::new(),
             outer_vars_stack: vec![Vec::new()], // Start with module-level scope
             refcell_wrapped_vars: std::collections::HashSet::new(),
+            predeclared_cell_bindings: std::collections::HashSet::new(),
+            module_statics_on: false,
+            module_fn_statics: std::collections::HashSet::new(),
+            module_var_statics: std::collections::HashSet::new(),
+            module_var_static_types: std::collections::HashMap::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
@@ -3105,7 +3128,7 @@ impl Codegen {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
             // are re-exported by the tishlang_runtime_gba facade.
-            self.write("#![no_std]\n#![no_main]\n#![allow(unused, non_snake_case)]\n\n");
+            self.write("#![no_std]\n#![no_main]\n#![allow(unused, non_snake_case, non_upper_case_globals)]\n\n");
             self.write("extern crate alloc;\n");
             self.write("use core::cell::RefCell;\n");
             self.write("use alloc::rc::Rc;\n");
@@ -3117,7 +3140,7 @@ impl Codegen {
             // f64 transcendentals for inline math (`Math.sqrt(x)` → `x.sqrt()`).
             self.write("use tishlang_runtime::FloatExt;\n");
         } else {
-            self.write("#![allow(unused, non_snake_case)]\n\n");
+            self.write("#![allow(unused, non_snake_case, non_upper_case_globals)]\n\n");
             self.write("use std::cell::RefCell;\n");
             self.write("use std::rc::Rc;\n");
             self.write("use std::sync::Arc;\n");
@@ -3532,6 +3555,46 @@ impl Codegen {
         }
         self.nonneg_locals = self.collect_nonneg_locals(&program.statements);
         self.shift_half_of = Self::collect_shift_half_of(&program.statements);
+        // #682 — MODULE FUNCTIONS GET A TOP-LEVEL HOME. Every top-level fn currently contributes a
+        // `VmRef` cell, a boxed closure and one `_ref` clone per capturing sibling to `run()`'s
+        // single frame; on a real GBA game that frame is 27–30 KB against a 32.5 KB IWRAM stack and
+        // grows with program size. Parking the closure in a static takes all three out of the frame.
+        //
+        // OFF WHENEVER TISH CODE CAN RUN ON ANOTHER THREAD. The host storage is `thread_local!`
+        // (forced by `Value`: `send-values` is off unless `http` is on, so `VmRef` is
+        // `Rc<RefCell<_>>` and a plain `static` would not compile — the same constraint `RustLib`
+        // documents). A `serve` handler runs on a tokio worker, which would read that worker's
+        // *uninitialised* copy. `http`/`ws` are the only ways to get there, and the GBA — the target
+        // this exists for — has neither.
+        let threads_possible = self.program_may_call_tish_off_thread(program);
+        self.module_statics_on = crate::module_statics_flag()
+            .unwrap_or(self.emit_mode == crate::NativeEmitMode::Gba || !threads_possible);
+        // `RustLib` publishes its exports by naming the `run()` local, so its bindings must stay
+        // locals; the whole point there is that the frame outlives the call anyway.
+        if self.emit_mode == crate::NativeEmitMode::RustLib {
+            self.module_statics_on = false;
+        }
+        if crate::module_statics_flag().unwrap_or(true) {
+            // The shim that keeps the builtin preamble's construction temporaries out of `run()`'s
+            // frame. Generic over the closure's return type so the ~40 builtin types never have to
+            // be spelled out; `#[inline(never)]` is the whole point — inlined, the temporaries come
+            // straight back.
+            self.writeln(
+                "#[inline(never)] fn __tish_no_inline<T>(f: impl FnOnce() -> T) -> T { f() }",
+            );
+            self.writeln("");
+        }
+        if self.module_statics_on {
+            self.module_fn_statics = self
+                .prescan_function_decls(&program.statements)
+                .into_iter()
+                .filter(|n| {
+                    !(self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(n))
+                })
+                .collect();
+            self.emit_module_fn_statics()?;
+        }
+
         // Gba mode is sync in P2 (real async lowering is P5); `std::error::Error` in
         // the signature is rewritten to `core::error::Error` by the no_std post-pass.
         if self.is_async && self.emit_mode != crate::NativeEmitMode::Gba {
@@ -3542,6 +3605,29 @@ impl Codegen {
             self.writeln("fn run() -> Result<(), Box<dyn std::error::Error>> {");
         }
         self.indent += 1;
+
+        // #682 — THE BUILTIN PREAMBLE IS BUILT IN ITS OWN FRAME.
+        //
+        // `console`, `Math`, `JSON`, `Array`, the nine TypedArray constructors and the rest are
+        // ~40 bindings, and each is built from a `Value::object(ObjectMap::from([ … ]))` whose pair
+        // array is a large STACK temporary. Measured on a hello-world, that preamble alone is
+        // 4,192 B of `run()`'s frame before a line of the program runs — 13% of the GBA's whole
+        // stack, for a fixed set of objects that never change.
+        //
+        // The bindings themselves are cheap (one `Value` each); it is the construction that is not.
+        // So the whole preamble is emitted into a closure handed to a `#[inline(never)]` shim: the
+        // temporaries live and die in that call's frame, and `run()` receives only the values.
+        // The shim is generic over the closure's return type, so nothing here has to spell out the
+        // ~40 types (`document` is a `VmRef<Value>`, the rest are `Value`s).
+        // Not gated on `module_statics_on`: a frame boundary has none of that switch's hazards —
+        // no per-thread storage, nothing published by name — so every target gets it. The kill
+        // switch still turns it off, so one flag restores the whole pre-#682 emission.
+        let preamble_buffered = crate::module_statics_flag().unwrap_or(true);
+        let saved_output = if preamble_buffered {
+            Some(std::mem::take(&mut self.output))
+        } else {
+            None
+        };
 
         // Before anything else: one namespace object per native module, shared by all of its imports.
         self.emit_native_namespace_preamble();
@@ -3870,6 +3956,11 @@ impl Codegen {
             );
         }
 
+        if let Some(saved) = saved_output {
+            let preamble = std::mem::replace(&mut self.output, saved);
+            self.emit_buffered_preamble(&preamble);
+        }
+
         // Polars, Egui etc. are emitted via VarDecl from import { X } from 'tish:...'
 
         // Pre-scan for top-level function declarations and create cells (for mutual recursion)
@@ -3879,6 +3970,10 @@ impl Codegen {
             // #177: functions promoted to native aggregate free fns (`<name>_agg`) have their
             // boxed closure + cell suppressed — no boxed value exists to back-patch.
             if self.aggregate_alias.is_some() && self.aggregate_fns.contains_key(func_name) {
+                continue;
+            }
+            // #682: promoted module fns live in `GF_NAME`, so they need no `run()` cell at all.
+            if self.is_module_fn_static(func_name) {
                 continue;
             }
             let escaped = Self::escape_ident(func_name);
@@ -3922,7 +4017,56 @@ impl Codegen {
         // above it establish. A literal cannot observe or disturb anything, so moving it is not
         // visible to the program.
         let reordered = Self::hoist_forward_referenced_module_bindings(&program.statements);
-        self.emit_statements_with_folds(reordered.as_deref().unwrap_or(&program.statements))?;
+        let module_stmts = reordered.as_deref().unwrap_or(&program.statements);
+        // #684 — the residue the hoist above cannot move: a module binding that is a capture cell
+        // AND is captured by a closure emitted before its `let`. Declaring the cell here, ahead of
+        // every statement, is what makes the capture resolvable in both directions; the `let` below
+        // assigns into it (see the `predeclared_cell_bindings` arm in `Statement::VarDecl`).
+        // #682 — module DATA bindings whose cell moves into a static. Computed here because it
+        // needs `refcell_wrapped_vars`; the static ITEMS are emitted after `run()` (Rust items are
+        // order-independent, and this is the first point where the set is known).
+        if self.module_statics_on {
+            self.module_var_statics =
+                self.collect_module_var_statics(module_stmts, &self.refcell_wrapped_vars);
+            for name in self.module_var_statics.clone() {
+                // The handle is a `VmRef` local exactly as before, so every read/write site is
+                // unchanged — it just comes out of the static instead of down a capture chain.
+                self.writeln(&format!(
+                    "let {} = {};",
+                    Self::escape_ident(&name),
+                    Self::module_var_static_handle(&name)
+                ));
+                self.rc_cell_storage_define(&name);
+                if let Some(scope) = self.outer_vars_stack.last_mut() {
+                    scope.push(name.clone());
+                }
+            }
+        }
+        self.predeclared_cell_bindings =
+            Self::collect_forward_referenced_cell_bindings(module_stmts, &self.refcell_wrapped_vars);
+        // A promoted binding already has its cell up front, from the static.
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_var_statics.contains(n));
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_const_f64_arrays.contains_key(n));
+        self.predeclared_cell_bindings
+            .retain(|n| !self.module_const_f64_aliases.contains_key(n));
+        let mut predeclared: Vec<String> = self.predeclared_cell_bindings.iter().cloned().collect();
+        predeclared.sort();
+        for name in &predeclared {
+            self.writeln(&format!(
+                "let {}: VmRef<Value> = VmRef::new(Value::Null);",
+                Self::escape_ident(name)
+            ));
+            // The cell holds a boxed `Value`: the binding's type is not known until its initialiser
+            // is emitted, and a forward capture needs the storage to exist before then.
+            self.type_context.define(name, RustType::Value);
+            self.rc_cell_storage_define(name);
+            if let Some(scope) = self.outer_vars_stack.last_mut() {
+                scope.push(name.clone());
+            }
+        }
+        self.emit_statements_with_folds(module_stmts)?;
         if self.is_async {
             self.async_context_stack.pop();
         }
@@ -3961,6 +4105,13 @@ impl Codegen {
         self.writeln("Ok(())");
         self.indent -= 1;
         self.writeln("}");
+        // #682 — the module-data statics. Emitted here, after `run()`, because the eligible set is
+        // only known once `run()`'s capture prepass has run; Rust items are order-independent, so
+        // the reads above resolve to them regardless.
+        if self.module_statics_on {
+            self.writeln("");
+            self.emit_module_var_statics()?;
+        }
         if self.emit_mode == crate::NativeEmitMode::EmbeddedLib {
             self.writeln("");
             self.writeln("#[no_mangle]");
@@ -6216,6 +6367,25 @@ impl Codegen {
                     rust_type = RustType::Vec(Box::new(RustType::I32));
                 }
 
+                // #684: the cell for this module binding was declared at the top of `run()` because a
+                // closure above the `let` captures it. Assign into that cell rather than shadowing it
+                // with a fresh `let` — a second `let` would leave the earlier closures pointing at a
+                // cell nothing ever writes.
+                if self.predeclared_cell_bindings.contains(name.as_ref())
+                    && self.outer_vars_stack.len() == 1
+                {
+                    self.type_context.define(name.as_ref(), RustType::Value);
+                    if let Some(init_e) = init.as_ref() {
+                        let val = self.emit_expr(init_e)?;
+                        self.writeln(&format!(
+                            "*{}.borrow_mut() = ({}).clone();",
+                            Self::escape_ident(name.as_ref()),
+                            val
+                        ));
+                    }
+                    return Ok(());
+                }
+
                 // #176: top-level numeric globals live in a thread_local `Cell<f64>` — no local slot.
                 if self.native_numeric_globals.contains_key(name.as_ref())
                     && self.outer_vars_stack.len() == 1
@@ -6360,7 +6530,20 @@ impl Codegen {
                         Some(e) => self.emit_native_expr(e, &rust_type)?,
                         None => rust_type.default_value(),
                     };
-                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
+                    if self.is_module_var_static(name.as_ref())
+                        && self.outer_vars_stack.len() == 1
+                    {
+                        // #682: the cell is the static's; the `let` writes THROUGH the handle
+                        // already bound at the top of `run()`. Its type is recorded here — the
+                        // point where inference has finally settled it — for the accessor emitted
+                        // after `run()`.
+                        self.module_var_static_types.insert(
+                            name.to_string(),
+                            (rust_type.to_rust_type_str(), rust_type.default_value()),
+                        );
+                        self.writeln(&format!("*{}.borrow_mut() = {};", escaped_name, expr_str));
+                        self.rc_cell_storage_define(name.as_ref());
+                    } else if self.refcell_wrapped_vars.contains(name.as_ref()) {
                         // Closure-mutated: same Rc<RefCell<T>> pattern as Value (assignments use borrow_mut)
                         self.writeln(&format!("let {} = VmRef::new({});", escaped_name, expr_str));
                         self.rc_cell_storage_define(name.as_ref());
@@ -6384,12 +6567,23 @@ impl Codegen {
                         None => ("Value::Null".to_string(), false),
                     };
                     // Vars that are mutated by nested closures must be RefCell from the start
-                    if self.refcell_wrapped_vars.contains(name.as_ref()) {
-                        let init_val = if clone_needed {
-                            format!("({}).clone()", expr_str)
-                        } else {
-                            expr_str.to_string()
-                        };
+                    let init_val = if clone_needed {
+                        format!("({}).clone()", expr_str)
+                    } else {
+                        expr_str.to_string()
+                    };
+                    if self.is_module_var_static(name.as_ref())
+                        && self.outer_vars_stack.len() == 1
+                    {
+                        // #682 — see the native branch above: the cell belongs to the static, and
+                        // the `let` writes through the handle bound at the top of `run()`.
+                        self.module_var_static_types.insert(
+                            name.to_string(),
+                            ("Value".to_string(), "Value::Null".to_string()),
+                        );
+                        self.writeln(&format!("*{}.borrow_mut() = {};", escaped_name, init_val));
+                        self.rc_cell_storage_define(name.as_ref());
+                    } else if self.refcell_wrapped_vars.contains(name.as_ref()) {
                         self.writeln(&format!("let {} = VmRef::new({});", escaped_name, init_val));
                         self.rc_cell_storage_define(name.as_ref());
                     } else if clone_needed {
@@ -7229,6 +7423,10 @@ impl Codegen {
                             && !param_names.contains(name)
                             && !local_var_names.contains(name)
                     })
+                    // #682: a promoted module binding is reachable from its static at any depth,
+                    // so it is not captured — which is what removes the `_cell` clone this closure
+                    // would otherwise add to the ENCLOSING frame (for a module fn, `run()`'s).
+                    .filter(|name| !self.is_module_var_static(name))
                     .filter(|name| {
                         ![
                             "Boolean",
@@ -7290,7 +7488,17 @@ impl Codegen {
                     }
                 }
 
-                self.writeln(&format!("let {} = {{", name_str));
+                // #682: a promoted module fn is BUILT INTO ITS STATIC, so neither the closure nor
+                // a `let` for it occupies a slot in `run()`'s frame.
+                let to_static = self.is_module_fn_static(name_raw);
+                if to_static {
+                    self.writeln(&format!(
+                        "{}.with(|c| *c.borrow_mut() = {{",
+                        Self::module_fn_static_name(name_raw)
+                    ));
+                } else {
+                    self.writeln(&format!("let {} = {{", name_str));
+                }
                 self.indent += 1;
                 // Clone RefCell for outer vars so closure can capture
                 for outer_var in &outer_vars {
@@ -7301,7 +7509,9 @@ impl Codegen {
                     ));
                 }
                 // Clone the cell so the closure can reference the function recursively
-                let needs_self_ref = referenced.contains(name_raw);
+                // A promoted fn reaches itself through its static; no `_ref` clone, and so no
+                // extra slot in the enclosing frame either.
+                let needs_self_ref = referenced.contains(name_raw) && !to_static;
                 if needs_self_ref {
                     self.writeln(&format!(
                         "let {}_ref = {}_cell.clone();",
@@ -7315,7 +7525,12 @@ impl Codegen {
                     .map(|scope| {
                         scope
                             .iter()
-                            .filter(|s| s.as_str() != name_raw && referenced.contains(s.as_str()))
+                            .filter(|s| {
+                                s.as_str() != name_raw
+                                    && referenced.contains(s.as_str())
+                                    // #682: a sibling in a static is read from the static.
+                                    && !self.is_module_fn_static(s.as_str())
+                            })
                             .cloned()
                             .collect()
                     })
@@ -7351,6 +7566,7 @@ impl Codegen {
                         for f in scope {
                             if f.as_str() != name_raw
                                 && referenced.contains(f.as_str())
+                                && !self.is_module_fn_static(f.as_str())
                                 && !sibling_fns.iter().any(|s| s == f)
                                 && !outer_vars.iter().any(|v| v == f)
                                 && !outer_params.iter().any(|p| p == f)
@@ -7465,6 +7681,29 @@ impl Codegen {
                 // check. This bounds boxed recursion (incl. mutual/dynamic) exactly like the VM.
                 if crate::native_recur_guard_enabled() {
                     self.writeln("let Some(_tish_depth) = tishlang_runtime::enter_call_guarded() else { return Value::Null; };");
+                }
+                // #682: a promoted module binding is fetched straight from its static. One local
+                // per referencing closure, and none at all in the frames in between — where the
+                // `_cell` chain used to leave one at every level.
+                if self.module_statics_on {
+                    let mut promoted: Vec<String> = self
+                        .module_var_statics
+                        .iter()
+                        .filter(|n| {
+                            referenced.contains(n.as_str())
+                                && !param_names.contains(n.as_str())
+                                && !local_var_names.contains(n.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    promoted.sort();
+                    for n in &promoted {
+                        self.writeln(&format!(
+                            "let {} = {};",
+                            Self::escape_ident(n),
+                            Self::module_var_static_handle(n)
+                        ));
+                    }
                 }
                 // Mutable outer vars: capture the RefCell so assignments use borrow_mut
                 for outer_var in &mutable_outer_vars {
@@ -7769,12 +8008,16 @@ impl Codegen {
                 self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                 self.try_closure_depth = saved_try_depth;
                 self.indent -= 1;
-                self.writeln("};");
-                // Update the cell with the actual function value
-                self.writeln(&format!(
-                    "*{}_cell.borrow_mut() = {}.clone();",
-                    name_str, name_str
-                ));
+                if to_static {
+                    self.writeln("});");
+                } else {
+                    self.writeln("};");
+                    // Update the cell with the actual function value
+                    self.writeln(&format!(
+                        "*{}_cell.borrow_mut() = {}.clone();",
+                        name_str, name_str
+                    ));
+                }
             }
         }
         Ok(())
@@ -8365,6 +8608,11 @@ impl Codegen {
                 }
                 if let Some(uv) = self.usize_var_subst.get(name.as_ref()) {
                     return Ok(format!("Value::Number(({} as f64))", uv));
+                }
+                // #682: a module fn lives in `GF_NAME`, not in a local — and unlike a capture, the
+                // static is in scope at every depth, so nothing has to be threaded in to reach it.
+                if self.is_module_fn_static(name.as_ref()) {
+                    return Ok(Self::module_fn_static_read(name.as_ref()));
                 }
                 let escaped = Self::escape_ident(name.as_ref());
                 if self.refcell_wrapped_vars.contains(name.as_ref()) {
@@ -12316,6 +12564,8 @@ impl Codegen {
                 ]
                 .contains(&name.as_str())
                     && !self.native_numeric_globals.contains_key(name.as_str())
+                    // #682: reachable from its static at any depth — nothing to capture.
+                    && !self.is_module_var_static(name.as_str())
             })
             .collect();
 
@@ -12418,7 +12668,15 @@ impl Codegen {
             .map(|scope| {
                 scope
                     .iter()
-                    .filter(|f| referenced.contains(f.as_str()) && !param_names.contains(*f))
+                    .filter(|f| {
+                        referenced.contains(f.as_str())
+                            && !param_names.contains(*f)
+                            // #682: a promoted module fn has no `_cell` anywhere — it lives in
+                            // `__TISH_GF_<name>` and the body reads it from there. Cloning a cell
+                            // that was never emitted is `error[E0425]: cannot find value
+                            // bagList_cell`, and it takes the whole ROM down.
+                            && !self.is_module_fn_static(f.as_str())
+                    })
                     .cloned()
                     .collect()
             })
@@ -12473,6 +12731,12 @@ impl Codegen {
                         // arrow whose grandparent-scope var was TLS-lowered). Same exclusion the
                         // FunDecl closure path and this fn's own outer_vars filter already apply.
                         && !self.native_numeric_globals.contains_key(name.as_str())
+                        // #682: same reason — a promoted module binding has no boxed local to
+                        // capture; the body reads it out of its static. Module FNS as well as data:
+                        // `let present_ref = VmRef::new(present.clone())` against a fn that now lives
+                        // in `__TISH_GF_present` is `error[E0425]: cannot find value present`.
+                        && !self.is_module_var_static(name.as_str())
+                        && !self.is_module_fn_static(name.as_str())
                 })
                 .cloned()
                 .collect()
@@ -12494,6 +12758,26 @@ impl Codegen {
         let saved_try_depth = self.try_closure_depth;
         self.try_closure_depth = 0;
 
+        // #682: same handle fetch as the FunDecl path — see the comment there.
+        if self.module_statics_on {
+            let mut promoted: Vec<&String> = self
+                .module_var_statics
+                .iter()
+                .filter(|n| {
+                    referenced.contains(n.as_str())
+                        && !param_names.contains(n.as_str())
+                        && !local_var_names.contains(n.as_str())
+                })
+                .collect();
+            promoted.sort();
+            for n in promoted {
+                code.push_str(&format!(
+                    "        let {} = {};\n",
+                    Self::escape_ident(n),
+                    Self::module_var_static_handle(n)
+                ));
+            }
+        }
         // Make captured outer params available as plain Values (from _ref RefCells)
         for outer_param in &outer_params {
             let param_escaped = Self::escape_ident(outer_param);
@@ -17120,6 +17404,295 @@ impl Codegen {
         format!("G_{}", safe.to_uppercase())
     }
 
+    /// #682 — does this program hand a tish closure to something that will call it on ANOTHER
+    /// thread? Those are the surfaces the host's `thread_local!` storage cannot serve: the worker
+    /// would read its own uninitialised copy of every module fn.
+    ///
+    /// Keyed on what the program NAMES, not on which capabilities are linked — `tish build` links
+    /// the whole capability set by default, so a feature test would switch this off for every
+    /// desktop program including the ones that never open a socket. Conservative in the safe
+    /// direction: a program that merely mentions one of these names keeps the old emission.
+    fn program_may_call_tish_off_thread(&self, program: &Program) -> bool {
+        let mut idents = HashSet::new();
+        for s in &program.statements {
+            Self::collect_stmt_idents(s, &mut idents);
+        }
+        // `serve(port, handler)` dispatches the handler on tokio workers; `serve(port, {onWorker})`
+        // builds one per accept thread. `Server`/`WebSocket`/`wsAccept` are the ws equivalents.
+        for n in ["serve", "Server", "WebSocket", "wsAccept"] {
+            if idents.contains(n) {
+                return true;
+            }
+        }
+        // `Promise.spawn` is an OS-thread spawn, and only exists in ws-linked programs. The member
+        // name is not an ident, so the receiver is what we can see.
+        if self.has_feature("ws") && idents.contains("Promise") {
+            return true;
+        }
+        false
+    }
+
+    /// #682 — re-emit a buffered builtin preamble inside the `#[inline(never)]` shim, handing its
+    /// bindings back as a tuple. See the call site for why.
+    ///
+    /// The names come from the buffer itself rather than a hand-kept list: half the preamble is
+    /// feature-gated (`fs`, `http`, `timers`, JSX…), so what was actually emitted is the only
+    /// reliable answer. Only declarations at the preamble's own indent are taken — the `let`s
+    /// nested inside a `Value::object({ … })` block are that block's business.
+    /// Re-emit the buffered builtin preamble inside the `#[inline(never)]` shim, handing its
+    /// base-indent bindings back as a tuple. The names are read out of the emitted text rather than
+    /// kept in a list beside it: half the preamble is feature-gated (`fs`, `http`, `timers`, JSX…),
+    /// so what was actually emitted is the only reliable answer. The preamble is a flat run of
+    /// `writeln`s, so an indent test identifies its own declarations exactly — a chunk of user code
+    /// is not, which is why `chunk_escaping_names` works off the AST instead.
+    fn emit_buffered_preamble(&mut self, preamble: &str) {
+        let base = "    ".repeat(self.indent);
+        let mut names: Vec<(bool, String)> = Vec::new();
+        for line in preamble.lines() {
+            let Some(rest) = line.strip_prefix(&base) else {
+                continue;
+            };
+            if rest.starts_with(' ') {
+                continue;
+            }
+            // `emit_native_namespace_preamble` writes `#[allow(unused_variables)] let __tish_native_ns_0 = …`.
+            // Without stripping the attribute the scan does not see a `let` at all, the binding stays
+            // inside the closure, and every chunk that imports from a native module fails with
+            // `error[E0425]: cannot find value __tish_native_ns_0`.
+            let rest = match rest.find("] ") {
+                Some(i) if rest.starts_with("#[") => &rest[i + 2..],
+                _ => rest,
+            };
+            let Some(rest) = rest.strip_prefix("let ") else {
+                continue;
+            };
+            let (is_mut, rest) = match rest.strip_prefix("mut ") {
+                Some(r) => (true, r),
+                None => (false, rest),
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            // `let x: String = …` counts — the annotation is dropped on the way through the
+            // tuple and inference puts it back. A destructuring `let (a, b) = …` does not: its name
+            // parse comes back empty, and anything else unexpected is skipped rather than guessed
+            // at. (Missing one is not silent: the binding stays inside the closure and the next
+            // reference to it fails to compile.)
+            let after = rest[name.len()..].trim_start();
+            if name.is_empty() || !(after.starts_with('=') || after.starts_with(':')) {
+                continue;
+            }
+            if names.iter().any(|(_, n)| *n == name) {
+                continue;
+            }
+            names.push((is_mut, name));
+        }
+        let binds = names
+            .iter()
+            .map(|(m, n)| if *m { format!("mut {n}") } else { n.clone() })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let vals = names
+            .iter()
+            .map(|(_, n)| n.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.writeln(&format!("let ({binds}) = __tish_no_inline(|| {{"));
+        self.output.push_str(preamble);
+        self.indent += 1;
+        self.writeln(&format!("({vals})"));
+        self.indent -= 1;
+        self.writeln("});");
+    }
+
+    /// #682 — static name for a module-scope FUNCTION binding (`heroAnim` → `__TISH_GF_heroAnim`).
+    ///
+    /// CASE-PRESERVING, unlike `global_static_name`'s `G_*`: tish identifiers are case-sensitive, so
+    /// upper-casing them collides two distinct bindings onto one static. `fl` and `Fl` in
+    /// tests/core did exactly that — `error[E0428]: the name GV_FL is defined multiple times`. The
+    /// `__TISH_` prefix is reserved, so a user binding cannot shadow one of these either.
+    fn module_fn_static_name(name: &str) -> String {
+        format!("__TISH_GF_{}", Self::static_ident_body(name))
+    }
+
+    /// The token-safe body of a generated static's name: `escape_ident` may hand back a raw
+    /// identifier (`r#fn` for the keyword `fn`), and `#` does not tokenize inside a longer name.
+    fn static_ident_body(name: &str) -> String {
+        let esc = Self::escape_ident(name);
+        let raw = esc.strip_prefix("r#").unwrap_or(&esc);
+        raw.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect()
+    }
+
+    /// Read a module fn out of its static. Emitted INSIDE closure bodies as well as at top level:
+    /// the read happens when the expression runs, by which time every module fn is installed.
+    fn module_fn_static_read(name: &str) -> String {
+        format!(
+            "{}.with(|c| (*c.borrow()).clone())",
+            Self::module_fn_static_name(name)
+        )
+    }
+
+    /// #682 — which module DATA bindings can move their cell into a static.
+    ///
+    /// Restricted to bindings that are ALREADY a `VmRef` cell (`wrapped`), because those are the
+    /// ones a closure capture threads down through every enclosing frame — a plain module local
+    /// costs one slot in `run()` and nothing further.
+    ///
+    /// Excluded, in order: a name declared more than once at module level (the second `let` is a
+    /// different binding); a name bound anywhere else in the program — a parameter, a local `let`,
+    /// a `for…of` or `catch` binding — since the static read site has no scope information to tell
+    /// the two apart; and any name another emission path already claims, either with its own static
+    /// (#176 numeric globals, module const arrays) or with a declaration that never reaches the
+    /// write-through branch below (an i32 loop var).
+    ///
+    /// Note what is NOT a criterion: the binding's TYPE. The static and its accessor are emitted
+    /// after `run()`, from the type recorded when the `let` was emitted, so nothing here has to
+    /// predict what inference will decide.
+    fn collect_module_var_statics(
+        &self,
+        stmts: &[Statement],
+        wrapped: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut decl_counts: HashMap<String, usize> = HashMap::new();
+        let mut candidates: Vec<String> = Vec::new();
+        for st in stmts {
+            if let Statement::VarDecl { name, .. } = st {
+                *decl_counts.entry(name.to_string()).or_insert(0) += 1;
+                candidates.push(name.to_string());
+            }
+        }
+        let mut shadow: HashSet<String> = HashSet::new();
+        for st in stmts {
+            Self::collect_binding_names(st, &mut shadow);
+            // A module-level `let x` IS the declaration, not a shadow of it — every other `let`
+            // in the program is. (`collect_binding_names` above already covers the parameter,
+            // `for…of` and `catch` bindings an initialiser's arrow can introduce.)
+            if !matches!(st, Statement::VarDecl { .. }) {
+                Self::collect_local_var_names(st, &mut shadow);
+            }
+        }
+        let mut out = HashSet::new();
+        for name in candidates {
+            if !wrapped.contains(&name)
+                || decl_counts.get(&name).copied().unwrap_or(0) > 1
+                || shadow.contains(&name)
+                || self.native_numeric_globals.contains_key(&name)
+                || self.module_const_f64_arrays.contains_key(&name)
+                || self.module_const_f64_aliases.contains_key(&name)
+                || self.i32_loop_vars.contains(&name)
+                || self.module_fn_statics.contains(&name)
+            {
+                continue;
+            }
+            out.insert(name);
+        }
+        out
+    }
+
+    /// #682 — static name for a module-scope DATA binding (`deadCol` → `__TISH_GV_deadCol`).
+    /// Case-preserving for the reason `module_fn_static_name` documents.
+    fn module_var_static_name(name: &str) -> String {
+        format!("__TISH_GV_{}", Self::static_ident_body(name))
+    }
+
+    /// Clone the binding's `VmRef` handle out of its static.
+    ///
+    /// The static holds the CELL, not the value, so every existing read/write site keeps working
+    /// verbatim — `(*x.borrow())`, `*x.borrow_mut() = …`, `vm_read(&x)` all still see a `VmRef`
+    /// local. What changes is where that local comes from: a closure now takes it straight from the
+    /// static instead of having it threaded in through one `_cell` clone per enclosing scope, and
+    /// each of those clones was a slot in `run()`'s frame.
+    ///
+    /// `OnceCell` rather than a plain value because `VmRef::new` is not const, and the handle must
+    /// exist before the binding's `let` runs — a closure created above it captures the same cell.
+    fn module_var_static_handle(name: &str) -> String {
+        format!("{}()", Self::module_var_accessor_name(name))
+    }
+
+    /// The accessor that hands out the cell. Every use site calls this and never names the cell's
+    /// type, so the type is free to be recorded when the binding's `let` is emitted rather than
+    /// predicted before inference has run.
+    fn module_var_accessor_name(name: &str) -> String {
+        format!("__tish_gv_{}", Self::static_ident_body(name))
+    }
+
+    fn is_module_var_static(&self, name: &str) -> bool {
+        self.module_statics_on && self.module_var_statics.contains(name)
+    }
+
+    fn emit_module_var_statics(&mut self) -> Result<(), CompileError> {
+        if self.module_var_statics.is_empty() {
+            return Ok(());
+        }
+        let mut names: Vec<String> = self.module_var_statics.iter().cloned().collect();
+        names.sort();
+        let gba = self.emit_mode == crate::NativeEmitMode::Gba;
+        for n in &names {
+            let (ty, default) = self
+                .module_var_static_types
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| ("Value".to_string(), "Value::Null".to_string()));
+            let stat = Self::module_var_static_name(n);
+            if gba {
+                self.writeln(&format!(
+                    "static {stat}: tishlang_runtime::SingleCore<core::cell::OnceCell<VmRef<{ty}>>> = \
+                     tishlang_runtime::SingleCore::new(core::cell::OnceCell::new());"
+                ));
+            } else {
+                self.writeln(&format!(
+                    "thread_local! {{ static {stat}: std::cell::OnceCell<VmRef<{ty}>> = const {{ std::cell::OnceCell::new() }}; }}"
+                ));
+            }
+            self.writeln(&format!(
+                "#[inline] fn {}() -> VmRef<{ty}> {{ {stat}.with(|c| c.get_or_init(|| VmRef::new({default})).clone()) }}",
+                Self::module_var_accessor_name(n)
+            ));
+        }
+        self.writeln("");
+        Ok(())
+    }
+
+    fn is_module_fn_static(&self, name: &str) -> bool {
+        self.module_statics_on && self.module_fn_statics.contains(name)
+    }
+
+    /// Declare one static per promoted module fn, before `run()`. `SingleCore` on GBA (no_std has
+    /// no `thread_local!`), `thread_local!` on the host — the same split #594 made for the numeric
+    /// globals, and for the same reason: `with()` mirrors `LocalKey::with`, so every read site is
+    /// written once and works on both.
+    fn emit_module_fn_statics(&mut self) -> Result<(), CompileError> {
+        if self.module_fn_statics.is_empty() {
+            return Ok(());
+        }
+        let mut names: Vec<String> = self.module_fn_statics.iter().cloned().collect();
+        names.sort();
+        if self.emit_mode == crate::NativeEmitMode::Gba {
+            for n in &names {
+                self.writeln(&format!(
+                    "static {}: tishlang_runtime::SingleCore<core::cell::RefCell<Value>> = \
+                     tishlang_runtime::SingleCore::new(core::cell::RefCell::new(Value::Null));",
+                    Self::module_fn_static_name(n)
+                ));
+            }
+        } else {
+            // ONE `thread_local!` PER STATIC, not one block listing them all: the macro recurses
+            // once per item, and a real program has hundreds of module fns — a single block blows
+            // rustc's default `recursion_limit = 128` before it ever type-checks.
+            for n in &names {
+                self.writeln(&format!(
+                    "thread_local! {{ static {}: std::cell::RefCell<Value> = const {{ std::cell::RefCell::new(Value::Null) }}; }}",
+                    Self::module_fn_static_name(n)
+                ));
+            }
+        }
+        self.writeln("");
+        Ok(())
+    }
+
     fn native_global_static(name: &str) -> String {
         Self::global_static_name(name)
     }
@@ -17741,6 +18314,76 @@ impl Codegen {
             }
         }
         Some(out)
+    }
+
+    /// #684 — MODULE BINDINGS A CLOSURE ABOVE THEM TOUCHES, THAT THE HOIST CANNOT REACH.
+    ///
+    /// `hoist_forward_referenced_module_bindings` moves the declaration up, but only for a LITERAL
+    /// initialiser referenced from a top-level `FunDecl` — deliberately, since moving a call would
+    /// move its side effects. Everything else it leaves in place, and for a binding that is also a
+    /// capture cell (`refcell_wrapped_vars`) the result does not compile:
+    ///
+    /// ```text
+    /// let mk = [() => { function noteDeath(c) { deadCol = c } … }]   // *deadCol.borrow_mut() = …
+    /// export let deadCol: i32 = -1                                   // let deadCol = VmRef::new(..)
+    /// ```
+    ///
+    /// The write emits `*deadCol.borrow_mut()` because `refcell_wrapped_vars` — a whole-program
+    /// prepass — says the binding is a cell, while the capture list comes from `outer_vars_stack`,
+    /// which is built as statements are emitted and does not have the name yet. Nothing is captured,
+    /// nothing is in scope: `error[E0425]: cannot find value 'deadCol' in this scope`.
+    ///
+    /// The fix is not to move the declaration but to split it: declare the CELL up front (holding
+    /// `Value::Null`, which is what the binding's value is before its `let` runs anyway) and let the
+    /// `let` assign into it. Every closure — above or below — then captures the same cell, and the
+    /// initialiser stays exactly where the program put it.
+    ///
+    /// Only names declared EXACTLY ONCE at module level qualify: with two declarations a mention
+    /// above the second one refers to the first, and merging them into one cell would change which
+    /// value it sees (the same hazard the hoist documents).
+    fn collect_forward_referenced_cell_bindings(
+        stmts: &[Statement],
+        wrapped: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut decl_index: HashMap<String, usize> = HashMap::new();
+        let mut decl_counts: HashMap<String, usize> = HashMap::new();
+        for (i, s) in stmts.iter().enumerate() {
+            if let Statement::VarDecl { name, .. } = s {
+                *decl_counts.entry(name.to_string()).or_insert(0) += 1;
+                decl_index.entry(name.to_string()).or_insert(i);
+            }
+        }
+        let mut out = HashSet::new();
+        for (name, di) in &decl_index {
+            if !wrapped.contains(name.as_str()) {
+                continue;
+            }
+            if decl_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                continue;
+            }
+            if stmts
+                .iter()
+                .take(*di)
+                .any(|s| Self::stmt_closure_captures_ident(s, name))
+            {
+                out.insert(name.clone());
+            }
+        }
+        out
+    }
+
+    /// Does a CLOSURE inside this statement capture `name`? Straight-line code above a declaration
+    /// is deliberately not counted — there a mention is a genuine use-before-init, not a legal
+    /// forward reference, and must keep failing rather than silently reading `Value::Null`.
+    ///
+    /// Reuses the same walker `collect_vars_needing_capture_cell` uses to decide cell-ness in the
+    /// first place, so the two answers cannot drift apart.
+    fn stmt_closure_captures_ident(stmt: &Statement, name: &str) -> bool {
+        let mut block_vars = HashSet::new();
+        block_vars.insert(name.to_string());
+        let mut captured = HashSet::new();
+        Self::collect_captured_block_vars_from_statements(stmt, &block_vars, &mut captured);
+        captured.contains(name)
     }
 
     /// An initialiser that cannot observe or disturb program state, so moving it is invisible.
