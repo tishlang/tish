@@ -3128,7 +3128,7 @@ impl Codegen {
             // no_std GBA ROM: alloc-based, Arc aliases to Rc in the facade. The
             // prelude `use tishlang_runtime::{…}` below is unchanged — those names
             // are re-exported by the tishlang_runtime_gba facade.
-            self.write("#![no_std]\n#![no_main]\n#![allow(unused, non_snake_case)]\n\n");
+            self.write("#![no_std]\n#![no_main]\n#![allow(unused, non_snake_case, non_upper_case_globals)]\n\n");
             self.write("extern crate alloc;\n");
             self.write("use core::cell::RefCell;\n");
             self.write("use alloc::rc::Rc;\n");
@@ -3140,7 +3140,7 @@ impl Codegen {
             // f64 transcendentals for inline math (`Math.sqrt(x)` → `x.sqrt()`).
             self.write("use tishlang_runtime::FloatExt;\n");
         } else {
-            self.write("#![allow(unused, non_snake_case)]\n\n");
+            self.write("#![allow(unused, non_snake_case, non_upper_case_globals)]\n\n");
             self.write("use std::cell::RefCell;\n");
             self.write("use std::rc::Rc;\n");
             self.write("use std::sync::Arc;\n");
@@ -12668,7 +12668,15 @@ impl Codegen {
             .map(|scope| {
                 scope
                     .iter()
-                    .filter(|f| referenced.contains(f.as_str()) && !param_names.contains(*f))
+                    .filter(|f| {
+                        referenced.contains(f.as_str())
+                            && !param_names.contains(*f)
+                            // #682: a promoted module fn has no `_cell` anywhere — it lives in
+                            // `__TISH_GF_<name>` and the body reads it from there. Cloning a cell
+                            // that was never emitted is `error[E0425]: cannot find value
+                            // bagList_cell`, and it takes the whole ROM down.
+                            && !self.is_module_fn_static(f.as_str())
+                    })
                     .cloned()
                     .collect()
             })
