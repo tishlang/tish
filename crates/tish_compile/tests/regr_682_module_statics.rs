@@ -187,3 +187,31 @@ fn the_builtin_preamble_is_built_out_of_line() {
         );
     }
 }
+
+/// Statics take the module BINDINGS out of `run()`, but each module's top-level statements still
+/// contribute their own locals and temporaries to one frame — which is what makes it grow with
+/// program size rather than with the number of modules. Each chunk goes through the same
+/// `#[inline(never)]` shim, so its temporaries live and die in that call's frame and only the
+/// bindings it declares come back.
+#[test]
+fn module_top_level_code_is_emitted_in_out_of_line_chunks() {
+    for (dir, mode) in [
+        ("regr682_chunk_gba", NativeEmitMode::Gba),
+        ("regr682_chunk_host", NativeEmitMode::DesktopBin),
+    ] {
+        let rust = compile_in(dir, mode);
+        assert!(
+            rust.contains("fn __tish_no_inline_res<T>"),
+            "the fallible shim must be emitted ({mode:?}):\n{rust}"
+        );
+        let body = run_body(&rust);
+        assert!(
+            body.contains("= __tish_no_inline_res(|| {"),
+            "module statements must run through it ({mode:?}):\n{body}"
+        );
+        assert!(
+            body.contains("})?;"),
+            "…and a throw must still leave run() ({mode:?}):\n{body}"
+        );
+    }
+}

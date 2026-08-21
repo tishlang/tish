@@ -1135,6 +1135,10 @@ pub(crate) struct Codegen {
     /// #682: module-level DATA bindings whose `VmRef<Value>` cell is held by a module static
     /// (`GV_NAME`) instead of being threaded into every closure as a `_cell` clone.
     module_var_statics: std::collections::HashSet<String>,
+    /// #682: emitting module top-level statements inside an out-of-line chunk closure. A top-level
+    /// `return` ends the SCRIPT, so it must leave `run()` and not just the chunk — see
+    /// `Statement::Try`'s top-level `_flow` arm.
+    in_module_chunk: bool,
     /// #682: the Rust type each promoted binding's cell actually holds, recorded when its `let` is
     /// emitted. The accessor `fn` naming it is emitted after `run()`, so the type never has to be
     /// predicted ahead of inference — only proved `Default`-safe by the eligibility gate.
@@ -1464,6 +1468,7 @@ impl Codegen {
             module_statics_on: false,
             module_fn_statics: std::collections::HashSet::new(),
             module_var_statics: std::collections::HashSet::new(),
+            in_module_chunk: false,
             module_var_static_types: std::collections::HashMap::new(),
             native_numeric_globals: std::collections::HashMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
@@ -3581,6 +3586,13 @@ impl Codegen {
             self.writeln(
                 "#[inline(never)] fn __tish_no_inline<T>(f: impl FnOnce() -> T) -> T { f() }",
             );
+            // The fallible twin, for a chunk whose body can `return Err(…)` on a pending throw.
+            // A separate fn rather than a `-> Result<_, _>` annotation on the closure: with the
+            // annotation rustc resolves the `_` against the shim's `T` and lands on `()`, so every
+            // chunk that actually returns bindings fails with E0308.
+            self.writeln(
+                "#[inline(never)] fn __tish_no_inline_res<T>(f: impl FnOnce() -> Result<T, Box<dyn std::error::Error>>) -> Result<T, Box<dyn std::error::Error>> { f() }",
+            );
             self.writeln("");
         }
         if self.module_statics_on {
@@ -4065,7 +4077,31 @@ impl Codegen {
                 scope.push(name.clone());
             }
         }
-        self.emit_statements_with_folds(module_stmts)?;
+        // #682 — MODULE TOP-LEVEL CODE IS EMITTED IN CHUNKS, EACH IN ITS OWN FRAME.
+        //
+        // Statics take the module BINDINGS out of `run()`, but every module's top-level statements
+        // still contribute their own locals and temporaries to one frame, and that is what makes it
+        // grow with program size rather than with the number of modules. Each chunk goes through
+        // the same `#[inline(never)]` shim the builtin preamble uses: its temporaries live and die
+        // in that call's frame, and only the bindings it declares come back.
+        //
+        // Not for an async `run()`: a top-level `await` cannot cross into a sync closure.
+        let chunked = crate::module_statics_flag().unwrap_or(true) && !self.is_async;
+        if chunked {
+            const CHUNK: usize = 25;
+            for group in module_stmts.chunks(CHUNK) {
+                let saved = std::mem::take(&mut self.output);
+                self.in_module_chunk = true;
+                let res = self.emit_statements_with_folds(group);
+                self.in_module_chunk = false;
+                let body = std::mem::replace(&mut self.output, saved);
+                res?;
+                let names = self.chunk_escaping_names(group, &body);
+                self.emit_buffered_chunk(&body, &names);
+            }
+        } else {
+            self.emit_statements_with_folds(module_stmts)?;
+        }
         if self.is_async {
             self.async_context_stack.pop();
         }
@@ -7324,7 +7360,14 @@ impl Codegen {
                 } else {
                     // Top level (run() -> Result<(), _>): a top-level `return value` just ends the
                     // script (the value is unobservable); an uncaught throw propagates out of run().
-                    self.writeln("Ok(Some(_)) => return Ok(()),");
+                    // #682: inside an out-of-line chunk the same completion is signalled by `None`,
+                    // which the chunk's call site turns back into a `return Ok(())` from `run()` —
+                    // a bare `return Ok(())` here would end the chunk and let the program continue.
+                    if self.in_module_chunk {
+                        self.writeln("Ok(Some(_)) => return Ok(None),");
+                    } else {
+                        self.writeln("Ok(Some(_)) => return Ok(()),");
+                    }
                     self.writeln("Err(_e) => return Err(_e),");
                 }
                 self.writeln("Ok(None) => {}");
@@ -17427,6 +17470,95 @@ impl Codegen {
     /// feature-gated (`fs`, `http`, `timers`, JSX…), so what was actually emitted is the only
     /// reliable answer. Only declarations at the preamble's own indent are taken — the `let`s
     /// nested inside a `Value::object({ … })` block are that block's business.
+    /// The Rust bindings a CHUNK of module statements must hand back to `run()`.
+    ///
+    /// Derived from the AST, not from the emitted text: an arrow's closure body is spliced in as
+    /// one multi-line expression whose inner `let x_ref = …` lines happen to land at the chunk's own
+    /// indent, and a text scan hands those back too — `error[E0425]: cannot find value 'x_ref'`.
+    ///
+    /// Then intersected with what the buffer actually contains, because a declaration can be
+    /// elided after the fact (a fn de-virtualized into a native free fn, a binding that took a
+    /// static instead). A name in the list that was never emitted is the same E0425 in reverse.
+    fn chunk_escaping_names(&self, stmts: &[Statement], buffered: &str) -> Vec<(bool, String)> {
+        let mut names: Vec<String> = Vec::new();
+        for st in stmts {
+            match st {
+                Statement::VarDecl { name, .. } => names.push(Self::escape_ident(name).into_owned()),
+                Statement::VarDeclDestructure { pattern, .. } => {
+                    let mut bound = HashSet::new();
+                    Self::collect_destruct_names(pattern, &mut bound);
+                    let mut bound: Vec<String> = bound.into_iter().collect();
+                    bound.sort();
+                    names.extend(bound.iter().map(|n| Self::escape_ident(n).into_owned()));
+                }
+                Statement::FunDecl { name, .. } => {
+                    let esc = Self::escape_ident(name).into_owned();
+                    names.push(format!("{esc}_cell"));
+                    names.push(esc);
+                }
+                _ => {}
+            }
+        }
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for n in names {
+            if out.iter().any(|(_, o)| *o == n) {
+                continue;
+            }
+            let plain = format!("let {n} ");
+            let plain_typed = format!("let {n}:");
+            let mutable = format!("let mut {n} ");
+            let mutable_typed = format!("let mut {n}:");
+            let is_mut = buffered.contains(&mutable) || buffered.contains(&mutable_typed);
+            if is_mut || buffered.contains(&plain) || buffered.contains(&plain_typed) {
+                out.push((is_mut, n));
+            }
+        }
+        out
+    }
+
+    /// Re-emit `buffered` inside the `#[inline(never)]` shim, handing `names` back as a tuple.
+    /// `fallible` routes through the `Result` twin so a `return Err(…)` inside — the shape every
+    /// pending-throw check emits — still leaves `run()`.
+    fn emit_buffered_chunk(&mut self, buffered: &str, names: &[(bool, String)]) {
+        let binds = names
+            .iter()
+            .map(|(m, n)| if *m { format!("mut {n}") } else { n.clone() })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let vals = names
+            .iter()
+            .map(|(_, n)| n.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // `Option` carries the script-ended signal: `None` means a top-level `return` ran, and the
+        // call site turns it back into `run()`'s own `Ok(())`. A throw is the `?` on the outside.
+        //
+        // Only for a chunk that can actually signal it: wrapping every chunk's tuple in an `Option`
+        // costs a fresh slot for the discriminant-carrying temporary in `run()` — ~850 B across the
+        // 25-module probe — and most chunks contain no top-level `return` at all.
+        if buffered.contains("return Ok(None)") {
+            self.writeln(&format!("let Some(({binds})) = __tish_no_inline_res(|| {{"));
+            self.output.push_str(buffered);
+            self.indent += 1;
+            self.writeln(&format!("Ok(Some(({vals})))"));
+            self.indent -= 1;
+            self.writeln("})? else { return Ok(()) };");
+        } else {
+            self.writeln(&format!("let ({binds}) = __tish_no_inline_res(|| {{"));
+            self.output.push_str(buffered);
+            self.indent += 1;
+            self.writeln(&format!("Ok(({vals}))"));
+            self.indent -= 1;
+            self.writeln("})?;");
+        }
+    }
+
+    /// Re-emit the buffered builtin preamble inside the `#[inline(never)]` shim, handing its
+    /// base-indent bindings back as a tuple. The names are read out of the emitted text rather than
+    /// kept in a list beside it: half the preamble is feature-gated (`fs`, `http`, `timers`, JSX…),
+    /// so what was actually emitted is the only reliable answer. The preamble is a flat run of
+    /// `writeln`s, so an indent test identifies its own declarations exactly — a chunk of user code
+    /// is not, which is why `chunk_escaping_names` works off the AST instead.
     fn emit_buffered_preamble(&mut self, preamble: &str) {
         let base = "    ".repeat(self.indent);
         let mut names: Vec<(bool, String)> = Vec::new();
@@ -17448,19 +17580,19 @@ impl Codegen {
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
-            // `let (a, b) = …` or a typed pattern would not round-trip through the tuple; the
-            // preamble emits neither, and anything unexpected is skipped rather than guessed at.
-            if name.is_empty() || !rest[name.len()..].trim_start().starts_with('=') {
+            // `let x: String = …` counts — the annotation is dropped on the way through the
+            // tuple and inference puts it back. A destructuring `let (a, b) = …` does not: its name
+            // parse comes back empty, and anything else unexpected is skipped rather than guessed
+            // at. (Missing one is not silent: the binding stays inside the closure and the next
+            // reference to it fails to compile.)
+            let after = rest[name.len()..].trim_start();
+            if name.is_empty() || !(after.starts_with('=') || after.starts_with(':')) {
                 continue;
             }
             if names.iter().any(|(_, n)| *n == name) {
                 continue;
             }
             names.push((is_mut, name));
-        }
-        if names.is_empty() {
-            self.output.push_str(preamble);
-            return;
         }
         let binds = names
             .iter()
@@ -17472,9 +17604,7 @@ impl Codegen {
             .map(|(_, n)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
-        self.writeln(&format!(
-            "let ({binds}) = __tish_no_inline(|| {{"
-        ));
+        self.writeln(&format!("let ({binds}) = __tish_no_inline(|| {{"));
         self.output.push_str(preamble);
         self.indent += 1;
         self.writeln(&format!("({vals})"));
