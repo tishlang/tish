@@ -224,18 +224,7 @@ pub fn build_via_cargo_with_config(
         rust_main
     };
 
-    let tish_ui_path = std::path::Path::new(&runtime_path)
-        .parent()
-        .ok_or_else(|| "invalid tishlang_runtime path (no parent)".to_string())?
-        .join("tish_ui");
-    let ui_dep = if rust_code.contains("tishlang_ui") {
-        format!(
-            "\ntishlang_ui = {{ path = {:?}, default-features = false, features = [\"runtime\"] }}\n",
-            tish_ui_path.display().to_string().replace('\\', "/")
-        )
-    } else {
-        String::new()
-    };
+    let ui_dep = ui_dep_toml(&runtime_path, rust_code);
 
     let profile = nested_release_profile_toml();
     let src_file = if build_config.artifact == NativeArtifact::StaticLib {
@@ -271,9 +260,18 @@ edition = "2021"
 
 {}{}
 [dependencies]
-tishlang_runtime = {{ path = {:?}{} }}
-{}{}"#,
-        crate_section, profile, runtime_path, features_str, more_deps, ui_dep
+{}
+{}{}{}"#,
+        crate_section,
+        profile,
+        runtime_dep_toml(&runtime_path, &features_str),
+        more_deps,
+        ui_dep,
+        if released_compiler_version().is_some() {
+            String::new()
+        } else {
+            tishlang_patch_section(&runtime_path, &more_deps)
+        }
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
@@ -452,6 +450,141 @@ opt-level = 3
 }
 
 /// Read `version = "…"` from the `[package]` section of a crate's `Cargo.toml`.
+/// The `tishlang_runtime` dependency line: registry version for a released compiler,
+/// local path tree for dev builds.
+fn runtime_dep_toml(runtime_path: &str, features_str: &str) -> String {
+    if let Some(v) = released_compiler_version() {
+        format!("tishlang_runtime = {{ version = {:?}{} }}", v, features_str)
+    } else {
+        format!("tishlang_runtime = {{ path = {:?}{} }}", runtime_path, features_str)
+    }
+}
+
+/// The optional `tishlang_ui` dependency line (same source policy as the runtime).
+fn ui_dep_toml(runtime_path: &str, rust_code: &str) -> String {
+    if !rust_code.contains("tishlang_ui") {
+        return String::new();
+    }
+    if let Some(v) = released_compiler_version() {
+        return format!(
+            "\ntishlang_ui = {{ version = {:?}, default-features = false, features = [\"runtime\"] }}\n",
+            v
+        );
+    }
+    let tish_ui_path = std::path::Path::new(runtime_path)
+        .parent()
+        .map(|p| p.join("tish_ui"))
+        .unwrap_or_default();
+    format!(
+        "\ntishlang_ui = {{ path = {:?}, default-features = false, features = [\"runtime\"] }}\n",
+        tish_ui_path.display().to_string().replace('\\', "/")
+    )
+}
+
+/// The compiler's own RELEASED version, or None for a dev/workspace build.
+///
+/// A released compiler is published together with the whole tishlang_* crate family at the
+/// SAME version, so generated crates can depend on the runtime from crates.io — one source
+/// for every tishlang crate, unified with any published native crate (tishlang_ios,
+/// tishlang_desktop, user `cargo:` deps). Dev builds (workspace version 0.x / -dev) keep
+/// the local path tree + the [patch.crates-io] pin instead.
+fn released_compiler_version() -> Option<&'static str> {
+    let v = env!("CARGO_PKG_VERSION");
+    if v.starts_with("0.") || v.contains("dev") {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// `[package] name` from a crate dir's Cargo.toml (first table only, like read_crate_version).
+fn read_crate_package_name(crate_dir: &Path) -> Option<String> {
+    let toml = fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    for line in toml.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("name") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+        if line.starts_with('[') && !line.starts_with("[package]") {
+            break;
+        }
+    }
+    None
+}
+
+/// `[patch.crates-io]` section pinning every `tishlang_*` crate in the local runtime tree
+/// (the siblings of `runtime_path`) to that tree.
+///
+/// Why: the generated program depends on `tishlang_runtime` BY PATH, but registry-sourced
+/// native crates (`cargo:` deps with a version, published hosts like `tishlang_ios` /
+/// `tishlang_desktop`) declare `tishlang_core` / `tishlang_runtime` / `tishlang_ui` BY
+/// VERSION. Cargo never unifies a path crate with a registry crate, so the build died with
+/// "multiple different versions of crate `tishlang_core`" the moment a published native
+/// crate entered the graph — publishing runtimes was pointless. The patch makes the
+/// compiler's own tree the single source for every tishlang crate, whatever requested it.
+///
+/// Emitted whenever the program has ANY extra native dependency: even a path dep (an npm-
+/// shipped crate like `@tishlang/tish-ios`) reaches the registry TRANSITIVELY through its own
+/// `tishlang_core = "x"` version requirements. Builds with no native deps skip the section so
+/// plain programs don't carry "unused patch" warnings.
+fn tishlang_patch_section(runtime_path: &str, more_deps: &str) -> String {
+    let has_extra_dep = more_deps.lines().any(|l| {
+        let l = l.trim();
+        !l.is_empty() && l.contains('=') && !l.starts_with('#')
+    });
+    if !has_extra_dep {
+        return String::new();
+    }
+    // A patch entry only ever applies when the patched source's version SATISFIES the
+    // registry requirement it replaces. Dev/workspace trees carry 0.x placeholder
+    // versions that can never satisfy a released "3.x" requirement — emitting the
+    // patch there does nothing useful and destabilizes resolution for path-dep
+    // setups that already work. Only patch from a release-stamped tree.
+    let core_dir = Path::new(runtime_path)
+        .parent()
+        .map(|p| p.join("tish_core"));
+    let tree_is_released = core_dir
+        .as_deref()
+        .and_then(read_crate_version)
+        .map(|v| !v.starts_with("0."))
+        .unwrap_or(false);
+    if !tree_is_released {
+        return String::new();
+    }
+    let Some(crates_dir) = Path::new(runtime_path).parent() else {
+        return String::new();
+    };
+    let Ok(read) = fs::read_dir(crates_dir) else {
+        return String::new();
+    };
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for e in read.flatten() {
+        let dir = e.path();
+        if !dir.join("Cargo.toml").exists() {
+            continue;
+        }
+        let Some(name) = read_crate_package_name(&dir) else {
+            continue;
+        };
+        if !name.starts_with("tishlang_") {
+            continue;
+        }
+        entries.push((name, dir.display().to_string().replace('\\', "/")));
+    }
+    if entries.is_empty() {
+        return String::new();
+    }
+    entries.sort();
+    let mut out = String::from("\n[patch.crates-io]\n");
+    for (name, path) in entries {
+        out.push_str(&format!("{} = {{ path = {:?} }}\n", name, path));
+    }
+    out
+}
+
 fn read_crate_version(crate_dir: &Path) -> Option<String> {
     let toml = fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
     for line in toml.lines() {
@@ -925,15 +1058,8 @@ pub(crate) fn build_many_via_cargo(
         more_deps.push_str("\nmimalloc = \"0.1\"\n");
     }
 
-    let tish_ui_path = std::path::Path::new(&runtime_path)
-        .parent()
-        .ok_or_else(|| "invalid tishlang_runtime path (no parent)".to_string())?
-        .join("tish_ui");
     let ui_dep = if needs_ui {
-        format!(
-            "\ntishlang_ui = {{ path = {:?}, default-features = false, features = [\"runtime\"] }}\n",
-            tish_ui_path.display().to_string().replace('\\', "/")
-        )
+        ui_dep_toml(&runtime_path, "tishlang_ui")
     } else {
         String::new()
     };
@@ -979,9 +1105,18 @@ edition = "2021"
 
 {}{}
 [dependencies]
-tishlang_runtime = {{ path = {:?}{} }}
-{}{}"#,
-        bin_tables, profile, runtime_path, features_str, more_deps, ui_dep
+{}
+{}{}{}"#,
+        bin_tables,
+        profile,
+        runtime_dep_toml(&runtime_path, &features_str),
+        more_deps,
+        ui_dep,
+        if released_compiler_version().is_some() {
+            String::new()
+        } else {
+            tishlang_patch_section(&runtime_path, &more_deps)
+        }
     );
 
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
