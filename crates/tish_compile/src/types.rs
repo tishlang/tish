@@ -887,6 +887,13 @@ impl TypeContext {
     pub fn get_type(&self, name: &str) -> RustType {
         self.lookup(name).cloned().unwrap_or(RustType::Value)
     }
+
+    /// Is `name` bound in a NON-GLOBAL scope (a param or local of the function/block being
+    /// emitted)? Used to let locals shadow module-function statics: `let dist: i32` inside a
+    /// function must win over a bundled module's `function dist(...)`.
+    pub fn is_locally_shadowed(&self, name: &str) -> bool {
+        self.scopes.iter().skip(1).any(|scope| scope.contains_key(name))
+    }
 }
 
 #[cfg(test)]

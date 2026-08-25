@@ -7641,7 +7641,10 @@ impl Codegen {
                     "NaN",
                     "serve",
                 ] {
-                    if referenced.contains(*builtin) {
+                    // A user `function serve(...)` (etc.) SHADOWS the builtin: it lowers to a
+                    // `__TISH_GF_*` static, so there is no `serve` local to clone here and the
+                    // emitted prelude would be E0425. The call sites already read the static.
+                    if referenced.contains(*builtin) && !self.is_module_fn_static(builtin) {
                         self.writeln(&format!("let {} = {}.clone();", builtin, builtin));
                     }
                 }
@@ -8611,7 +8614,12 @@ impl Codegen {
                 }
                 // #682: a module fn lives in `GF_NAME`, not in a local — and unlike a capture, the
                 // static is in scope at every depth, so nothing has to be threaded in to reach it.
-                if self.is_module_fn_static(name.as_ref()) {
+                // ⚠️ Unless a PARAM or LOCAL of the enclosing function shadows the name: earshot's
+                // `let dist: i32` lost to packages/sfx.tish's internal `function dist(...)` here,
+                // and the callee got a function cell where it expected a number.
+                if self.is_module_fn_static(name.as_ref())
+                    && !self.type_context.is_locally_shadowed(name.as_ref())
+                {
                     return Ok(Self::module_fn_static_read(name.as_ref()));
                 }
                 let escaped = Self::escape_ident(name.as_ref());
@@ -12656,7 +12664,9 @@ impl Codegen {
             "RegExp",
             "Polars",
         ] {
-            if referenced.contains(*builtin) {
+            // Same shadowing rule as the value-fn prelude: a user module function of this name
+            // lowers to a `__TISH_GF_*` static, so no builtin local exists to clone.
+            if referenced.contains(*builtin) && !self.is_module_fn_static(builtin) {
                 code.push_str(&format!("    let {} = {}.clone();\n", builtin, builtin));
             }
         }
