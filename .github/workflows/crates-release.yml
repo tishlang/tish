@@ -56,6 +56,7 @@ jobs:
             tishlang_lexer
             tishlang_jsx_web
             tishlang_builtins
+            tishlang_runtime_gba
             tishlang_parser
             tishlang_opt
             tishlang_compile
@@ -85,10 +86,24 @@ jobs:
           # mid-publish "no matching package named '<crate>' found" failure on a dependent. Fail early
           # and loudly instead. (publish=false crates — e.g. the mathext FFI example — are excluded.)
           missing=0
+          # Workspace MEMBERS.
+          members=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish == null or (.publish | length > 0)) | .name')
+          # ...plus workspace EXCLUDES. `cargo metadata` cannot see an excluded crate — that is what
+          # exclude means — so a guard built only on it has a blind spot the size of the exclude
+          # list. tishlang_runtime_gba sat in that blind spot from the day it was excluded: the one
+          # tishlang_* crate the release never shipped, and the guard could not say so.
+          excluded=""
+          for d in $(sed -n '/^exclude = \[/,/\]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"'); do
+            [ -f "$d/Cargo.toml" ] || continue
+            grep -qE '^[[:space:]]*publish[[:space:]]*=[[:space:]]*false' "$d/Cargo.toml" && continue
+            excluded="$excluded $(grep -m1 '^name' "$d/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+          done
           while IFS= read -r c; do
+            [ -n "$c" ] || continue
             printf '%s\n' "${CRATES[@]}" | grep -qx "$c" \
               || { echo "::error::publishable crate '$c' is missing from the CRATES list in crates-release.yml"; missing=1; }
-          done < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.publish == null or (.publish | length > 0)) | .name')
+          done < <(printf '%s\n' $members $excluded)
           [ "$missing" -eq 0 ] || { echo "Add the crate(s) above to CRATES in dependency order, then re-run."; exit 1; }
 
           # Publish one crate, retrying ONLY on a crates.io rate limit (#225). A burst of ~31 publishes
