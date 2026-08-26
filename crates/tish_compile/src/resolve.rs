@@ -756,31 +756,60 @@ pub fn compute_native_build_artifacts(
     })
 }
 
+/// Names a directory may declare and still satisfy `package_name`.
+///
+/// A `tish:foo` import asks for the package `tish-foo`, which is what the in-repo crate
+/// directories under `tish-apple/crates/` are called. The SAME code is published to npm under the
+/// scoped name `@tishlang/tish-foo`, so a project that depends on the published package has it at
+/// `node_modules/@tishlang/tish-foo` declaring that scoped name. Treat the two as one identity,
+/// or a pinned published dependency is silently ignored in favour of a sibling checkout.
+fn acceptable_package_names(package_name: &str) -> Vec<String> {
+    let mut names = vec![package_name.to_string()];
+    if !package_name.starts_with('@') {
+        names.push(format!("@tishlang/{package_name}"));
+    }
+    names
+}
+
+fn declares_one_of(pkg_dir: &Path, names: &[String]) -> bool {
+    let pkg_json = pkg_dir.join("package.json");
+    if !pkg_json.exists() {
+        return false;
+    }
+    match read_package_name(&pkg_json) {
+        Some(found) => names.iter().any(|n| *n == found),
+        None => false,
+    }
+}
+
 fn find_package_dir(package_name: &str, project_root: &Path) -> Result<PathBuf, String> {
+    let names = acceptable_package_names(package_name);
     let mut search = project_root.to_path_buf();
     loop {
+        // node_modules first, and the scoped published name before the sibling checkout: an
+        // explicit dependency pin must beat a directory that merely happens to sit alongside.
         let node_mod = search.join("node_modules").join(package_name);
-        if node_mod.join("package.json").exists()
-            && read_package_name(&node_mod.join("package.json")) == Some(package_name.to_string())
-        {
+        if declares_one_of(&node_mod, &names) {
             return Ok(node_mod);
         }
+        if !package_name.starts_with('@') {
+            let scoped = search
+                .join("node_modules")
+                .join("@tishlang")
+                .join(package_name);
+            if declares_one_of(&scoped, &names) {
+                return Ok(scoped);
+            }
+        }
         let apple_crate = search.join("tish-apple").join("crates").join(package_name);
-        if apple_crate.join("package.json").exists()
-            && read_package_name(&apple_crate.join("package.json"))
-                == Some(package_name.to_string())
-        {
+        if declares_one_of(&apple_crate, &names) {
             return Ok(apple_crate);
         }
         let sibling = search.join(package_name);
-        if sibling.join("package.json").exists()
-            && read_package_name(&sibling.join("package.json")) == Some(package_name.to_string())
-        {
+        if declares_one_of(&sibling, &names) {
             return Ok(sibling);
         }
-        if search.join("package.json").exists()
-            && read_package_name(&search.join("package.json")) == Some(package_name.to_string())
-        {
+        if declares_one_of(&search, &names) {
             return Ok(search);
         }
         if let Some(parent) = search.parent() {
@@ -2384,5 +2413,54 @@ mod find_package_dir_tests {
         std::fs::create_dir_all(&project).unwrap();
         let hit = find_package_dir("tish-macos", &project).expect("resolve");
         assert_eq!(hit.canonicalize().unwrap(), apple.canonicalize().unwrap());
+    }
+
+    /// The published npm package for `tish:macos` is named `@tishlang/tish-macos`, so a bare
+    /// name-equality check rejects it and silently falls through to a sibling checkout --
+    /// pulling that checkout's path-dep copy of tishlang_core in beside the registry one and
+    /// failing the build on mismatched `Value` types. An explicit dependency must win.
+    #[test]
+    fn prefers_scoped_node_modules_over_tish_apple_crates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let apple = root.join("tish-apple").join("crates").join("tish-macos");
+        std::fs::create_dir_all(&apple).unwrap();
+        std::fs::write(
+            apple.join("package.json"),
+            r#"{"name":"tish-macos","tish":{"module":true,"crate":"tishlang_macos","export":"macos_object"}}"#,
+        )
+        .unwrap();
+        let project = root.join("app");
+        let scoped = project
+            .join("node_modules")
+            .join("@tishlang")
+            .join("tish-macos");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::write(
+            scoped.join("package.json"),
+            r#"{"name":"@tishlang/tish-macos","tish":{"module":true,"crate":"tishlang_macos","export":"macos_object"}}"#,
+        )
+        .unwrap();
+        let hit = find_package_dir("tish-macos", &project).expect("resolve");
+        assert_eq!(hit.canonicalize().unwrap(), scoped.canonicalize().unwrap());
+    }
+
+    /// npm alias installs (`"tish-macos": "npm:@tishlang/tish-macos@1.2.0"`) put the scoped
+    /// package at the UNSCOPED directory, so the directory name matches but the declared name
+    /// does not. That must resolve too.
+    #[test]
+    fn accepts_scoped_name_at_unscoped_node_modules_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let project = root.join("app");
+        let aliased = project.join("node_modules").join("tish-macos");
+        std::fs::create_dir_all(&aliased).unwrap();
+        std::fs::write(
+            aliased.join("package.json"),
+            r#"{"name":"@tishlang/tish-macos","tish":{"module":true,"crate":"tishlang_macos","export":"macos_object"}}"#,
+        )
+        .unwrap();
+        let hit = find_package_dir("tish-macos", &project).expect("resolve");
+        assert_eq!(hit.canonicalize().unwrap(), aliased.canonicalize().unwrap());
     }
 }
