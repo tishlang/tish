@@ -1,25 +1,31 @@
 # Does the PACKED npm tarball actually work for a consumer?
 #
-# The tish npm package ships Rust crate sources, because tishlang_runtime_gba is not on crates.io
-# and a generated GBA project has to path-depend on something. That makes the tarball's workspace
-# part of the public contract — and nothing checked it.
+# Four packages ship Rust crate sources: @tishlang/tish (because tishlang_runtime_gba is not on
+# crates.io, so a generated GBA project has to path-depend on the shipped crates) and the
+# tish-format / tish-lint / tish-lsp wrappers (whose `install-bin.js` falls back to
+# `cargo build -p <crate>` inside the shipped workspace when no prebuilt binary fits the consumer's
+# platform). That makes each tarball's workspace part of the public contract — and nothing checked
+# it.
 #
-# The payload used to arrive as UNTRACKED symlinks created by a downstream repo's dev-setup script,
-# which also hid them in .git/info/exclude. CI never had them, so a CI-built tarball shipped zero
-# crates; only a laptop that had run that script shipped a working package. This job would have said
-# so on the first run.
-#
-# It was broken: the shipped root manifest lists `examples/ffi/mathext` as a workspace member, and
-# `files` shipped `crates` but not `examples`, so the workspace could not load at all:
+# It was broken in every one of them: the shipped root manifest lists `examples/ffi/mathext` as a
+# workspace member, and `files` ships `crates` but not `examples`, so the workspace cannot load:
 #
 #   error: failed to load manifest for workspace member `.../examples/ffi/mathext`
 #          referenced by workspace at `.../Cargo.toml` — No such file or directory
 #
 # Every member crate inheriting `{ workspace = true }` then failed to parse for anyone outside this
 # repo, which is what stopped a downstream project building a ROM against the published compiler.
+# That shipped in 3.9.2.
 #
-# Building tish from source (native-smoke.yml) cannot catch this: the repo has the examples the
-# tarball omits. Only packing and consuming it can.
+# The payload itself reached the release tarball via explicit `cp` steps in build-npm-binaries.yml,
+# and reaches it via each package's `prepack` script now. But an ad-hoc `npm pack` from a clean
+# checkout got NOTHING before prepack existed: `npm/*/{Cargo.toml,crates,justfile}` were untracked
+# symlinks created by a downstream repo's dev-setup script, which also hid them in
+# .git/info/exclude. So the tarball you could build by hand and the one CI published were different
+# artifacts. They are the same one now, and this job is what keeps them that way.
+#
+# Building tish from source (native-smoke.yml) cannot catch any of this: the repo has the examples
+# the tarball omits. Only packing and consuming it can.
 name: npm package crates
 
 on:
@@ -35,11 +41,24 @@ permissions:
 
 jobs:
   consume-tarball:
-    name: Packed tarball's workspace loads
+    name: ${{ matrix.pkg }} tarball's workspace loads
     runs-on: ubuntu-latest
+    strategy:
+      # One package failing must not hide the state of the other three.
+      fail-fast: false
+      matrix:
+        include:
+          # dir — package directory under npm/
+          # name — published package name, i.e. the node_modules path
+          # crate — the crate whose version must match the package version
+          # check — crates a consumer must be able to read; tish also ships the GBA runtime
+          - { dir: tish,        pkg: "@tishlang/tish",        crate: tish,      check: "tish_core tish_builtins tish_runtime_gba" }
+          - { dir: tish-format, pkg: "@tishlang/tish-format", crate: tish_fmt,  check: "tish_fmt" }
+          - { dir: tish-lint,   pkg: "@tishlang/tish-lint",   crate: tish_lint, check: "tish_lint" }
+          - { dir: tish-lsp,    pkg: "@tishlang/tish-lsp",    crate: tish_lsp,  check: "tish_lsp" }
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with: { node-version: "24" }
       # Pinned to a SHA, matching how the other workflows here reference third-party actions.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -48,14 +67,22 @@ jobs:
       # need and which would fail for an unpublished version.
       - name: Pack and install the tarball as a consumer would
         run: |
-          cd npm/tish && npm pack --silent
+          cd "npm/${{ matrix.dir }}" && npm pack --silent
           mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null
-          npm install --ignore-scripts "$GITHUB_WORKSPACE/npm/tish/"*.tgz
+          npm install --ignore-scripts "$GITHUB_WORKSPACE/npm/${{ matrix.dir }}/"*.tgz
+
+      # prepack copies the payload in and postpack removes it. If postpack did not run — or removed
+      # something it should not have — the checkout is dirty, and a later step in a release run would
+      # commit or push it.
+      - name: Packing must leave the checkout clean
+        run: |
+          dirty="$(git status --porcelain -- npm/${{ matrix.dir }} | grep -v '\.tgz$' || true)"
+          [ -z "$dirty" ] || { echo "::error::packing left npm/${{ matrix.dir }} dirty:"; echo "$dirty"; exit 1; }
 
       - name: Every shipped workspace member must be present
         run: |
-          root="$RUNNER_TEMP/consumer/node_modules/@tishlang/tish"
+          root="$RUNNER_TEMP/consumer/node_modules/${{ matrix.pkg }}"
           # Fail loudly when the root manifest is absent. Without this the member loop iterates over
           # nothing and reports success — which is exactly what it did the first time it was run
           # against a tarball that shipped no Rust payload at all.
@@ -66,16 +93,36 @@ jobs:
           missing=0
           for m in $(sed -n '/^members = \[/,/\]/p' "$root/Cargo.toml" | grep -o '"[^"]*"' | tr -d '"'); do
             [ -f "$root/$m/Cargo.toml" ] \
-              || { echo "::error::shipped Cargo.toml lists workspace member '$m', but the tarball does not contain it — add it to \"files\" in npm/tish/package.json, or drop it from the workspace"; missing=1; }
+              || { echo "::error::shipped Cargo.toml lists workspace member '$m', but the tarball does not contain it — add it to \"files\" in npm/${{ matrix.dir }}/package.json, or drop it from the workspace"; missing=1; }
           done
           [ "$missing" -eq 0 ]
+
+      # An excluded crate keeps its target/ INSIDE the crate directory, so crates/tish_runtime_gba/
+      # target exists on any machine that has built it. A plain recursive copy once added 913 files
+      # and 200 MB to the tarball, silently. prepack filters it out; this is the regression test.
+      - name: The tarball must ship no build artifacts
+        run: |
+          root="$RUNNER_TEMP/consumer/node_modules/${{ matrix.pkg }}"
+          found="$(find "$root" -type d -name target -not -path '*/node_modules/*' || true)"
+          [ -z "$found" ] || { echo "::error::the tarball ships build artifacts:"; echo "$found"; exit 1; }
+
+      # The crate a consumer builds from source must carry the version they installed, or a
+      # `cargo build` from the shipped workspace produces a binary that misreports itself.
+      - name: The shipped crate version must match the package version
+        run: |
+          root="$RUNNER_TEMP/consumer/node_modules/${{ matrix.pkg }}"
+          pkg_version="$(node -p "require('$root/package.json').version")"
+          crate_version="$(sed -n '/^\[package\]/,/^\[/p' "$root/crates/${{ matrix.crate }}/Cargo.toml" \
+            | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1)"
+          [ "$pkg_version" = "$crate_version" ] \
+            || { echo "::error::${{ matrix.pkg }} is version $pkg_version but ships crates/${{ matrix.crate }} at $crate_version"; exit 1; }
 
       # The real consumer test: cargo must be able to read a shipped crate, which means resolving
       # the shipped workspace and every `{ workspace = true }` field in it.
       - name: cargo must be able to read the shipped crates
         run: |
-          root="$RUNNER_TEMP/consumer/node_modules/@tishlang/tish"
-          for c in tish_core tish_builtins tish_runtime_gba; do
+          root="$RUNNER_TEMP/consumer/node_modules/${{ matrix.pkg }}"
+          for c in ${{ matrix.check }}; do
             echo "::group::cargo metadata $c"
             (cd "$root/crates/$c" && cargo metadata --no-deps --format-version 1 >/dev/null) \
               || { echo "::error::the shipped $c cannot be read by cargo — a consumer cannot build against this tarball"; exit 1; }

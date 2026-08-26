@@ -1,5 +1,5 @@
 # Materialized by scripts/install-bin.js (postinstall / pre-pack)
-bin/tish
+bin/tish-lint
 
 # Rust payload: symlinks into the repo root in a dev checkout (chuggie's scripts/dev-setup.sh),
 # real copies while scripts/prepack.js is packing. No trailing slashes — these are symlinks as
