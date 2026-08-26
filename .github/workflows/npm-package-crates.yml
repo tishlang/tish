@@ -1,0 +1,83 @@
+# Does the PACKED npm tarball actually work for a consumer?
+#
+# The tish npm package ships Rust crate sources, because tishlang_runtime_gba is not on crates.io
+# and a generated GBA project has to path-depend on something. That makes the tarball's workspace
+# part of the public contract — and nothing checked it.
+#
+# The payload used to arrive as UNTRACKED symlinks created by a downstream repo's dev-setup script,
+# which also hid them in .git/info/exclude. CI never had them, so a CI-built tarball shipped zero
+# crates; only a laptop that had run that script shipped a working package. This job would have said
+# so on the first run.
+#
+# It was broken: the shipped root manifest lists `examples/ffi/mathext` as a workspace member, and
+# `files` shipped `crates` but not `examples`, so the workspace could not load at all:
+#
+#   error: failed to load manifest for workspace member `.../examples/ffi/mathext`
+#          referenced by workspace at `.../Cargo.toml` — No such file or directory
+#
+# Every member crate inheriting `{ workspace = true }` then failed to parse for anyone outside this
+# repo, which is what stopped a downstream project building a ROM against the published compiler.
+#
+# Building tish from source (native-smoke.yml) cannot catch this: the repo has the examples the
+# tarball omits. Only packing and consuming it can.
+name: npm package crates
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only: this job packs and inspects, it never publishes or writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  consume-tarball:
+    name: Packed tarball's workspace loads
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: "24" }
+      # Pinned to a SHA, matching how the other workflows here reference third-party actions.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # --ignore-scripts: the postinstall only fetches a platform binary, which this check does not
+      # need and which would fail for an unpublished version.
+      - name: Pack and install the tarball as a consumer would
+        run: |
+          cd npm/tish && npm pack --silent
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install --ignore-scripts "$GITHUB_WORKSPACE/npm/tish/"*.tgz
+
+      - name: Every shipped workspace member must be present
+        run: |
+          root="$RUNNER_TEMP/consumer/node_modules/@tishlang/tish"
+          # Fail loudly when the root manifest is absent. Without this the member loop iterates over
+          # nothing and reports success — which is exactly what it did the first time it was run
+          # against a tarball that shipped no Rust payload at all.
+          [ -f "$root/Cargo.toml" ] \
+            || { echo "::error::the tarball ships no Cargo.toml — the Rust payload is missing entirely"; exit 1; }
+          [ -d "$root/crates" ] && [ "$(find "$root/crates" -maxdepth 2 -name Cargo.toml | wc -l)" -gt 0 ] \
+            || { echo "::error::the tarball ships no crates"; exit 1; }
+          missing=0
+          for m in $(sed -n '/^members = \[/,/\]/p' "$root/Cargo.toml" | grep -o '"[^"]*"' | tr -d '"'); do
+            [ -f "$root/$m/Cargo.toml" ] \
+              || { echo "::error::shipped Cargo.toml lists workspace member '$m', but the tarball does not contain it — add it to \"files\" in npm/tish/package.json, or drop it from the workspace"; missing=1; }
+          done
+          [ "$missing" -eq 0 ]
+
+      # The real consumer test: cargo must be able to read a shipped crate, which means resolving
+      # the shipped workspace and every `{ workspace = true }` field in it.
+      - name: cargo must be able to read the shipped crates
+        run: |
+          root="$RUNNER_TEMP/consumer/node_modules/@tishlang/tish"
+          for c in tish_core tish_builtins tish_runtime_gba; do
+            echo "::group::cargo metadata $c"
+            (cd "$root/crates/$c" && cargo metadata --no-deps --format-version 1 >/dev/null) \
+              || { echo "::error::the shipped $c cannot be read by cargo — a consumer cannot build against this tarball"; exit 1; }
+            echo "::endgroup::"
+          done
