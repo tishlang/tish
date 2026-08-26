@@ -14,7 +14,9 @@
     "tish-format": "./bin/tish-format"
   },
   "scripts": {
-    "postinstall": "node scripts/install-bin.js"
+    "postinstall": "node scripts/install-bin.js",
+    "prepack": "node scripts/prepack.js",
+    "postpack": "node scripts/postpack.js"
   },
   "files": [
     "bin",

@@ -584,29 +584,16 @@ jobs:
         env:
           VERSION: ${{ steps.next_version.outputs.version }}
 
-      - name: Copy workspace source for native compile (rust backend)
-        if: steps.next_version.outputs.published == 'true'
-        run: |
-          cp Cargo.toml npm/tish/
-          cp LICENSE npm/tish/
-          cp justfile npm/tish/
-          cp -r crates npm/tish/
-          sed -i.bak "s/^version = .*/version = \"${{ steps.next_version.outputs.version }}\"/" npm/tish/crates/tish/Cargo.toml
-          rm -f npm/tish/crates/tish/Cargo.toml.bak
-
-      - name: Copy workspace source into tish-format / tish-lint (source-build fallback)
-        if: steps.next_version.outputs.published == 'true'
-        run: |
-          # dir:crate — each wrapper bundles the workspace so `postinstall` can cargo-build its bin if no prebuilt platform binary fits
-          for entry in tish-format:tish_fmt tish-lint:tish_lint tish-lsp:tish_lsp; do
-            dir="${entry%%:*}"; crate="${entry##*:}"
-            cp Cargo.toml "npm/$dir/"
-            cp LICENSE "npm/$dir/"
-            cp justfile "npm/$dir/"
-            cp -r crates "npm/$dir/"
-            sed -i.bak "s/^version = .*/version = \"${{ steps.next_version.outputs.version }}\"/" "npm/$dir/crates/$crate/Cargo.toml"
-            rm -f "npm/$dir/crates/$crate/Cargo.toml.bak"
-          done
+      # NOTE: the workspace source that @tishlang/tish, tish-format, tish-lint and tish-lsp ship is
+      # NOT copied here any more. Two steps used to `cp Cargo.toml/LICENSE/justfile/crates` into each
+      # package and sed the version into its crate manifest; each package's own `prepack` script now
+      # does that at `npm pack` time (npm/scripts/pack-payload.js), which is the only way an ad-hoc
+      # or local pack gets the same tarball this workflow produces. Doing both would be worse than
+      # doing one: prepack re-copies from the repo root and would have thrown the sed away.
+      #
+      # `npm pack` below therefore runs prepack (copy + trim workspace members + stamp version from
+      # the package.json version set above) and postpack (remove the copies). npm-package-crates.yml
+      # verifies the result for all four packages.
 
       - name: Create npm package tarball
         if: steps.next_version.outputs.published == 'true'

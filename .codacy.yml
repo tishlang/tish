@@ -20,3 +20,5 @@ exclude_paths:
                                 # not this repo's, so `const`, `for...of`, arrow functions, a shebang and
                                 # `require('fs')` all read as errors in what is a plain Node CJS script.
                                 # NOT excluded: scripts/install-bin.js, which DOES run for consumers.
+  - 'npm/scripts/pack-payload.js' # the shared implementation both of the above delegate to; same
+                                  # reasoning, and it is outside every package so it never ships.

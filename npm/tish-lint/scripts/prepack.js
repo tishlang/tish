@@ -4,4 +4,4 @@
 const path = require('path');
 const { copyPayload } = require('../../scripts/pack-payload');
 
-copyPayload({ pkgDir: path.resolve(__dirname, '..'), crate: 'tish' });
+copyPayload({ pkgDir: path.resolve(__dirname, '..'), crate: 'tish_lint' });

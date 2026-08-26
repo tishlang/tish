@@ -1,5 +1,5 @@
 # Materialized by scripts/install-bin.js (postinstall / pre-pack)
-bin/tish
+bin/tish-lint
 
 # Rust payload copied in by scripts/prepack.js and removed by scripts/postpack.js.
 # Listed here so a failed pack leaves an obviously-untracked tree rather than a silently
