@@ -905,6 +905,9 @@ impl Printer {
         if lead_indent {
             self.indent(level);
         }
+        if self.try_inline_block(statements, span, level) {
+            return;
+        }
         self.buf.push_str("{\n");
         // Fresh sequence: suppress any blank line immediately after `{`.
         self.emitted = 0;
@@ -918,6 +921,80 @@ impl Printer {
         self.indent(level);
         self.buf.push('}');
         self.emitted = span.start.0;
+    }
+
+    /// True when the source wrote this whole block on one line (`{ … }` with its
+    /// matching brace on the same line). The codebase uses `if (c) { return x }`
+    /// and `while (c) { a; b }` as a deliberate idiom; exploding those into
+    /// multi-line blocks was by far the largest source of reformat churn, so a
+    /// block that arrived on one line is kept on one line when it still fits.
+    fn source_one_liner(&self, span: Span) -> bool {
+        match self.braces.get(&span.start) {
+            Some(&(close_line, _)) => close_line == span.start.0,
+            None => false,
+        }
+    }
+
+    /// Statements simple enough to sit inside a preserved one-liner block. Anything
+    /// carrying a block of its own is excluded — nesting one-liners reads worse than
+    /// breaking, and the inline printer here emits no newlines or indentation.
+    fn inlinable_stmt(s: &Statement) -> bool {
+        matches!(
+            s,
+            Statement::ExprStmt { .. }
+                | Statement::Return { .. }
+                | Statement::Break { .. }
+                | Statement::Continue { .. }
+                | Statement::VarDecl { .. }
+                | Statement::VarDeclDestructure { .. }
+                | Statement::Throw { .. }
+        )
+    }
+
+    /// Re-emit a source one-liner block as `{ a; b }`. Returns false (leaving `buf`
+    /// untouched) when the block does not qualify or the flat form would overflow
+    /// [`WIDTH`], in which case the caller falls through to the normal broken form.
+    fn try_inline_block(&mut self, statements: &[Statement], span: Span, _level: usize) -> bool {
+        if self.src.is_empty() || statements.is_empty() {
+            return false;
+        }
+        if !self.source_one_liner(span) {
+            return false;
+        }
+        if !statements.iter().all(Self::inlinable_stmt) {
+            return false;
+        }
+        // A comment anywhere inside would be dropped by the inline path, which emits
+        // no comments at all. Bail out and let the broken form place it properly.
+        let close = self.braces.get(&span.start).copied().unwrap_or(span.start);
+        if self
+            .comments
+            .get(self.ci)
+            .is_some_and(|c| c.start >= span.start && c.start < close)
+        {
+            return false;
+        }
+
+        let mark = self.buf.len();
+        let col = self.col();
+        let was_flat = self.force_flat;
+        self.force_flat = true;
+        self.buf.push_str("{ ");
+        for (i, st) in statements.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str("; ");
+            }
+            self.stmt(st, 0);
+        }
+        self.buf.push_str(" }");
+        self.force_flat = was_flat;
+
+        if col + (self.buf.len() - mark) <= WIDTH && !self.buf[mark..].contains('\n') {
+            self.emitted = span.start.0;
+            return true;
+        }
+        self.buf.truncate(mark);
+        false
     }
 
     fn stmt_inline_or_block(&mut self, s: &Statement, level: usize) {
