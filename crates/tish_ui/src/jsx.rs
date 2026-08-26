@@ -1,6 +1,7 @@
 //! Shared JSX lowering: emit `h(tag, props, children)` as JavaScript or Rust (`Value`) source.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use tishlang_ast::{
     ArrayElement, ArrowBody, CallArg, ExportDeclaration, Expr, JsxAttrValue, JsxChild, JsxProp,
@@ -401,6 +402,7 @@ where
     match expr {
         Expr::JsxElement {
             tag,
+            tag_span,
             props,
             children,
             ..
@@ -412,7 +414,16 @@ where
                 .unwrap_or(false);
             let tag_rust = if is_component {
                 if fun_decls.contains(tag.as_ref()) {
-                    escape_ident_rust(tag.as_ref())
+                    // Lower the component reference through the caller's own identifier path
+                    // rather than writing the bare name. A module-scope function is promoted to a
+                    // `__TISH_GF_<name>` static, and there is no local of the original name to
+                    // reference — emitting it verbatim produced
+                    // `error[E0425]: cannot find value \`Comp\` in this scope` for every imported
+                    // component. `emit_expr` already resolves statics, locals and captures.
+                    emit_expr(&Expr::Ident {
+                        name: Arc::clone(tag),
+                        span: *tag_span,
+                    })?
                 } else {
                     format!("Value::String({:?}.into())", tag.as_ref())
                 }
