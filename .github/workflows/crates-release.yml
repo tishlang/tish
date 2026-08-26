@@ -106,6 +106,26 @@ jobs:
           done < <(printf '%s\n' $members $excluded)
           [ "$missing" -eq 0 ] || { echo "Add the crate(s) above to CRATES in dependency order, then re-run."; exit 1; }
 
+          # `cargo publish -p <name>` only works for workspace MEMBERS. tishlang_runtime_gba is in the
+          # workspace `exclude` list (it depends on agb, which builds only for thumbv4t, so a host
+          # `cargo build` must not try to compile it) — the workspace genuinely does not contain it:
+          #
+          #   error: package ID specification `tishlang_runtime_gba` did not match any packages
+          #
+          # That halted a release PARTWAY: every crate before it in the list had already published,
+          # and none after it did. Publish from inside the crate's own directory, which works for
+          # members and excluded crates alike.
+          crate_dir() {
+            local want="$1" dir name
+            for dir in crates/*/; do
+              [ -f "$dir/Cargo.toml" ] || continue
+              name=$(grep -m1 '^name = ' "$dir/Cargo.toml" | cut -d'"' -f2)
+              if [ "$name" = "$want" ]; then printf '%s' "${dir%/}"; return 0; fi
+            done
+            echo "::error::no directory under crates/ defines package '$want'" >&2
+            return 1
+          }
+
           # Publish one crate, retrying ONLY on a crates.io rate limit (#225). A burst of ~31 publishes
           # can trip crates.io's publish throttle (HTTP 429 / "You have published too many crates …
           # try again after <date>"); cargo does not wait on that, so the release used to fail partway
@@ -117,7 +137,7 @@ jobs:
             local crate="$1" max="${PUBLISH_MAX_ATTEMPTS:-6}" attempt log after tgt now wait
             log=$(mktemp)
             for attempt in $(seq 1 "$max"); do
-              if cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty >"$log" 2>&1; then
+              if (cd "$(crate_dir "$crate")" && cargo publish --token "$CARGO_REGISTRY_TOKEN" --no-verify --allow-dirty) >"$log" 2>&1; then
                 cat "$log"; rm -f "$log"; return 0
               fi
               cat "$log"
