@@ -14,3 +14,9 @@ exclude_paths:
   - '**/*.tish.expected'    # expected-output fixtures
   - 'regression/**'         # regression harnesses/drivers (examples, downstream, dune-server) — CI tooling, not shipped code
   - 'npm/*/index.js'        # npm distribution shims (vite-plugin, create-tish-app): thin ESM CLI/subprocess wrappers, `type:module`/Node>=22. Codacy's default ESLint ruleset (repo ESLint config is not applied) forbids modern ESM syntax (block-scoped vars, `??`, `null`) here — all false positives; the shims have their own package tests.
+  - 'npm/*/scripts/prepack.js'  # pack-time only, never runs for a consumer: builds the tarball's Rust
+  - 'npm/*/scripts/postpack.js' # payload on a maintainer machine (CI packs on Node 24). Same ruleset
+                                # mismatch as the shims above — Codacy applies its default ESLint config,
+                                # not this repo's, so `const`, `for...of`, arrow functions, a shebang and
+                                # `require('fs')` all read as errors in what is a plain Node CJS script.
+                                # NOT excluded: scripts/install-bin.js, which DOES run for consumers.
