@@ -38,10 +38,10 @@ function copyPayload({ pkgDir, crate, version }) {
   const root = path.resolve(pkgDir, '../..');
   const label = path.basename(pkgDir);
 
-  // A dev checkout has these as symlinks into the repo root (chuggie's scripts/dev-setup.sh makes
-  // them). They have to go — copying onto a symlinked directory would write through into the repo
-  // root — but packing should not silently destroy someone's working setup, so record them and put
-  // them back in postpack.
+  // A local dev setup may have these as symlinks into the repo root, so that the package directory
+  // can be consumed in place as a `file:` dependency. They have to go — copying onto a symlinked
+  // directory would write through into the repo root — but packing should not silently destroy a
+  // working setup, so record them and put them back in postpack.
   const links = {};
   for (const name of PAYLOAD) {
     const dest = path.join(pkgDir, name);
