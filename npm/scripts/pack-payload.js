@@ -16,6 +16,10 @@ const path = require('path');
 // The four entries every payload-shipping package lists in `files`.
 const PAYLOAD = ['Cargo.toml', 'crates', 'LICENSE', 'justfile'];
 
+// Written by prepack, read and deleted by postpack: which payload entries were symlinks before the
+// copy, so postpack can restore a dev checkout instead of leaving it stripped.
+const STATE_FILE = '.pack-payload-state.json';
+
 // An excluded crate keeps its target/ INSIDE the crate directory rather than in the workspace root,
 // so crates/tish_runtime_gba/target exists on any machine that has built it — 913 files and 200 MB,
 // silently added to the tarball by a plain recursive copy.
@@ -34,12 +38,21 @@ function copyPayload({ pkgDir, crate, version }) {
   const root = path.resolve(pkgDir, '../..');
   const label = path.basename(pkgDir);
 
+  // A local dev setup may have these as symlinks into the repo root, so that the package directory
+  // can be consumed in place as a `file:` dependency. They have to go — copying onto a symlinked
+  // directory would write through into the repo root — but packing should not silently destroy a
+  // working setup, so record them and put them back in postpack.
+  const links = {};
   for (const name of PAYLOAD) {
-    // rmSync on a symlink removes the link, not its target — local dev may have symlinks here.
-    fs.rmSync(path.join(pkgDir, name), { recursive: true, force: true });
-    fs.cpSync(path.join(root, name), path.join(pkgDir, name),
+    const dest = path.join(pkgDir, name);
+    const stat = fs.lstatSync(dest, { throwIfNoEntry: false });
+    if (stat && stat.isSymbolicLink()) links[name] = fs.readlinkSync(dest);
+    // rmSync on a symlink removes the link, not its target.
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(path.join(root, name), dest,
       { recursive: true, dereference: true, filter: skipBuildDirs });
   }
+  fs.writeFileSync(path.join(pkgDir, STATE_FILE), JSON.stringify(links));
 
   // postpack does not run when prepack throws, so undo the copy here — otherwise a failed pack
   // leaves an unbuildable half-payload in the working tree for whoever packs next.
@@ -98,16 +111,27 @@ function stampVersion(pkgDir, crate, version, label) {
 }
 
 /**
- * Remove the copies copyPayload made, so packing leaves nothing behind.
- *
- * Local dev may have had symlinks here instead; `scripts/dev-setup.sh` in the chuggie repo
- * recreates them. Nothing about a release depends on them.
+ * Remove the copies copyPayload made, so packing leaves nothing behind — and restore any symlinks
+ * that were there before it, so `npm pack` in a dev checkout is not destructive.
  */
 function removePayload(pkgDir) {
+  const statePath = path.join(pkgDir, STATE_FILE);
+  let links = {};
+  try {
+    links = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  } catch {
+    // No state file: prepack never got far enough to write one. Removing the copies is still right.
+  }
+
   for (const name of PAYLOAD) {
     fs.rmSync(path.join(pkgDir, name), { recursive: true, force: true });
+    if (links[name]) fs.symlinkSync(links[name], path.join(pkgDir, name));
   }
-  console.log(`postpack(${path.basename(pkgDir)}): removed the copied payload`);
+  fs.rmSync(statePath, { force: true });
+
+  const restored = Object.keys(links);
+  console.log(`postpack(${path.basename(pkgDir)}): removed the copied payload`
+    + (restored.length ? `, restored symlinks: ${restored.join(', ')}` : ''));
 }
 
 module.exports = { PAYLOAD, copyPayload, removePayload };
