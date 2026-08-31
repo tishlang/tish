@@ -9,7 +9,7 @@ and discarded), same bench ROM.
 
 ## The measurement
 
-On device, GBA, one frame = 4,389 Timer2 ticks. `tish-gba/examples/bench-grid` pass K, 512
+On device, GBA, one frame = 4,389 Timer2 ticks. `chuggie-engine/examples/bench-grid` pass K, 512
 iterations of `acc = acc + <read>`:
 
 | | total ticks | per call |
@@ -212,7 +212,7 @@ port bought 38% and the search still did not fit.
 ## Reproducing
 
 ```bash
-cd tish-gba/examples/bench-grid && npm run build
+cd chuggie-engine/examples/bench-grid && npm run build
 GBA_SHOT_LOG=1 ../../scripts/screenshot.sh bench-grid.gba /tmp/bg.png 600
 ```
 

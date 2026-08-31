@@ -2239,7 +2239,7 @@ impl Codegen {
     /// namespace is O(exports) — a fresh `ObjectMap` with an `Arc<str>` key and a native closure per
     /// exported function — so doing it at every import site is O(imports x exports): importing 68
     /// names from a crate that exports 68 cost 4,624 allocations to bind 68 functions. On a GBA that
-    /// was measured at 3 seconds of black screen (`tish-gba/examples/bench-boot`), paid before the
+    /// was measured at 3 seconds of black screen (`chuggie-engine/examples/bench-boot`), paid before the
     /// program's first statement; `packages/engine.tish` there imports 117 symbols across two crates
     /// and cost 4.3s. Hoisting makes it O(imports + exports).
     ///

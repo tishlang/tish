@@ -3,7 +3,7 @@
 **Status:** CLOSED. Five consumer sites, three commits: `49ac5739a` (element store, array index,
 integer-typed local binding), `b32827ca9` (the masked accumulate), `4f0798f98` (the element READ
 index). Every one was found by timing production code in `tish-gba`, never by predicting it.
-**Found by:** `tish-gba/examples/bench-grid`, porting the Magical Drop rules from Rust to tish.
+**Found by:** `chuggie-engine/examples/bench-grid`, porting the Magical Drop rules from Rust to tish.
 
 ## The measurement
 
@@ -126,7 +126,7 @@ to be bitwise, so `arr[i + j]` still lowers through f64 and the `Add`/`Sub` arm 
 huge index into a small valid one. Inside `arr[(i + j) | 0]` it does apply, and correctly — that
 spelling IS ToInt32, which is wrapping by definition.
 
-Measured in `tish-gba/examples/grid-demo`, whose AI copies a 63-cell board per candidate:
+Measured in `chuggie-engine/examples/grid-demo`, whose AI copies a 63-cell board per candidate:
 
 ```
 board copy      2103 -> 480 ticks   4.4x   (33 -> 7.6 per cell)
@@ -171,7 +171,7 @@ pays this wherever a masked value is accumulated rather than stored.
 ## Reproducing
 
 ```bash
-cd tish-gba/examples/bench-grid && npm run build
+cd chuggie-engine/examples/bench-grid && npm run build
 GBA_SHOT_LOG=1 ../../scripts/screenshot.sh bench-grid.gba /tmp/bg.png 450
 ```
 

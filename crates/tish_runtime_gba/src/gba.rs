@@ -1,6 +1,6 @@
 //! GBA runtime entry points, called by the generated `#[agb::entry] agb_main`.
 //!
-//! Contract (see tish-gba/CONTRACT.md §4):
+//! Contract (see chuggie-engine/CONTRACT.md §4):
 //! ```ignore
 //! #[agb::entry]
 //! fn agb_main(gba: agb::Gba) -> ! {
