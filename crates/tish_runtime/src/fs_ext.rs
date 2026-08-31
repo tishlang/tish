@@ -74,31 +74,40 @@ fn ms_since_epoch(t: std::io::Result<SystemTime>) -> f64 {
 }
 
 /// Build a Node-like `Stats` object from metadata (predicate methods + size + times + mode).
+///
+/// FIXED key order via `object_from_pairs`: building through an `ObjectMap` (AHashMap) iterated
+/// in random per-instance order made every call mint a fresh permanent chain in the global shape
+/// registry (~2.3KB leaked per `stat()` call, unbounded — a file watcher stat-walking a workspace
+/// leaked multi-GB/hour). Fixed-order construction dedupes to one cached shape chain, and skips
+/// the intermediate hashmap entirely.
 fn stats_object(md: &std::fs::Metadata) -> Value {
-    let mut m = ObjectMap::default();
     let is_file = md.is_file();
     let is_dir = md.is_dir();
     let is_symlink = md.file_type().is_symlink();
-    m.insert("isFile".into(), Value::native(move |_| Value::Bool(is_file)));
-    m.insert("isDirectory".into(), Value::native(move |_| Value::Bool(is_dir)));
-    m.insert("isSymbolicLink".into(), Value::native(move |_| Value::Bool(is_symlink)));
-    m.insert("isBlockDevice".into(), Value::native(|_| Value::Bool(false)));
-    m.insert("isCharacterDevice".into(), Value::native(|_| Value::Bool(false)));
-    m.insert("isFIFO".into(), Value::native(|_| Value::Bool(false)));
-    m.insert("isSocket".into(), Value::native(|_| Value::Bool(false)));
-    m.insert("size".into(), Value::Number(md.len() as f64));
-    m.insert("mtimeMs".into(), Value::Number(ms_since_epoch(md.modified())));
-    m.insert("atimeMs".into(), Value::Number(ms_since_epoch(md.accessed())));
-    m.insert("birthtimeMs".into(), Value::Number(ms_since_epoch(md.created())));
     #[cfg(unix)]
-    {
+    let (mode, uid, gid, ino) = {
         use std::os::unix::fs::MetadataExt;
-        m.insert("mode".into(), Value::Number(md.mode() as f64));
-        m.insert("uid".into(), Value::Number(md.uid() as f64));
-        m.insert("gid".into(), Value::Number(md.gid() as f64));
-        m.insert("ino".into(), Value::Number(md.ino() as f64));
-    }
-    Value::object(m)
+        (md.mode() as f64, md.uid() as f64, md.gid() as f64, md.ino() as f64)
+    };
+    #[cfg(not(unix))]
+    let (mode, uid, gid, ino) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    Value::object_from_pairs([
+        ("isFile".into(), Value::native(move |_| Value::Bool(is_file))),
+        ("isDirectory".into(), Value::native(move |_| Value::Bool(is_dir))),
+        ("isSymbolicLink".into(), Value::native(move |_| Value::Bool(is_symlink))),
+        ("isBlockDevice".into(), Value::native(|_| Value::Bool(false))),
+        ("isCharacterDevice".into(), Value::native(|_| Value::Bool(false))),
+        ("isFIFO".into(), Value::native(|_| Value::Bool(false))),
+        ("isSocket".into(), Value::native(|_| Value::Bool(false))),
+        ("size".into(), Value::Number(md.len() as f64)),
+        ("mtimeMs".into(), Value::Number(ms_since_epoch(md.modified()))),
+        ("atimeMs".into(), Value::Number(ms_since_epoch(md.accessed()))),
+        ("birthtimeMs".into(), Value::Number(ms_since_epoch(md.created()))),
+        ("mode".into(), Value::Number(mode)),
+        ("uid".into(), Value::Number(uid)),
+        ("gid".into(), Value::Number(gid)),
+        ("ino".into(), Value::Number(ino)),
+    ])
 }
 
 // ── cores ─────────────────────────────────────────────────────────────────────────────────
