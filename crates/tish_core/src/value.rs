@@ -865,6 +865,51 @@ impl PropMap {
         None
     }
 
+    /// `insert` minus the hidden-class bookkeeping: never calls `shape::transition` and leaves
+    /// `self.shape` untouched. Only for construction paths that END at [`crate::shape::DICT_SHAPE`]
+    /// (see [`PropMap::from_unordered`]) — a map built through this and left with a real shape id
+    /// would lie to the inline caches.
+    fn insert_untracked(&mut self, key: Arc<str>, val: Value) -> Option<Value> {
+        if let Some(m) = &mut self.map {
+            return m.insert(key, val);
+        }
+        if let Some(slot) = self.inline.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref()) {
+            return Some(core::mem::replace(&mut slot.1, val));
+        }
+        if self.inline.len() >= PROPMAP_INLINE {
+            let mut m: IndexMap<Arc<str>, Value, RandomState> =
+                IndexMap::with_capacity_and_hasher(self.inline.len() + 1, RandomState::default());
+            for (k, v) in self.inline.drain(..) {
+                m.insert(k, v);
+            }
+            m.insert(key, val);
+            self.map = Some(Box::new(m));
+            return None;
+        }
+        self.inline.push((key, val));
+        None
+    }
+
+    /// Build a PropMap from entries whose ORDER IS NOT MEANINGFUL (a hashed map's iteration
+    /// order, e.g. `ObjectMap`/`AHashMap`), as a dictionary-mode object: no shape transitions
+    /// are interned and the result carries [`crate::shape::DICT_SHAPE`].
+    ///
+    /// This is a LEAK guard, not just an optimization: `shape::transition` interns a permanent
+    /// `ShapeNode` (plus an `Arc` clone of the key) per distinct `(parent, key)` edge, with no
+    /// eviction. A hashed source iterates in a DIFFERENT order per instance, so walking
+    /// transitions for it mints a fresh permanent chain nearly every call — a builtin returning
+    /// such an object from a hot path leaked ~2.3KB per call, unboundedly (multi-GB/hour in a
+    /// file watcher calling `stat()` in a loop). Random-order objects can never share a stable
+    /// hidden class anyway, so the caches lose nothing: DICT_SHAPE readers take the slow path.
+    pub fn from_unordered<I: IntoIterator<Item = (Arc<str>, Value)>>(entries: I) -> Self {
+        let mut pm = PropMap::default();
+        for (k, v) in entries {
+            pm.insert_untracked(k, v);
+        }
+        pm.shape = crate::shape::DICT_SHAPE;
+        pm
+    }
+
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         let removed = match &mut self.map {
             // shift_remove preserves insertion order (vs swap_remove).
@@ -1055,8 +1100,11 @@ pub struct ObjectData {
 impl ObjectData {
     #[inline]
     pub fn from_strings<I: IntoIterator<Item = (Arc<str>, Value)>>(strings: I) -> Self {
+        // Callers hand us `ObjectMap` (AHashMap) contents — iteration order is random per map
+        // instance, so these become dictionary-mode objects (`DICT_SHAPE`) rather than minting
+        // permanent shape-transition chains per call. See `PropMap::from_unordered`.
         Self {
-            strings: strings.into_iter().collect(),
+            strings: PropMap::from_unordered(strings),
             symbols: None,
             frozen: false,
         }
@@ -2016,6 +2064,37 @@ mod number_to_string_tests {
         for &(value, expected) in cases {
             assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dict_shape_leak_tests {
+    use super::*;
+
+    /// Objects built from hashed maps (random iteration order) must be dictionary-mode:
+    /// DICT_SHAPE, no per-order shape-transition chains interned in the global registry.
+    /// Regression test for the unbounded shape-registry leak (~2.3KB per builtin object
+    /// built via `Value::object(ObjectMap)` — multi-GB/hour through fs stat() polling).
+    #[test]
+    fn from_strings_is_dict_shape() {
+        let mut m = ObjectMap::default();
+        for i in 0..20 {
+            m.insert(format!("key{i}").into(), Value::Number(i as f64));
+        }
+        let v = Value::object(m);
+        let Value::Object(od) = &v else { panic!("expected object") };
+        assert_eq!(od.borrow().strings.shape(), crate::shape::DICT_SHAPE);
+        // Reads still work through the dictionary path.
+        assert!(matches!(object_get(&v, &Value::String("key7".into())), Some(Value::Number(n)) if n == 7.0));
+    }
+
+    /// from_unordered preserves values and handles the inline→map promotion at >8 keys.
+    #[test]
+    fn from_unordered_promotes_and_reads() {
+        let pm = PropMap::from_unordered((0..12).map(|i| (Arc::<str>::from(format!("k{i}")), Value::Number(i as f64))));
+        assert_eq!(pm.len(), 12);
+        assert!(matches!(pm.get("k11"), Some(Value::Number(n)) if *n == 11.0));
+        assert_eq!(pm.shape(), crate::shape::DICT_SHAPE);
     }
 }
 
