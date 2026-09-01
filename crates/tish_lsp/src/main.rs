@@ -447,7 +447,10 @@ impl LanguageServer for Backend {
         // files so an externally edited declaration (`.d.tish`) or source file refreshes the
         // workspace-symbol index without a server restart (#161). The client only delivers these
         // events for globs the server registers; a `.tish` glob does NOT cover `.d.tish` (it has a
-        // compound extension), so both are registered explicitly.
+        // compound extension), so both are registered explicitly. Also watch the manifests that
+        // drive `cargo:` resolution — `tish.rustDependencies` lives in package.json, and a path
+        // dep resolves through its Cargo.toml/Cargo.lock — so a dependency edit can invalidate
+        // `cargo_src_cache` (#714); without these globs no event could ever reach it.
         let watchers = |glob: &str| FileSystemWatcher {
             glob_pattern: GlobPattern::String(glob.to_string()),
             kind: None, // create | change | delete
@@ -456,7 +459,13 @@ impl LanguageServer for Backend {
             id: "tish-watch-d-tish".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers: vec![watchers("**/*.tish"), watchers("**/*.d.tish")],
+                watchers: vec![
+                    watchers("**/*.tish"),
+                    watchers("**/*.d.tish"),
+                    watchers("**/package.json"),
+                    watchers("**/Cargo.toml"),
+                    watchers("**/Cargo.lock"),
+                ],
             })
             .ok(),
         };
@@ -485,6 +494,10 @@ impl LanguageServer for Backend {
             let mut roots = self.roots.write().unwrap();
             apply_workspace_folder_changes(&mut roots, &params.event);
         }
+        // The cargo-crate-root cache goes with the old folder set (#714): `cargo:` resolution is
+        // root-relative, entries are cheap to recompute on the next goto-definition/hover, and
+        // clearing here mirrors how the folder change already re-scopes the symbol index.
+        self.cargo_src_cache.write().unwrap().clear();
         self.client
             .log_message(MessageType::INFO, "tish-lsp: workspace folders updated")
             .await;
@@ -509,6 +522,25 @@ impl LanguageServer for Backend {
                     }
                 }
             }
+        }
+        // #714: a manifest change re-routes `cargo:` resolution — `tish.rustDependencies` lives in
+        // package.json, and a path dep resolves through its Cargo.toml/Cargo.lock — so drop the
+        // whole cargo-crate-root cache when any watched manifest changes. Whole-cache rather than
+        // per-root pruning: a path dep's manifest may live outside every project root, entries are
+        // a few hundred bytes, and they are recomputed per (human-rate) goto-definition/hover.
+        let manifest_changed = params.changes.iter().any(|change| {
+            change
+                .uri
+                .to_file_path()
+                .ok()
+                .and_then(|p| {
+                    p.file_name()
+                        .map(|f| f == "package.json" || f == "Cargo.toml" || f == "Cargo.lock")
+                })
+                .unwrap_or(false)
+        });
+        if manifest_changed {
+            self.cargo_src_cache.write().unwrap().clear();
         }
         // Re-lint any OPEN buffer whose declarations may now have changed. A `.d.tish` supplies
         // ambient `declare` bindings other buffers depend on, so a change there can flip
@@ -2556,6 +2588,63 @@ mod jsonrpc_integration_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Seed `cargo_src_cache` the way a successful goto-definition would.
+    fn seed_cargo_src_cache(service: &LspService<Backend>) {
+        service.inner().cargo_src_cache.write().unwrap().insert(
+            (PathBuf::from("/proj"), "cargo:serde".to_string()),
+            PathBuf::from("/old/crate/root"),
+        );
+    }
+
+    fn cargo_src_cache_len(service: &LspService<Backend>) -> usize {
+        service.inner().cargo_src_cache.read().unwrap().len()
+    }
+
+    fn did_change_watched_files_request(uri: &str) -> Request {
+        Request::build("workspace/didChangeWatchedFiles")
+            .params(serde_json::json!({ "changes": [ { "uri": uri, "type": 2 } ] }))
+            .finish()
+    }
+
+    // #714: a workspace-folder change must drop the cargo-crate-root cache along with the roots
+    // rewrite — previously nothing ever invalidated it, so a stale crate root was served for the
+    // rest of the session.
+    #[tokio::test]
+    async fn workspace_folder_change_clears_cargo_src_cache() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+        seed_cargo_src_cache(&service);
+
+        let dir = crate::test_fs::unique_temp_dir("cargocache");
+        let uri = Url::from_file_path(&dir).unwrap().to_string();
+        let _ = call(&mut service, did_change_workspace_folders(&[&uri], &[])).await;
+        assert_eq!(cargo_src_cache_len(&service), 0, "folder change must clear the cargo src cache");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // #714: a watched manifest change (package.json / Cargo.toml / Cargo.lock — the files that
+    // drive `cargo:` resolution) must drop the cargo-crate-root cache; a plain `.tish` change
+    // must leave it alone.
+    #[tokio::test]
+    async fn manifest_change_clears_cargo_src_cache() {
+        let mut service = new_service();
+        initialize(&mut service).await;
+
+        // A `.tish` event leaves the cargo cache untouched…
+        seed_cargo_src_cache(&service);
+        let _ = call(&mut service, did_change_watched_files_request("file:///proj/a.tish")).await;
+        assert_eq!(cargo_src_cache_len(&service), 1, "a .tish change must not clear the cargo src cache");
+
+        // …while any manifest event drops it.
+        for name in ["package.json", "Cargo.toml", "Cargo.lock"] {
+            seed_cargo_src_cache(&service);
+            let req = did_change_watched_files_request(&format!("file:///proj/{name}"));
+            let _ = call(&mut service, req).await;
+            assert_eq!(cargo_src_cache_len(&service), 0, "a {name} change must clear the cargo src cache");
+        }
     }
 
     // #162 protocol edge cases the client is allowed to send: adding the same folder twice must not
