@@ -436,9 +436,9 @@ pub fn object_assign(args: &[Value]) -> Value {
         };
         if let Value::Object(src) = source {
             let src_borrow = src.borrow();
-            for (k, v) in src_borrow.strings.iter() {
-                target_mut.strings.insert(Arc::clone(k), v.clone());
-            }
+            // merge_from propagates dictionary-ness: copying from a DICT_SHAPE source (whose
+            // stored key order is not meaningful) must not re-mint tracked shape chains (#708).
+            target_mut.strings.merge_from(&src_borrow.strings);
             if let Some(ss) = &src_borrow.symbols {
                 if target_mut.symbols.is_none() {
                     target_mut.symbols = Some(Default::default());
