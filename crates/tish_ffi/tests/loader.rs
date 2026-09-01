@@ -63,3 +63,38 @@ fn load_and_call_real_cdylib() {
         other => panic!("make_pair export = {other:?}"),
     }
 }
+
+// #711: repeated loads of one library — including under a distinct spelling of its path — must
+// hit the process-global cache rather than dlopen (and leak) a fresh mapping per call.
+#[test]
+fn repeated_loads_share_one_cache_entry() {
+    let lib = build_and_locate_fixture();
+    let first = tishlang_ffi::load_module(lib.to_str().unwrap())
+        .unwrap_or_else(|e| panic!("first load_module: {e}"));
+    let cached_modules = tishlang_ffi::loaded_module_count();
+
+    // Same file, different spelling: `<dir>/./<name>` canonicalizes to the same resolved path.
+    let respelled = lib
+        .parent()
+        .expect("fixture path has a parent")
+        .join(".")
+        .join(lib.file_name().expect("fixture path has a file name"));
+    let second = tishlang_ffi::load_module(respelled.to_str().unwrap())
+        .unwrap_or_else(|e| panic!("re-spelled load_module: {e}"));
+    assert_eq!(
+        tishlang_ffi::loaded_module_count(),
+        cached_modules,
+        "a re-spelled path of an already-loaded library must not add a cache entry"
+    );
+
+    // Exports wrapped from the cached copy still call through correctly.
+    for module in [&first, &second] {
+        match module.get("triple") {
+            Some(Value::Function(f)) => match f.call(&[Value::Number(7.0)]) {
+                Value::Number(n) => assert_eq!(n, 21.0),
+                other => panic!("triple(7) = {other:?}"),
+            },
+            other => panic!("triple export = {other:?}"),
+        }
+    }
+}
