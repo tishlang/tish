@@ -1,13 +1,16 @@
 //! WebSocket module for Tish (tish:ws).
 //!
 //! Node.js `ws`-compatible API:
-//! - **Server**: `Server({ port })` — has `clients` (array), `on('connection', fn)`, `listen()`, `acceptTimeout(server, ms)`
-//! - **Connection**: `send(data)`, `close()`, `readyState` (1=OPEN), `receive()` / `receiveTimeout(ms)`
+//! - **Server**: `Server({ port })` — has `clients` (array of LIVE conns; closed ones are pruned
+//!   lazily), `on('connection', fn)`, `listen()`, `acceptTimeout(server, ms)`, `close()`
+//! - **Connection**: `send(data)` (returns `false` when the conn is gone OR its bounded outbound
+//!   queue is full — see `TISH_WS_SEND_BUF_BYTES`), `close()`, `readyState` (1=OPEN),
+//!   `receive()` / `receiveTimeout(ms)`
 //! - **Broadcast** (Node pattern): `server.clients.forEach(ws => ws.send(data))` or iterate room conns and `wsSend(ws, data)` (same as `ws.send(data)`)
 
 use tishlang_core::VmRef;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -80,32 +83,74 @@ fn ws_debug() -> bool {
 }
 
 struct ConnState {
-    send_tx: tokio_mpsc::UnboundedSender<String>,
+    send_tx: tokio_mpsc::Sender<String>,
     recv_rx: mpsc::Receiver<String>,
+    /// Bytes accepted by `conn_send` and not yet written to the socket. Shared with the write task,
+    /// which decrements as each write completes; `conn_send` refuses (returns false) once
+    /// `ws_send_buf_bytes()` is exceeded so a peer that stops reading can't grow the queue forever.
+    queued_bytes: Arc<AtomicUsize>,
+    /// Abort handle for the read pump task. `unregister` aborts it so an explicit `close()` frees
+    /// the task, socket fd and read buffer instead of leaving the task parked on `read.next()`
+    /// until the REMOTE peer disconnects.
+    read_abort: Option<tokio::task::AbortHandle>,
     #[allow(dead_code)]
     open: bool,
 }
 
-lazy_static! {
-    static ref CONNS: Mutex<HashMap<u32, ConnState>> = Mutex::new(HashMap::new());
-    static ref SERVER_RECV: Mutex<HashMap<u32, mpsc::Receiver<u32>>> = Mutex::new(HashMap::new());
+/// A listening `tish:ws` server: the queue of accepted connection ids plus the accept loop's
+/// shutdown signal (see `server_close`).
+struct ServerState {
+    conn_rx: mpsc::Receiver<u32>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-fn register(send_tx: tokio_mpsc::UnboundedSender<String>, recv_rx: mpsc::Receiver<String>) -> u32 {
+lazy_static! {
+    static ref CONNS: Mutex<HashMap<u32, ConnState>> = Mutex::new(HashMap::new());
+    static ref SERVER_RECV: Mutex<HashMap<u32, ServerState>> = Mutex::new(HashMap::new());
+}
+
+fn register(
+    send_tx: tokio_mpsc::Sender<String>,
+    recv_rx: mpsc::Receiver<String>,
+    queued_bytes: Arc<AtomicUsize>,
+) -> u32 {
     let id = next_conn_id();
     CONNS.lock().unwrap().insert(
         id,
         ConnState {
             send_tx,
             recv_rx,
+            queued_bytes,
+            read_abort: None,
             open: true,
         },
     );
     id
 }
 
+/// Store the read pump's abort handle on an already-registered connection so `unregister` can
+/// cancel it. If the connection has vanished in the meantime (instant disconnect), abort right away.
+fn attach_read_task(id: u32, task: &tokio::task::JoinHandle<()>) {
+    let handle = task.abort_handle();
+    if let Ok(mut guard) = CONNS.lock() {
+        match guard.get_mut(&id) {
+            Some(state) => state.read_abort = Some(handle),
+            None => handle.abort(),
+        }
+    }
+}
+
 fn unregister(id: u32) {
-    CONNS.lock().unwrap().remove(&id);
+    let state = CONNS.lock().ok().and_then(|mut g| g.remove(&id));
+    if let Some(state) = state {
+        // Cancel the read pump. Without this an explicit close() left the task parked on
+        // `read.next().await` forever, pinning the socket fd and the tungstenite read buffer until
+        // the remote peer disconnected. Dropping `state` also drops `send_tx`, which ends the write
+        // task — and the write task drives a Close frame + socket shutdown on its way out.
+        if let Some(handle) = state.read_abort {
+            handle.abort();
+        }
+    }
 }
 
 /// Bridge an already-handshaked WebSocket stream into the `CONNS` registry — spawning the read and
@@ -115,34 +160,50 @@ pub(crate) fn register_ws_stream<S>(ws_stream: tokio_tungstenite::WebSocketStrea
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let (send_tx, mut send_rx) = tokio_mpsc::unbounded_channel::<String>();
+    let (send_tx, mut send_rx) = tokio_mpsc::channel::<String>(SEND_QUEUE_MAX_MSGS);
     let (recv_tx, recv_rx) = mpsc::sync_channel::<String>(64);
-    let id = register(send_tx, recv_rx);
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let id = register(send_tx, recv_rx, Arc::clone(&queued_bytes));
     let recv_tx_task = Arc::new(recv_tx);
     let (mut write, mut read) = ws_stream.split();
-    tokio::spawn(async move {
+    let read_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = read.next().await {
             match msg {
                 tokio_tungstenite::tungstenite::Message::Text(t) => {
-                    let _ = recv_tx_task.send(t.to_string());
+                    // A dropped receiver means the connection was closed and nobody will ever read
+                    // these frames — stop pumping instead of discarding them forever.
+                    if recv_tx_task.send(t.to_string()).is_err() {
+                        break;
+                    }
                 }
                 // Binary frames are delivered too (utf8-lossy) — remote pty streams raw bytes and
                 // some servers frame as Binary; dropping them silently loses output. Ping/Pong/Close
                 // are handled by the stream (the loop ends when it yields None on close).
                 tokio_tungstenite::tungstenite::Message::Binary(b) => {
-                    let _ = recv_tx_task.send(String::from_utf8_lossy(&b).into_owned());
+                    if recv_tx_task
+                        .send(String::from_utf8_lossy(&b).into_owned())
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 _ => {}
             }
         }
         unregister(id);
     });
+    attach_read_task(id, &read_task);
     tokio::spawn(async move {
         while let Some(text) = send_rx.recv().await {
+            let n = text.len();
             let _ = write
                 .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
                 .await;
+            queued_bytes.fetch_sub(n, Ordering::AcqRel);
         }
+        // Channel closed: the connection was unregistered (explicit close() or remote disconnect).
+        // Drive the closing handshake so the socket actually shuts down instead of leaking the fd.
+        let _ = write.close().await;
     });
     id
 }
@@ -208,6 +269,51 @@ fn max_ws_connections() -> usize {
     })
 }
 
+/// Can another connection register under `max_ws_connections()`? Shared accounting point for the
+/// `tish:ws` listener AND the `serve()` HTTP→WS upgrade path (http_hyper), which previously
+/// registered pre-auth connections with no cap at all.
+pub(crate) fn has_ws_capacity() -> bool {
+    CONNS
+        .lock()
+        .map(|c| c.len() < max_ws_connections())
+        .unwrap_or(false)
+}
+
+/// Slot count of the bounded per-connection send queue. The byte budget (`ws_send_buf_bytes`) is
+/// the primary limit; this bounds per-message channel overhead when frames are tiny.
+const SEND_QUEUE_MAX_MSGS: usize = 1024;
+
+/// Per-connection outbound byte budget. `conn_send` refuses (returns false) once this many bytes
+/// sit queued waiting on the socket, so a peer that stops reading gets backpressure instead of
+/// unbounded queue growth. A single message is always admitted into an EMPTY queue even when it
+/// exceeds the budget (so a legitimately large frame can still be sent); the queue is therefore
+/// bounded by `budget + one message`. Override with `TISH_WS_SEND_BUF_BYTES`; default 4 MiB.
+fn ws_send_buf_bytes() -> usize {
+    use std::sync::OnceLock;
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("TISH_WS_SEND_BUF_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 * 1024 * 1024)
+    })
+}
+
+/// Shared tungstenite config for every connection (server-accept, `serve()` upgrade, client):
+/// 16 KiB read/write buffers instead of the 128 KiB defaults — the read buffer is allocated eagerly
+/// per connection, so the defaults authorize ~1.3 GB across the 10k-conn cap before any traffic —
+/// and a finite `max_write_buffer_size` so a failing socket can't grow the write buffer without
+/// bound.
+pub(crate) fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(16 * 1024)
+        .max_write_buffer_size(ws_send_buf_bytes().saturating_mul(2).max(1 << 20))
+}
+
+/// Queue `data` for the connection's write task. Returns `false` when the connection is gone OR
+/// when the outbound queue is full (byte budget `ws_send_buf_bytes()` / `SEND_QUEUE_MAX_MSGS`
+/// slots) — callers already treat `false` as "not delivered". Never blocks the caller.
 fn conn_send(id: u32, data: String) -> bool {
     let guard = match CONNS.lock() {
         Ok(g) => g,
@@ -217,7 +323,21 @@ fn conn_send(id: u32, data: String) -> bool {
         Some(s) if s.open => s,
         _ => return false,
     };
-    state.send_tx.send(data).is_ok()
+    let len = data.len();
+    let queued = state.queued_bytes.fetch_add(len, Ordering::AcqRel);
+    // Refuse over-budget sends, but always admit one message into an empty queue (see
+    // `ws_send_buf_bytes`) — mirrors tungstenite's own "buffer + one message" convention.
+    if queued > 0 && queued.saturating_add(len) > ws_send_buf_bytes() {
+        state.queued_bytes.fetch_sub(len, Ordering::AcqRel);
+        return false;
+    }
+    match state.send_tx.try_send(data) {
+        Ok(()) => true,
+        Err(_) => {
+            state.queued_bytes.fetch_sub(len, Ordering::AcqRel);
+            false
+        }
+    }
 }
 
 /// Default timeout for receive() so the main thread blocks and keeps the process/runtime alive.
@@ -242,7 +362,13 @@ fn conn_receive_timeout(id: u32, timeout_ms: u64) -> Option<String> {
             };
             if !guard.contains_key(&id) {
                 drop(guard);
-                std::thread::sleep(Duration::from_millis(50));
+                // Dead/unknown id: return promptly, but pace tight caller loops that poll a closed
+                // conn — sleeping never past the caller's own deadline. `receiveTimeout(0)` must
+                // cost 0ms, not a flat 50ms.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    std::thread::sleep(remaining.min(poll_interval));
+                }
                 return None;
             }
             guard.get(&id).unwrap().recv_rx.try_recv()
@@ -290,10 +416,30 @@ fn conn_id_from_value(v: &Value) -> Option<u32> {
     }
 }
 
+/// Drop conn-array entries whose connection is no longer registered (closed or disconnected).
+/// Called lazily from the tish thread — at the `server.clients` push sites and before broadcasts —
+/// and NEVER from the tokio read task: `VmRef` is `Rc` in single-threaded builds, so cross-thread
+/// pruning would be unsound. Keeps `server.clients` O(live) instead of O(ever-accepted) and matches
+/// Node `ws` semantics, where closed sockets leave `clients` (#698).
+fn prune_closed_conns(list: &mut Vec<Value>) {
+    let Ok(guard) = CONNS.lock() else { return };
+    list.retain(|c| {
+        conn_id_from_value(c)
+            .map(|id| guard.contains_key(&id))
+            .unwrap_or(false)
+    });
+}
+
 /// Native broadcast: send data to all conns in array except `except`. Avoids Tish-side method calls.
 pub fn ws_broadcast_native(args: &[Value]) -> Value {
     let conns = match args.first() {
-        Some(Value::Array(a)) => a.borrow().clone(),
+        Some(Value::Array(a)) => {
+            // Prune first so broadcast cost stays proportional to LIVE connections, not to every
+            // connection ever accepted (#698). Sequential borrows — the mutable one ends before
+            // the clone's shared borrow starts.
+            prune_closed_conns(&mut a.borrow_mut());
+            a.borrow().clone()
+        }
         _ => return Value::Null,
     };
     let except = args.get(1).cloned().unwrap_or(Value::Null);
@@ -417,13 +563,15 @@ pub fn web_socket_client(args: &[Value]) -> Value {
     }
     // wss:// needs rustls' process-default crypto provider installed first.
     ensure_crypto_provider();
-    let (send_tx, mut send_rx) = tokio_mpsc::unbounded_channel::<String>();
+    let (send_tx, mut send_rx) = tokio_mpsc::channel::<String>(SEND_QUEUE_MAX_MSGS);
     let (recv_tx, recv_rx) = mpsc::sync_channel::<String>(64);
     let recv_tx = Arc::new(recv_tx);
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
 
     let id = with_ws_client_rt(|rt| {
         rt.block_on(async move {
-            let connect = tokio_tungstenite::connect_async(&url);
+            let connect =
+                tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), false);
             let connected = if connect_timeout_ms > 0 {
                 match tokio::time::timeout(Duration::from_millis(connect_timeout_ms), connect).await {
                     Ok(r) => r,
@@ -456,18 +604,22 @@ pub fn web_socket_client(args: &[Value]) -> Value {
                     return None;
                 }
             };
-            let id = register(send_tx, recv_rx);
+            let id = register(send_tx, recv_rx, Arc::clone(&queued_bytes));
             let (mut write, mut read) = ws_stream.split();
             let recv_tx = Arc::clone(&recv_tx);
             let url_closed = url.clone();
-            tokio::spawn(async move {
+            let read_task = tokio::spawn(async move {
                 while let Some(Ok(msg)) = read.next().await {
                     match msg {
                         tokio_tungstenite::tungstenite::Message::Text(t) => {
-                            let _ = recv_tx.send(t.to_string());
+                            if recv_tx.send(t.to_string()).is_err() {
+                                break;
+                            }
                         }
                         tokio_tungstenite::tungstenite::Message::Binary(b) => {
-                            let _ = recv_tx.send(String::from_utf8_lossy(&b).into_owned());
+                            if recv_tx.send(String::from_utf8_lossy(&b).into_owned()).is_err() {
+                                break;
+                            }
                         }
                         _ => {}
                     }
@@ -477,12 +629,17 @@ pub fn web_socket_client(args: &[Value]) -> Value {
                 }
                 unregister(id);
             });
+            attach_read_task(id, &read_task);
             tokio::spawn(async move {
                 while let Some(text) = send_rx.recv().await {
+                    let n = text.len();
                     let _ = write
                         .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
                         .await;
+                    queued_bytes.fetch_sub(n, Ordering::AcqRel);
                 }
+                // See `register_ws_stream`: drive the closing handshake so close() frees the fd.
+                let _ = write.close().await;
             });
             Some(id)
         })
@@ -504,11 +661,18 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
 
     let (bind_tx, bind_rx) = mpsc::sync_channel::<bool>(1);
     let (conn_tx, conn_rx) = mpsc::channel::<u32>();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = next_server_handle();
 
     {
         let mut map = SERVER_RECV.lock().unwrap();
-        map.insert(handle, conn_rx);
+        map.insert(
+            handle,
+            ServerState {
+                conn_rx,
+                shutdown_tx: Some(shutdown_tx),
+            },
+        );
     }
 
     std::thread::spawn(move || {
@@ -534,35 +698,45 @@ pub fn web_socket_server_listen(args: &[Value]) -> Value {
             println!("WebSocket server listening on ws://0.0.0.0:{}", port);
 
             loop {
-                let (stream, _) = match listener.accept().await {
+                // `server.close()` fires (or drops) the shutdown signal — exit the loop so the
+                // listener, this runtime and its thread are actually freed (`TcpListener::accept`
+                // is cancel-safe).
+                let accepted = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    r = listener.accept() => r,
+                };
+                let (stream, _) = match accepted {
                     Ok(s) => s,
                     Err(_) => break,
                 };
                 // Cap total connections — unbounded accepts would exhaust tasks/memory.
-                if CONNS.lock().map(|c| c.len()).unwrap_or(0) >= max_ws_connections() {
+                if !has_ws_capacity() {
                     drop(stream);
                     continue;
                 }
-                let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                    Ok(ws) => {
-                        if ws_debug() {
-                            eprintln!(
-                                "[tish ws] server accepted connection (handshake OK): port {}",
-                                port
-                            );
+                let ws_stream =
+                    match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config()))
+                        .await
+                    {
+                        Ok(ws) => {
+                            if ws_debug() {
+                                eprintln!(
+                                    "[tish ws] server accepted connection (handshake OK): port {}",
+                                    port
+                                );
+                            }
+                            ws
                         }
-                        ws
-                    }
-                    Err(e) => {
-                        if ws_debug() {
-                            eprintln!(
-                                "[tish ws] server accept_async failed: {} (port {})",
-                                e, port
-                            );
+                        Err(e) => {
+                            if ws_debug() {
+                                eprintln!(
+                                    "[tish ws] server accept_async failed: {} (port {})",
+                                    e, port
+                                );
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                };
+                    };
                 let id = register_ws_stream(ws_stream);
                 if conn_tx.send(id).is_err() {
                     break;
@@ -590,11 +764,11 @@ pub fn web_socket_server_accept(args: &[Value]) -> Value {
         Ok(g) => g,
         Err(_) => return Value::Null,
     };
-    let rx = match map.get_mut(&handle) {
-        Some(r) => r,
+    let st = match map.get_mut(&handle) {
+        Some(s) => s,
         None => return Value::Null,
     };
-    match rx.recv() {
+    match st.conn_rx.recv() {
         Ok(id) => conn_object(id),
         Err(_) => Value::Null,
     }
@@ -614,13 +788,33 @@ pub fn web_socket_server_accept_timeout(args: &[Value]) -> Value {
         Ok(g) => g,
         Err(_) => return Value::Null,
     };
-    let rx = match map.get_mut(&handle) {
-        Some(r) => r,
+    let st = match map.get_mut(&handle) {
+        Some(s) => s,
         None => return Value::Null,
     };
-    match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+    match st
+        .conn_rx
+        .recv_timeout(std::time::Duration::from_millis(timeout_ms))
+    {
         Ok(id) => conn_object(id),
         Err(_) => Value::Null,
+    }
+}
+
+/// Tear down a listening server: stop the accept loop (freeing the `TcpListener`, its dedicated
+/// thread and tokio runtime — previously they lived for the whole process, #698), and unregister
+/// any accepted-but-unclaimed connections still sitting in the queue.
+fn server_close(handle: u32) {
+    let state = SERVER_RECV.lock().ok().and_then(|mut m| m.remove(&handle));
+    if let Some(mut st) = state {
+        if let Some(tx) = st.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        // Connections the accept loop registered but the program never picked up would otherwise
+        // stay in CONNS (holding their tasks + fd) until the remote peer disconnects.
+        while let Ok(id) = st.conn_rx.try_recv() {
+            unregister(id);
+        }
     }
 }
 
@@ -679,7 +873,14 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
             if matches!(ws, Value::Null) {
                 break;
             }
-            clients_listen.borrow_mut().push(ws.clone());
+            {
+                // Lazy prune on the tish thread: closed conns leave `clients` before each push, so
+                // the array tracks LIVE connections (Node `ws` semantics) instead of growing with
+                // every connection ever accepted (#698).
+                let mut list = clients_listen.borrow_mut();
+                prune_closed_conns(&mut list);
+                list.push(ws.clone());
+            }
             if let Value::Function(f) = cb {
                 let _ = f.call(&[ws]);
             }
@@ -701,9 +902,30 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
         let timeout_ms = args.get(1).cloned().unwrap_or(Value::Number(100.0));
         let ws = web_socket_server_accept_timeout(&[handle_n, timeout_ms]);
         if !matches!(ws, Value::Null) {
-            clients_accept.borrow_mut().push(ws.clone());
+            // Same lazy prune as the listen() push site (#698).
+            let mut list = clients_accept.borrow_mut();
+            prune_closed_conns(&mut list);
+            list.push(ws.clone());
         }
         ws
+    });
+
+    let handle_u32 = match &handle_val {
+        Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
+        _ => 0,
+    };
+    let clients_close = clients.clone();
+    let close_fn = Value::native(move |args: &[Value]| {
+        server_close(handle_u32);
+        // Null the handle so a listen() loop exits on its next iteration, and clear `clients`
+        // (the accept loop is stopped, so nothing repopulates it).
+        if let Some(Value::Object(so)) = args.first() {
+            so.borrow_mut()
+                .strings
+                .insert(Arc::from("_handle"), Value::Null);
+        }
+        clients_close.borrow_mut().clear();
+        Value::Null
     });
 
     let mut m: ObjectMap = ObjectMap::default();
@@ -713,6 +935,7 @@ pub fn web_socket_server_construct(args: &[Value]) -> Value {
     m.insert(Arc::from("on"), on_fn);
     m.insert(Arc::from("listen"), listen_fn);
     m.insert(Arc::from("acceptTimeout"), accept_timeout_fn);
+    m.insert(Arc::from("close"), close_fn);
     Value::object(m)
 }
 
@@ -826,12 +1049,168 @@ mod tests {
     /// socket and emit EOF exactly once).
     #[test]
     fn conn_is_open_reflects_registry() {
-        let (tx, _rx) = tokio_mpsc::unbounded_channel::<String>();
+        let (tx, _rx) = tokio_mpsc::channel::<String>(4);
         let (_stx, srx) = mpsc::sync_channel::<String>(1);
-        let id = register(tx, srx);
+        let id = register(tx, srx, Arc::new(AtomicUsize::new(0)));
         assert!(conn_is_open(id), "just-registered conn should be open");
         unregister(id);
         assert!(!conn_is_open(id), "unregistered conn should be closed");
+    }
+
+    /// The bounded send queue must refuse (return false) once the byte budget is reached instead of
+    /// queueing forever — the backpressure contract callers rely on (`sent === false` → drop the
+    /// peer). Nothing drains the channel here, simulating a peer that stopped reading.
+    #[test]
+    fn conn_send_refuses_when_queue_full() {
+        let (tx, _rx) = tokio_mpsc::channel::<String>(SEND_QUEUE_MAX_MSGS);
+        let (_stx, srx) = mpsc::sync_channel::<String>(1);
+        let id = register(tx, srx, Arc::new(AtomicUsize::new(0)));
+
+        let chunk = "x".repeat(64 * 1024);
+        let budget = ws_send_buf_bytes();
+        let mut accepted = 0usize;
+        while conn_send(id, chunk.clone()) {
+            accepted += 1;
+            assert!(
+                accepted * chunk.len() <= budget + chunk.len(),
+                "queue admitted {} bytes — budget {} never enforced",
+                accepted * chunk.len(),
+                budget
+            );
+        }
+        assert!(
+            accepted > 0,
+            "an empty queue must admit at least one message"
+        );
+        assert!(
+            (accepted + 1) * chunk.len() > budget,
+            "refused after only {} bytes (budget {})",
+            accepted * chunk.len(),
+            budget
+        );
+        // Once full, even a tiny send is refused (only an EMPTY queue admits unconditionally).
+        assert!(
+            !conn_send(id, "y".into()),
+            "full queue must refuse further sends"
+        );
+        unregister(id);
+        assert!(!conn_send(id, "z".into()), "closed conn must refuse sends");
+    }
+
+    /// `server.clients` housekeeping: `prune_closed_conns` drops entries whose connection is no
+    /// longer registered (and non-conn junk), keeping only live conns — Node `ws` semantics (#698).
+    #[test]
+    fn prune_closed_conns_drops_dead_entries() {
+        let (tx, _rx) = tokio_mpsc::channel::<String>(4);
+        let (_stx, srx) = mpsc::sync_channel::<String>(1);
+        let live = register(tx, srx, Arc::new(AtomicUsize::new(0)));
+        let (tx2, _rx2) = tokio_mpsc::channel::<String>(4);
+        let (_stx2, srx2) = mpsc::sync_channel::<String>(1);
+        let dead = register(tx2, srx2, Arc::new(AtomicUsize::new(0)));
+        unregister(dead);
+
+        let mut list = vec![conn_object(live), conn_object(dead), Value::Null];
+        prune_closed_conns(&mut list);
+        assert_eq!(list.len(), 1, "only the live conn should remain");
+        assert_eq!(conn_id_from_value(&list[0]), Some(live));
+        unregister(live);
+    }
+
+    /// `receiveTimeout` on a dead/unknown id must honor the caller's timeout — it used to sleep a
+    /// flat 50ms, so a pump loop polling N zombie conns paid N x 50ms per tick.
+    #[test]
+    fn receive_timeout_dead_id_honors_caller_timeout() {
+        let t0 = Instant::now();
+        assert!(conn_receive_timeout(u32::MAX, 0).is_none());
+        assert!(
+            t0.elapsed() < Duration::from_millis(40),
+            "receiveTimeout(0) on a dead id must return immediately, took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// close() must actually close the socket: the SERVER side must observe the stream ending and
+    /// unregister its conn. Before the fix, close() only removed the local registry entry — the
+    /// read task stayed parked on the open socket forever (fd + task + buffers leaked per close).
+    #[test]
+    fn client_close_shuts_down_the_socket() {
+        let port: u16 = 18_745;
+        let opts = {
+            let mut m: ObjectMap = ObjectMap::default();
+            m.insert(Arc::from("port"), Value::Number(port as f64));
+            Value::object(m)
+        };
+        let handle = match web_socket_server_listen(std::slice::from_ref(&opts)) {
+            Value::Number(h) => h as u32,
+            _ => panic!("listen failed"),
+        };
+        let (id_tx, id_rx) = mpsc::channel::<u32>();
+        let server = thread::spawn(move || {
+            let ws = web_socket_server_accept(&[Value::Number(handle as f64)]);
+            let _ = id_tx.send(conn_id_from_value(&ws).expect("server conn id"));
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        let url = format!("ws://127.0.0.1:{}/", port);
+        let client = web_socket_client(&[Value::String(url.into())]);
+        let Value::Object(co) = client else {
+            panic!("client connect failed");
+        };
+        let server_id = id_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server never accepted");
+        assert!(conn_is_open(server_id), "server conn should start open");
+
+        let Some(Value::Function(close_f)) = co.borrow().strings.get("close").cloned() else {
+            panic!("no close");
+        };
+        let _ = close_f.call(&[]);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while conn_is_open(server_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !conn_is_open(server_id),
+            "server still sees the conn open after the client's close() — the socket was not shut down"
+        );
+        let _ = server.join();
+    }
+
+    /// server.close() must stop the accept loop and free the TcpListener (previously a bound
+    /// server's listener, thread and runtime lived for the whole process — #698).
+    #[test]
+    fn server_close_frees_the_listener() {
+        let port: u16 = 18_746;
+        let opts = {
+            let mut m: ObjectMap = ObjectMap::default();
+            m.insert(Arc::from("port"), Value::Number(port as f64));
+            Value::object(m)
+        };
+        let srv = web_socket_server_construct(std::slice::from_ref(&opts));
+        let Value::Object(so) = &srv else {
+            panic!("server construct failed");
+        };
+        let Some(Value::Function(close_f)) = so.borrow().strings.get("close").cloned() else {
+            panic!("no close method on server object");
+        };
+        let _ = close_f.call(std::slice::from_ref(&srv));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut rebound = false;
+        while Instant::now() < deadline {
+            if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+                rebound = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(rebound, "port still held after server.close()");
+        // And the handle is gone: a subsequent accept returns Null instead of blocking.
+        assert!(matches!(
+            web_socket_server_accept_timeout(&[Value::Number(0.0), Value::Number(0.0)]),
+            Value::Null
+        ));
     }
 
     #[test]
