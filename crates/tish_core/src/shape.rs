@@ -31,10 +31,31 @@ pub const DICT_SHAPE: ShapeId = u32::MAX;
 /// Edges are keyed by an `ahash` map, not the default SipHash one: `transition` is on the hot path of
 /// every object construction (and `JSON.parse` — profiled as ~16% of parse, almost all SipHash), and
 /// ahash is ~2–3× faster on short string keys. Random-seeded per process, so no HashDoS regression.
+/// Growth backstops (#701/#706/#710). The registry has no eviction — a permanent `ShapeNode`
+/// plus an `Arc` clone of the key per distinct `(parent, key)` edge — so every mint site must be
+/// bounded. Three independent caps, all degrading to `DICT_SHAPE` (never an error):
+///
+/// - `MAX_TRANSITIONS_PER_NODE` bounds a node's fan-out. The hot pathology is node 0: every
+///   fresh `{}` that takes a data-dependent first key (`o[requestId] = …`) adds one edge to
+///   EMPTY_SHAPE's map, forever, under the global write lock.
+/// - `MAX_CHAIN_DEPTH` bounds a chain's length. A single object accumulating keys one at a time
+///   mints a linear chain (each node fan-out 1, so the fan-out cap never trips). `PropMap`
+///   promotion demotes to dictionary mode at 9 keys, but `with_capacity`-built maps skip
+///   promotion — the depth cap is their backstop.
+/// - `MAX_SHAPES` is the absolute registry ceiling; past it nothing new is ever interned.
+///
+/// Values are far above anything a program's TEXT can mint (shapes are meant to be bounded by
+/// code structure), and far below the ~750 GB where the u32 id-overflow guard would trip.
+const MAX_TRANSITIONS_PER_NODE: usize = 256;
+const MAX_CHAIN_DEPTH: u16 = 32;
+const MAX_SHAPES: usize = 1 << 18; // 262_144 nodes ≈ tens of MB worst-case, orders above real use
+
 #[cfg(not(feature = "portable"))]
 #[derive(Default)]
 struct ShapeNode {
     transitions: AHashMap<Arc<str>, ShapeId>,
+    /// Distance from EMPTY_SHAPE (== number of keys on the path). Bounds chain length.
+    depth: u16,
 }
 
 #[cfg(not(feature = "portable"))]
@@ -85,12 +106,19 @@ fn transition_tracked(from: ShapeId, key: &Arc<str>) -> ShapeId {
         return DICT_SHAPE;
     }
     // Fast path: the edge already exists (the common case after the first object of this shape).
+    // The caps are ALSO checked here, read-only: a saturated node keeps answering DICT_SHAPE
+    // from the read lock instead of convoying every miss through the write lock below.
     {
         let reg = registry().read().unwrap();
         match reg.nodes.get(from as usize) {
             Some(node) => {
                 if let Some(&next) = node.transitions.get(key.as_ref()) {
                     return next;
+                }
+                if node.transitions.len() >= MAX_TRANSITIONS_PER_NODE
+                    || node.depth >= MAX_CHAIN_DEPTH
+                {
+                    return DICT_SHAPE;
                 }
             }
             None => return DICT_SHAPE, // out of range — should not happen; degrade safely
@@ -102,13 +130,38 @@ fn transition_tracked(from: ShapeId, key: &Arc<str>) -> ShapeId {
     if let Some(&next) = reg.nodes[from as usize].transitions.get(key.as_ref()) {
         return next;
     }
+    // Re-check the caps under the write lock too (the read-path check can race).
+    let parent_depth = reg.nodes[from as usize].depth;
+    if reg.nodes[from as usize].transitions.len() >= MAX_TRANSITIONS_PER_NODE
+        || parent_depth >= MAX_CHAIN_DEPTH
+        || reg.nodes.len() >= MAX_SHAPES
+    {
+        return DICT_SHAPE;
+    }
     let new_id = reg.nodes.len();
     if new_id >= DICT_SHAPE as usize {
-        return DICT_SHAPE; // ran out of shape ids — extremely unlikely; degrade to dictionary mode
+        return DICT_SHAPE; // id-space overflow guard — prevents u32 truncation aliasing live ids
     }
-    reg.nodes.push(ShapeNode::default());
+    reg.nodes.push(ShapeNode {
+        transitions: AHashMap::default(),
+        depth: parent_depth + 1,
+    });
     reg.nodes[from as usize]
         .transitions
         .insert(Arc::clone(key), new_id as ShapeId);
     new_id as ShapeId
+}
+
+/// Number of interned shape nodes — for regression tests asserting that a workload does NOT
+/// grow the registry. Not part of the public surface.
+#[doc(hidden)]
+#[cfg(not(feature = "portable"))]
+pub fn shape_count() -> usize {
+    registry().read().unwrap().nodes.len()
+}
+
+#[doc(hidden)]
+#[cfg(feature = "portable")]
+pub fn shape_count() -> usize {
+    0
 }
