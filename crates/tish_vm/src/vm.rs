@@ -2610,7 +2610,9 @@ impl Vm {
                                 .get(*nested_idx)
                                 .ok_or_else(|| "Nested chunk index out of bounds".to_string())?;
                             // Numeric JIT fast path (native codegen, non-wasm): if this is a
-                            // straight-line numeric function, compile it once (cached per chunk)
+                            // straight-line numeric function, compile it once (cached by chunk
+                            // CONTENT, #703 — the `inner.clone()` below makes addresses
+                            // per-instance, so every instance of one source fn shares a compile)
                             // and call native code when all args are numbers; else fall back to
                             // the interpreter below. Purely additive — can't change behaviour.
                             #[cfg(not(target_arch = "wasm32"))]

@@ -129,10 +129,11 @@ pub struct NumericFn {
     /// [`NumericFn::call`] ABI; an out-of-bounds array access (or a non-numeric return) sets a
     /// per-thread deopt flag ([`jv_take_deopt`]) and the caller discards the result + re-interprets.
     jv: bool,
-    /// #187: true when this function embeds a native call to a registered callee. Such a function is
-    /// NOT cached by [`try_compile_numeric`] (its embedded callee address could go stale if a
-    /// long-lived process reuses chunk addresses across programs) — it is recompiled per closure
-    /// creation, which resolves against the live callee registry. `false` (cacheable) for all others.
+    /// #187: true when this function embeds a native call to a registered callee. Its cache entry is
+    /// scoped to the callee-registry GENERATION it compiled under (#703, [`JitGlobal::callees_gen`]):
+    /// within one program run the callee binding is proven stable, so the entry is reused; after a
+    /// program boundary ([`reset_callees`]) the entry is a miss and the function recompiles once
+    /// against the live registry — never against a stale callee.
     uses_xcall: bool,
     /// #187: true when this is a VOID array-mode function (only returns the implicit `null`). Its
     /// `f64` result is a dummy, so [`try_call_array_jit`] returns `Value::Null` instead of a number.
@@ -520,19 +521,24 @@ impl NumericFn {
 
 struct JitGlobal {
     module: JITModule,
-    /// Keyed by the address of the nested `Chunk`, with a content **fingerprint** alongside the
-    /// result. Within one program run a chunk lives for the whole run, so the address is stable and
-    /// unique. But this cache is a process-global that is never cleared, and a `Chunk` is dropped when
-    /// its program is — so a long-lived process that compiles/drops/recompiles programs (the REPL;
-    /// embedders running multiple scripts) can allocate a *different* chunk at a freed address that is
-    /// still cached. We therefore verify the fingerprint on every hit: a mismatch means the address was
-    /// reused by a different chunk, so we recompile (and overwrite) instead of returning stale native
-    /// code. `None` still caches "not JIT-eligible". See [`chunk_fingerprint`].
-    cache: HashMap<usize, (u64, Option<NumericFn>)>,
-    /// OSR loop-region cache (#190), keyed by `(chunk address, loop header ip)` with the same
-    /// fingerprint guard as `cache`. `None` caches "region not compilable" so a loop that fails the
-    /// whitelist is scanned once, not on every back-edge past the trigger threshold.
-    osr_cache: HashMap<(usize, usize), (u64, Option<LoopFn>)>,
+    /// Keyed by **content identity** — the primary [`chunk_fingerprints`] hash — NOT by chunk
+    /// address (#703). The VM deep-clones a `Chunk` for every closure instance (`vm.rs`
+    /// `LoadConst(Closure)`), so an address key is per closure *instance*, not per program function:
+    /// every qualifying closure creation minted a fresh cranelift compile whose sealed executable
+    /// page (16 KB on macOS arm64) is never freed — ~18 KB leaked per closure creation, driven by
+    /// runtime event volume rather than code size. Content keys make every instance of the same
+    /// source function share ONE compile, so the map grows with distinct program text only. A hit is
+    /// honored only when the entry's [`CacheTail`] also matches (second hash + exact structural
+    /// dims), so a 64-bit key collision degrades to a recompile, never a miscompile. `None` still
+    /// caches "not JIT-eligible"; registry-sensitive entries are re-validated against
+    /// `callees_gen`/`callees` — see [`NumEntry`].
+    cache: HashMap<u64, NumEntry>,
+    /// OSR loop-region cache (#190), keyed by `(content fingerprint, loop header ip)` with the same
+    /// [`CacheTail`] collision guard as `cache` (#703 — same per-instance-address leak otherwise).
+    /// `None` caches "region not compilable" so a loop that fails the whitelist is scanned once, not
+    /// on every back-edge past the trigger threshold. Loop regions are always registry-independent
+    /// (the region whitelist rejects `LoadVar`), so entries never need generation re-validation.
+    osr_cache: HashMap<(u64, usize), OsrEntry>,
     counter: usize,
     /// `FuncId` of the imported `tish_math_call` host fn (#186), declared once at module init and
     /// re-imported into each compiled function via `declare_func_in_func`.
@@ -548,15 +554,140 @@ struct JitGlobal {
     /// the binding can never change under a cached caller. A caller that references a name NOT yet here
     /// (a forward reference) simply bails to the interpreter.
     callees: HashMap<Arc<str>, CalleeEntry>,
+    /// #703: generation counter for `callees`, bumped by [`reset_callees`] at every top-level program
+    /// boundary. A cached cross-calling function ([`NumericFn::uses_xcall`]) embeds native calls to
+    /// callee ids it resolved at compile time; that binding is proven stable only WITHIN one program
+    /// run (`global_name` is per-program-stable), so such an entry is honored only while the
+    /// generation it was compiled under is still current. This is what lets cross-callers be cached
+    /// at all (pre-#703 they recompiled — and burned a fresh executable page — on every closure
+    /// creation) while preserving the original soundness argument: a stale callee is never invoked.
+    callees_gen: u64,
 }
 
 /// #187: a registered directly-callable numeric callee (register-`f64` ABI). Callers resolve against
-/// the LIVE registry at compile time and are never cached ([`NumericFn::uses_xcall`]), so a name
-/// re-registered by a later program simply overwrites this — a stale callee is never invoked.
+/// the LIVE registry at compile time; their cache entries are scoped to the registry generation they
+/// compiled under (#703, see [`JitGlobal::callees_gen`]), so a name re-registered by a later program
+/// simply overwrites this — a stale callee is never invoked.
 #[derive(Clone, Copy)]
 struct CalleeEntry {
     id: cranelift_module::FuncId,
     arity: u8,
+}
+
+/// Collision-verification tail stored with every content-keyed cache entry (#703). The map key is a
+/// single 64-bit fingerprint; unlike the old address-keyed scheme (where a wrong hit only meant a
+/// freed-and-reused address), a false content hit would hand one chunk another chunk's native code —
+/// a miscompile. A hit is therefore honored only when a SECOND, independently-mixed 64-bit
+/// fingerprint over the same input AND the exact structural dimensions all match. Two chunks that
+/// agree on both hashes (independent multipliers/avalanches over identical input streams) and every
+/// length/shape field below are identical for compilation purposes to ~2^-128 confidence — stronger
+/// in practice, since the inputs are compiler-generated bytecode, not adversarial hash-seeking data.
+/// A mismatch is treated as a miss: recompile and overwrite (the superseded entry's code page stays
+/// mapped, as all JIT pages do — see the finalize note in [`compile_chunk`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CacheTail {
+    fp2: u64,
+    code_len: u32,
+    const_len: u32,
+    param_count: u16,
+    num_slots: u16,
+}
+
+impl CacheTail {
+    fn of(chunk: &Chunk, fp2: u64) -> Self {
+        Self {
+            fp2,
+            code_len: chunk.code.len() as u32,
+            const_len: chunk.constants.len() as u32,
+            param_count: chunk.param_count,
+            num_slots: chunk.num_slots,
+        }
+    }
+
+    fn matches(&self, chunk: &Chunk, fp2: u64) -> bool {
+        *self == Self::of(chunk, fp2)
+    }
+}
+
+/// A `cache` entry (#703): the compile result plus everything needed to re-validate and to replay
+/// the compile's side effects on a content-keyed hit.
+struct NumEntry {
+    tail: CacheTail,
+    result: Option<NumericFn>,
+    /// `Some` when compiling this chunk registered it as a directly-callable callee (#187: plain
+    /// register-`f64`, non-jv/non-guarded/non-bool, with a stable `global_name`). A cache hit must
+    /// REPLAY that registration — re-inserting the id under the current chunk's `global_name` — or a
+    /// program re-run in a long-lived process (its registry cleared by [`reset_callees`], its chunks
+    /// all cache hits) would never re-populate the registry and cross-function JIT calls would
+    /// silently stop resolving. The finalized id's code pointer is process-permanent, so replaying it
+    /// into any later generation is sound.
+    callee_id: Option<cranelift_module::FuncId>,
+    /// `callees` generation this entry was compiled under (see [`JitGlobal::callees_gen`]).
+    callees_gen: u64,
+    /// `callees.len()` right after this compile. Consulted only for registry-sensitive `None`
+    /// entries: a chunk that references globals may have failed to compile *because* a callee wasn't
+    /// registered yet, so registry growth within the generation retries it (once per growth step —
+    /// the registry only grows within a generation, so steady state re-hits the cached `None`).
+    callees_len: u32,
+    /// Whether the chunk references any global (`LoadVar`), i.e. whether its compile RESULT could
+    /// depend on the callee registry at all. `false` ⇒ the entry is valid regardless of registry
+    /// state or generation (a compiled non-xcall body provably contains no `LoadVar` — an unresolved
+    /// one bails compilation and a resolved one makes it xcall).
+    registry_sensitive: bool,
+}
+
+/// An `osr_cache` entry (#703). Loop regions never consult the callee registry (`LoadVar` is outside
+/// the region whitelist), so only the collision tail — plus the region bounds — needs re-validation.
+struct OsrEntry {
+    tail: CacheTail,
+    /// End of the compiled region. The key carries only `(fingerprint, header_ip)` (matching the old
+    /// address-based key's assumption that one header identifies one region); storing the end and
+    /// checking it on hit turns any violation of that assumption into a recompile, not a wrong region.
+    region_end: usize,
+    result: Option<LoopFn>,
+}
+
+/// Defensive bound on the JIT cache maps (`cache`, `osr_cache`, and the per-thread
+/// [`OSR_EXPAND_CACHE`] memo), overridable via `TISH_JIT_CACHE_CAP` (`0` ⇒ unbounded). With content
+/// keys the maps grow with DISTINCT program text, so a normal workload never approaches the cap; it
+/// exists so a degenerate embedder (eval-ing freshly generated program text per event, say) cannot
+/// grow the maps without bound. On overflow the code caches STOP CACHING new entries — they never
+/// evict: an evicted entry's executable page may be running on another thread and could not be
+/// unmapped anyway (pages are process-permanent), so eviction would only trade a map entry for a
+/// fresh page-burning recompile on the next lookup. The expand memo (pure re-computable analysis,
+/// no pages) clears instead.
+fn cache_cap() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("TISH_JIT_CACHE_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(65_536)
+    })
+}
+
+/// Does `chunk` reference any global name (a `LoadVar` op)? Such a chunk's compile result depends on
+/// the live callee registry — `LoadVar` of a registered name lowers to a native call, of an
+/// unregistered one bails compilation — so its cache entry needs registry re-validation (#703).
+/// Walks with `instruction_size` so an operand byte can't be mistaken for an opcode; malformed code
+/// is conservatively "sensitive".
+fn chunk_references_globals(chunk: &Chunk) -> bool {
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let op = match Opcode::from_u8(code[ip]) {
+            Some(o) => o,
+            None => return true,
+        };
+        if op == Opcode::LoadVar {
+            return true;
+        }
+        ip += match op.instruction_size(code, ip) {
+            Some(s) => s,
+            None => return true,
+        };
+    }
+    false
 }
 
 // SAFETY: `JITModule` is `!Send`, but the single instance lives behind the
@@ -594,6 +725,13 @@ thread_local! {
     /// times (e.g. nbody's `advance`), where recomputing per call is a real regression. A stale entry
     /// (a freed chunk's address reused) can only mis-route a perf hint: `run_osr`/`compile_loop_region`
     /// re-validate the region structurally + by fingerprint, so a wrong hint never miscompiles.
+    ///
+    /// #703: this memo stays ADDRESS-keyed — it sits on the per-back-edge hot path of every hot loop,
+    /// where an O(chunk) content hash per lookup would be a real regression — but with per-closure-
+    /// instance chunk clones an address key grows one ~64 B entry per instance, so [`osr_expand_cached`]
+    /// bounds it: at [`cache_cap`] entries the map is CLEARED and rebuilt. Clearing is safe precisely
+    /// because entries hold no code pages — they are pure loop-structure analysis, recomputed on the
+    /// next back-edge past the threshold.
     static OSR_EXPAND_CACHE: std::cell::RefCell<HashMap<(usize, usize), (usize, usize, bool, bool)>> =
         std::cell::RefCell::new(HashMap::new());
 }
@@ -852,6 +990,7 @@ fn jit() -> Option<&'static Mutex<JitGlobal>> {
                 math_binary_call_id,
                 jv_fns,
                 callees: HashMap::new(),
+                callees_gen: 0,
             })
         })
     })
@@ -867,25 +1006,35 @@ fn read_u16(code: &[u8], ip: &mut usize) -> Option<u16> {
     Some((a << 8) | b)
 }
 
-/// Content fingerprint of everything `compile_chunk` reads, so a cache entry can be validated against
-/// the chunk currently at a (possibly reused) address. FNV-1a over the compile-relevant fields:
-/// shape (`param_count`, `num_slots`, `rest_param_index`, `slot_based`), the full `code` bytes, and
-/// the `constants` (the JIT emits `f64const`/bool from `LoadConst`, so their values matter). The JIT
-/// makes no cross-chunk calls (`op_size` allows only `SelfCall`, which recurses into *this* function),
-/// so nothing outside the chunk affects the result — this fingerprint is complete. Deterministic
-/// within a process (fixed FNV constants, not a randomized hasher), which is all the cache needs.
-fn chunk_fingerprint(chunk: &Chunk) -> u64 {
-    // Mixes a u64 at a time (FNV-prime multiply + an avalanche shift). Eight bytes per round keeps
-    // this cheap on the hot closure-creation path; correctness only needs determinism + good
-    // distinction, not cryptographic strength.
+/// Content fingerprints of everything `compile_chunk` reads — `(primary, secondary)`. The primary
+/// hash is the cache KEY (#703: the caches are keyed on content identity, not chunk address, because
+/// the VM deep-clones a `Chunk` per closure instance); the secondary goes into the entry's
+/// [`CacheTail`] so a primary-key collision is detected as a miss rather than becoming a miscompile.
+/// Covers the compile-relevant fields: shape (`param_count`, `num_slots`, `rest_param_index`,
+/// `slot_based`), the full `code` bytes, the `constants` (the JIT emits `f64const`/bool from
+/// `LoadConst`, so their values matter), the `names` table (JV member lowering dispatches on
+/// `"length"`/`"push"` by name, and #187 `LoadVar` callee resolution is by name), and `global_name`
+/// (it drives the callee-registration side effect a hit replays). Together with the callee-registry
+/// state re-validated per entry (see [`NumEntry`]) and the process-stable `OnceLock` env flags, two
+/// chunks with equal fingerprints are interchangeable compile inputs. Deterministic within a process
+/// (fixed constants, not a randomized hasher), which is all the caches need.
+fn chunk_fingerprints(chunk: &Chunk) -> (u64, u64) {
+    // Mixes a u64 at a time into TWO accumulators in one pass. h1 is the original FNV-1a-style mix
+    // (FNV prime + avalanche shift); h2 uses a different offset basis, a golden-ratio pre-add, the
+    // murmur3-finalizer multiplier and a different shift — an independently-mixed hash family, so a
+    // simultaneous collision of both over identical-length inputs is ~2^-128. Eight bytes per round
+    // keeps this cheap on the hot closure-creation path.
     #[inline]
-    fn mix(h: &mut u64, v: u64) {
-        *h ^= v;
-        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        *h ^= *h >> 29;
+    fn mix(h: &mut (u64, u64), v: u64) {
+        h.0 ^= v;
+        h.0 = h.0.wrapping_mul(0x0000_0100_0000_01b3);
+        h.0 ^= h.0 >> 29;
+        h.1 ^= v.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        h.1 = h.1.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h.1 ^= h.1 >> 33;
     }
     #[inline]
-    fn mix_bytes(h: &mut u64, bytes: &[u8]) {
+    fn mix_bytes(h: &mut (u64, u64), bytes: &[u8]) {
         let mut it = bytes.chunks_exact(8);
         for w in &mut it {
             mix(h, u64::from_le_bytes(w.try_into().unwrap()));
@@ -898,7 +1047,7 @@ fn chunk_fingerprint(chunk: &Chunk) -> u64 {
         }
         mix(h, bytes.len() as u64);
     }
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h: (u64, u64) = (0xcbf2_9ce4_8422_2325, 0x6a09_e667_f3bc_c908);
     mix(&mut h, chunk.param_count as u64);
     mix(&mut h, chunk.num_slots as u64);
     mix(&mut h, chunk.rest_param_index as u64);
@@ -923,6 +1072,17 @@ fn chunk_fingerprint(chunk: &Chunk) -> u64 {
             }
         }
     }
+    mix(&mut h, chunk.names.len() as u64);
+    for n in &chunk.names {
+        mix_bytes(&mut h, n.as_bytes());
+    }
+    match &chunk.global_name {
+        Some(n) => {
+            mix(&mut h, 7);
+            mix_bytes(&mut h, n.as_bytes());
+        }
+        None => mix(&mut h, 8),
+    }
     h
 }
 
@@ -930,14 +1090,28 @@ fn chunk_fingerprint(chunk: &Chunk) -> u64 {
 /// Returns `None` if the chunk isn't a straight-line numeric function.
 /// #187: clear the directly-callable-callee registry at the start of each top-level program run, so a
 /// long-lived process (REPL / embedder) never resolves a callee registered by a PRIOR program (a name
-/// re-registered non-numerically would otherwise leave a stale native entry). Cross-callers aren't
-/// cached, so they always re-resolve against the freshly-populated registry.
+/// re-registered non-numerically would otherwise leave a stale native entry). #703: also bump the
+/// registry GENERATION — cached cross-callers ([`NumericFn::uses_xcall`]) are valid only within the
+/// generation they resolved their callees under, so after this every cross-caller re-resolves against
+/// the freshly-populated registry (by recompiling once, not once per closure creation).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn reset_callees() {
     if let Some(lock) = jit() {
         if let Ok(mut g) = lock.lock() {
             g.callees.clear();
+            g.callees_gen = g.callees_gen.wrapping_add(1);
         }
+    }
+}
+
+/// Test/diagnostic introspection (#703): entry counts of the process-global JIT caches,
+/// `(cache, osr_cache)`. The regression tests assert these stay flat while the same closure body is
+/// instantiated (and its per-instance chunk clone compiled) many times over.
+#[doc(hidden)]
+pub fn jit_cache_lens() -> (usize, usize) {
+    match jit().map(|lock| lock.lock()) {
+        Some(Ok(g)) => (g.cache.len(), g.osr_cache.len()),
+        _ => (0, 0),
     }
 }
 
@@ -949,23 +1123,77 @@ pub fn try_compile_numeric(chunk: &Chunk) -> Option<NumericFn> {
     {
         return None;
     }
-    let key = chunk as *const Chunk as usize;
-    let fp = chunk_fingerprint(chunk);
+    let (fp, fp2) = chunk_fingerprints(chunk);
     let lock = jit()?;
     let mut g = lock.lock().ok()?;
-    // Hit only counts if the fingerprint matches: otherwise this address was freed and reused by a
-    // *different* chunk, and the cached `NumericFn` is native code for the old one (a miscompile).
-    if let Some(&(cached_fp, cached)) = g.cache.get(&key) {
-        if cached_fp == fp {
-            return cached;
+    let gen = g.callees_gen;
+    let live_callees = g.callees.len() as u32;
+    if let Some(entry) = g.cache.get(&fp) {
+        // The tail must match — a bare 64-bit key collision would otherwise hand this chunk native
+        // code compiled from a DIFFERENT chunk (see [`CacheTail`]). Tail mismatch ⇒ recompile below
+        // (overwriting the colliding entry).
+        if entry.tail.matches(chunk, fp2) {
+            // Registry re-validation (#703):
+            //   * a compiled non-xcall body provably contains no `LoadVar` — valid forever;
+            //   * a cross-caller (`uses_xcall`) embeds callee ids proven stable only within its
+            //     compile generation — valid while the generation matches;
+            //   * a `None` for a globals-referencing chunk may exist only because a callee wasn't
+            //     registered yet — valid while the generation AND registry size are unchanged.
+            let valid = match entry.result {
+                Some(nf) if nf.uses_xcall => entry.callees_gen == gen,
+                Some(_) => true,
+                None => {
+                    !entry.registry_sensitive
+                        || (entry.callees_gen == gen && entry.callees_len == live_callees)
+                }
+            };
+            if valid {
+                let result = entry.result;
+                let callee_id = entry.callee_id;
+                // Replay the compile's registration side effect: without this, a program re-run in a
+                // long-lived process (registry cleared, every chunk a cache hit) would leave the
+                // registry empty and cross-function JIT calls would silently stop resolving. The id's
+                // finalized code is process-permanent, so re-registering it is always sound;
+                // `global_name` is part of the fingerprint, so it names the same source function.
+                if let (Some(id), Some(name), Some(nf)) =
+                    (callee_id, chunk.global_name.as_ref(), result)
+                {
+                    g.callees.insert(
+                        Arc::clone(name),
+                        CalleeEntry {
+                            id,
+                            arity: nf.arity,
+                        },
+                    );
+                }
+                return result;
+            }
         }
     }
     let result = compile_chunk(&mut g, chunk);
-    // #187: a function that embeds a native call to a registered callee is NOT cached — its callee
-    // address could go stale across programs in a long-lived process. It recompiles per closure
-    // creation (once, in practice), resolving against the live registry. Everything else caches.
-    if !result.is_some_and(|nf| nf.uses_xcall) {
-        g.cache.insert(key, (fp, result));
+    // Recover the callee id `compile_chunk` just registered (if it did — plain register-`f64`
+    // functions with a stable `global_name` only), so a later hit can replay the registration.
+    let callee_id = match (result, chunk.global_name.as_ref()) {
+        (Some(nf), Some(name))
+            if nf.array_param_mask == 0 && !nf.jv && !nf.recur_guarded && !nf.result_bool =>
+        {
+            g.callees.get(name).map(|e| e.id)
+        }
+        _ => None,
+    };
+    let entry = NumEntry {
+        tail: CacheTail::of(chunk, fp2),
+        result,
+        callee_id,
+        callees_gen: gen,
+        callees_len: g.callees.len() as u32,
+        registry_sensitive: chunk_references_globals(chunk),
+    };
+    // #703 defensive bound: at the cap, only overwrites of an existing key land — new entries are
+    // simply not cached (never evict; see [`cache_cap`]).
+    let cap = cache_cap();
+    if cap == 0 || g.cache.len() < cap || g.cache.contains_key(&fp) {
+        g.cache.insert(fp, entry);
     }
     result
 }
@@ -1080,27 +1308,46 @@ pub fn osr_expand_cached(
         let has_arrays = osr_region_has_arrays(chunk, th, te);
         let array_worthy = has_arrays && !osr_region_enclosed(chunk, th, te);
         let v = (th, te, has_arrays, array_worthy);
-        c.borrow_mut().insert(key, v);
+        let mut m = c.borrow_mut();
+        // #703: address-keyed per closure instance ⇒ unbounded growth under closure-minting
+        // workloads. Clear-on-full (NOT stop-caching, unlike the code caches): entries are pure
+        // recomputable analysis, so clearing costs one rescan per live hot loop and bounds the map.
+        let cap = cache_cap();
+        if cap != 0 && m.len() >= cap {
+            m.clear();
+        }
+        m.insert(key, v);
         v
     })
 }
 
 /// Compile the hot loop region `[header_ip, region_end)` of `chunk` to native code (#190 OSR), or
-/// `None` if it is not a pure-numeric slot loop. Cached per `(chunk, header_ip)` with a fingerprint
-/// guard (negative results included, so a non-compilable loop is scanned once). Called from the frame
-/// VM's `JumpBack` handler once a loop's back-edge counter crosses the trigger threshold.
+/// `None` if it is not a pure-numeric slot loop. Cached per `(content fingerprint, header_ip)` with
+/// the [`CacheTail`] collision guard (#703 — every closure instance of the same source function
+/// shares one compile; negative results included, so a non-compilable loop is scanned once, not once
+/// per closure instance). Called from the frame VM's `JumpBack` handler once a loop's back-edge
+/// counter crosses the trigger threshold.
 pub fn try_compile_loop(chunk: &Chunk, header_ip: usize, region_end: usize) -> Option<LoopFn> {
-    let key = (chunk as *const Chunk as usize, header_ip);
-    let fp = chunk_fingerprint(chunk);
+    let (fp, fp2) = chunk_fingerprints(chunk);
+    let key = (fp, header_ip);
     let lock = jit()?;
     let mut g = lock.lock().ok()?;
-    if let Some((cached_fp, cached)) = g.osr_cache.get(&key) {
-        if *cached_fp == fp {
-            return cached.clone();
+    if let Some(entry) = g.osr_cache.get(&key) {
+        if entry.tail.matches(chunk, fp2) && entry.region_end == region_end {
+            return entry.result.clone();
         }
     }
     let result = compile_loop_region(&mut g, chunk, header_ip, region_end);
-    g.osr_cache.insert(key, (fp, result.clone()));
+    let entry = OsrEntry {
+        tail: CacheTail::of(chunk, fp2),
+        region_end,
+        result: result.clone(),
+    };
+    // #703 defensive bound — same policy as the numeric cache: at the cap, overwrite-only.
+    let cap = cache_cap();
+    if cap == 0 || g.osr_cache.len() < cap || g.osr_cache.contains_key(&key) {
+        g.osr_cache.insert(key, entry);
+    }
     result
 }
 
@@ -2142,6 +2389,16 @@ fn compile_chunk(g: &mut JitGlobal, chunk: &Chunk) -> Option<NumericFn> {
         return None;
     }
     g.module.clear_context(&mut ctx);
+    // NOTE(#703 follow-up): one `finalize_definitions` per compiled function seals the memory
+    // provider's current allocation, so every function occupies its own page-aligned executable
+    // allocation (16 KB on macOS arm64, 4 KB on x86-64) that is never unmapped. With the caches
+    // content-keyed, compiles are bounded by distinct program text, so this is a bounded per-function
+    // overhead rather than a leak — but packing functions tighter would need `finalize_definitions`
+    // batched across compiles (the function pointer is needed immediately here, so that is a
+    // call-site restructure), and cranelift's `ArenaMemoryProvider` alone does not help: its
+    // `finalize` marks segments finalized too, so the next allocation opens a fresh page-aligned
+    // segment. A per-program `JITModule` dropped with `free_memory` at teardown is the only way to
+    // actually return code pages to a REPL/multi-program embedder.
     if g.module.finalize_definitions().is_err() {
         return None;
     }
@@ -4274,9 +4531,9 @@ mod tests {
     /// none compiles — so a change that makes the JIT silently *stop* compiling the target (the exact
     /// "vacuous fixture" miss that motivated this guard) fails loudly instead of passing emptily.
     ///
-    /// Bypasses [`try_compile_numeric`]'s cache and calls [`compile_chunk`] directly: the cache is
-    /// keyed by chunk address, unique-and-stable in a real run but reused across this test's transient
-    /// chunks. Compiling fresh is correct here and still exercises the real lowering path.
+    /// Bypasses [`try_compile_numeric`]'s (content-keyed, #703) cache and calls [`compile_chunk`]
+    /// directly, so every fixture exercises the real lowering path fresh instead of possibly
+    /// returning another test's cached compile.
     fn jit_arity2(src: &str) -> NumericFn {
         let prog = tishlang_parser::parse(src).expect("parse");
         let opt = tishlang_opt::optimize(&prog);
@@ -4310,7 +4567,7 @@ mod tests {
     }
 
     /// #189: compile the first JV (function-local `f64` array) nested fn in `src` via `compile_chunk`,
-    /// bypassing the address-keyed cache (see [`jit_arity2`]). Panics if none compiles JV — so a change
+    /// bypassing the content-keyed cache (see [`jit_arity2`]). Panics if none compiles JV — so a change
     /// that makes the classifier or lowering silently stop accepting the target fails loudly.
     fn jit_jv(src: &str) -> NumericFn {
         let prog = tishlang_parser::parse(src).expect("parse");
@@ -4775,9 +5032,10 @@ mod tests {
     }
 
     /// Regression for the address-reuse stale hit (#247): compile one function, then overwrite the SAME
-    /// heap `Chunk` (same address = the cache key) with a *different* function — what a long-lived
-    /// process (REPL / multi-script embedder) does when a freed chunk address is reused. Before the
-    /// fingerprint check the cache returned the first function's native code for the second.
+    /// heap `Chunk` (same address) with a *different* function — what a long-lived process (REPL /
+    /// multi-script embedder) does when a freed chunk address is reused. Originally this exercised the
+    /// fingerprint-on-hit guard over the address-keyed cache; since #703 the cache key IS the content
+    /// fingerprint, so distinct content can never share an entry — kept as a permanent behavior guard.
     #[test]
     fn jit_cache_detects_address_reuse() {
         let mut boxed: Box<Chunk> = Box::new(fn_chunk("const f = (a, b) => a - b\nf(0, 0)\n"));
@@ -4927,5 +5185,153 @@ mod tests {
         let mut got = buf.clone();
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(got, vec![20.0, 90.0], "s=90 (0+2+…+18), i=20");
+    }
+
+    /// #703 REGRESSION — the leak class: the VM deep-clones a `Chunk` per closure instance, so the
+    /// old address-keyed cache treated every instance as a novel compile — one sealed, never-freed
+    /// executable page each (measured ~18 KB per closure creation with instances retained). Content
+    /// keys must dedupe: N live clones of one chunk (distinct heap addresses, exactly like N live
+    /// closure instances) share ONE compile and ONE cache entry.
+    #[test]
+    fn jit_cache_content_identity_dedupes_cloned_chunks() {
+        // Unique constants ⇒ a fingerprint no other test's chunk shares, so the deltas observed here
+        // are our own even though the whole test binary shares the process-global JIT.
+        let chunk = fn_chunk("function f(a, b) { return a * 703.0625 + b * 1219.5 }\nf(0, 0)\n");
+        let (cache_before, _) = jit_cache_lens();
+        let first = try_compile_numeric(&chunk).expect("numeric fn must compile");
+        let mut keep: Vec<Box<Chunk>> = Vec::new(); // live clones ⇒ malloc can't recycle addresses
+        for _ in 0..200 {
+            let clone = Box::new(chunk.clone());
+            let f = try_compile_numeric(&clone).expect("clone must hit the cache");
+            // Compiled code is finalized at a process-unique, never-freed address, so pointer
+            // equality holds iff the lookup HIT — a recompile would finalize new code elsewhere.
+            assert_eq!(
+                f.ptr, first.ptr,
+                "cloned chunk must reuse the cached compile"
+            );
+            keep.push(clone);
+        }
+        let (cache_after, _) = jit_cache_lens();
+        // Ours is exactly one entry; the slack absorbs unrelated entries from tests running in
+        // parallel in this process. Pre-#703 this loop grew the cache by ~200 (one per clone).
+        assert!(
+            cache_after.saturating_sub(cache_before) < 50,
+            "content-keyed cache must not grow per closure instance ({cache_before} -> {cache_after})"
+        );
+        assert_eq!(first.call(&[2.0, 4.0]), 2.0 * 703.0625 + 4.0 * 1219.5);
+    }
+
+    /// #703 REGRESSION — negative results ("not JIT-eligible") are content-keyed too: N clones of a
+    /// non-numeric body leave one cache entry, not one permanent ~56 B entry per closure instance
+    /// (the issue's fully-dropped variant still leaked partly through these).
+    #[test]
+    fn jit_cache_negative_entries_dedupe() {
+        let chunk = fn_chunk("function g(a, b) { return \"x703\" + a + b }\ng(0, 0)\n");
+        let (before, _) = jit_cache_lens();
+        assert!(
+            try_compile_numeric(&chunk).is_none(),
+            "string body must not JIT"
+        );
+        let mut keep: Vec<Box<Chunk>> = Vec::new();
+        for _ in 0..200 {
+            let clone = Box::new(chunk.clone());
+            assert!(try_compile_numeric(&clone).is_none());
+            keep.push(clone);
+        }
+        let (after, _) = jit_cache_lens();
+        assert!(
+            after.saturating_sub(before) < 50,
+            "negative entries must dedupe by content ({before} -> {after})"
+        );
+    }
+
+    /// #703 REGRESSION — the same dedupe for the OSR loop-region cache: per-instance chunk clones of
+    /// one hot-loop function must share one region compile and one `osr_cache` entry.
+    #[test]
+    fn osr_cache_content_identity_dedupes_cloned_chunks() {
+        let chunk = top_chunk(
+            "let s = 0.0\nlet i = 0.0\nwhile (i < 703.25) { s = s + i * 1.0009765625; i = i + 1.0 }\n",
+        );
+        let (_, osr_before) = jit_cache_lens();
+        let (header, end) = first_region(&chunk);
+        let first = try_compile_loop(&chunk, header, end).expect("numeric loop must OSR-compile");
+        let mut keep: Vec<Box<Chunk>> = Vec::new();
+        for _ in 0..100 {
+            let clone = Box::new(chunk.clone());
+            let lf = try_compile_loop(&clone, header, end).expect("clone must hit the osr cache");
+            assert_eq!(
+                lf.ptr, first.ptr,
+                "cloned chunk must reuse the cached region compile"
+            );
+            keep.push(clone);
+        }
+        let (_, osr_after) = jit_cache_lens();
+        assert!(
+            osr_after.saturating_sub(osr_before) < 50,
+            "content-keyed osr_cache must not grow per closure instance ({osr_before} -> {osr_after})"
+        );
+    }
+
+    /// #703 — cross-callers (`uses_xcall`) are cached WITHIN a callee-registry generation (pre-fix
+    /// they recompiled — and burned a fresh executable page — on EVERY closure creation), are
+    /// invalidated at a program boundary (`reset_callees`), and a cache hit on the callee replays
+    /// its registration so a re-run of the same program resolves cross-calls again.
+    /// NOTE: like [`jit_cross_function_call_matches_closed_form`], this touches the process-global
+    /// callee registry and assumes no concurrent `reset_callees` (nextest isolates per process).
+    #[test]
+    fn jit_xcall_cached_per_generation_and_replays_registration() {
+        // Unique global names — the registry is shared with any parallel test in this process.
+        // Caller shape mirrors [`jit_cross_function_call_matches_closed_form`] (the proven
+        // xcall-compilable shape): sum_{i<n} sq703g(i) with sq703g(x) = 31.5x ⇒ 31.5·n(n-1)/2.
+        let src = "function sq703g(x) { return x * 31.5 }\n\
+                   function call703g(n) {\n\
+                     let s = 0\n\
+                     let i = 0\n\
+                     while (i < n) { s = s + sq703g(i); i = i + 1 }\n\
+                     return s\n\
+                   }\n\
+                   call703g(0)\n";
+        let prog = tishlang_parser::parse(src).expect("parse");
+        let opt = tishlang_opt::optimize(&prog);
+        let top = tishlang_bytecode::compile(&opt).expect("compile");
+        let find = |name: &str| {
+            top.nested
+                .iter()
+                .find(|n| n.global_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("no top-level chunk named {name}"))
+                .clone()
+        };
+        let sq = find("sq703g");
+        let caller = find("call703g");
+
+        try_compile_numeric(&sq).expect("callee must compile (and register)");
+        let c1 = caller.clone();
+        let f1 = try_compile_numeric(&c1).expect("cross-caller must compile");
+        assert!(f1.uses_xcall, "caller embeds a native call to sq703g");
+        let c2 = caller.clone();
+        let f2 = try_compile_numeric(&c2).expect("cross-caller must hit the cache");
+        assert_eq!(
+            f2.ptr, f1.ptr,
+            "xcall entry must be cached within one generation"
+        );
+        assert_eq!(f1.call(&[4.0]), 31.5 * (4.0 * 3.0) / 2.0); // 31.5·n(n-1)/2 for n=4
+
+        // Program boundary: the generation bump must invalidate the cached cross-caller. With no
+        // callee registered in the new generation the chunk can't compile at all (LoadVar bails) —
+        // proving the stale-generation entry was NOT returned.
+        reset_callees();
+        let c3 = caller.clone();
+        assert!(
+            try_compile_numeric(&c3).is_none(),
+            "stale-generation xcall entry must miss after reset_callees"
+        );
+        // A cache HIT on the callee must replay its registration into the new generation; the
+        // registry growth then retries the caller's negative entry, which recompiles as xcall.
+        try_compile_numeric(&sq).expect("callee hit must still return its cached compile");
+        let c4 = caller.clone();
+        let f4 =
+            try_compile_numeric(&c4).expect("caller must recompile once the callee re-registers");
+        assert!(f4.uses_xcall);
+        assert_eq!(f4.call(&[4.0]), 31.5 * (4.0 * 3.0) / 2.0);
     }
 }
