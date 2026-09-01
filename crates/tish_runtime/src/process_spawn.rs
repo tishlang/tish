@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 
 use tishlang_core::Value;
 
-use crate::stream_buf::{drain_stream, is_drained, new_buf, retire_buf, spawn_reader, SharedBuf};
+use crate::stream_buf::{
+    drain_stream, is_drained, new_buf, retire_buf, spawn_reader, spawn_side_reader, SharedBuf,
+};
 
 struct ProcSession {
     child: Mutex<Child>,
@@ -252,7 +254,9 @@ pub fn process_spawn(args: &[Value]) -> Value {
     let out = new_buf();
     let err = new_buf();
     spawn_reader(stdout, out.clone());
-    spawn_reader(stderr, err.clone());
+    // stderr is a SIDE channel programs may never read: DropOldest, not Park — parking would
+    // block the child's stderr write(2) at the cap and freeze its stdout with it.
+    spawn_side_reader(stderr, err.clone());
 
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let session = ProcSession {

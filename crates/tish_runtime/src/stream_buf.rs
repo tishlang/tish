@@ -65,21 +65,42 @@ pub(crate) fn max_stream_buf() -> usize {
     })
 }
 
-/// Reader thread: block on the fd, append bytes (parking at the cap), wake any waiting
-/// reader; mark EOF on 0/err.
-pub(crate) fn spawn_reader<R: Read + Send + 'static>(r: R, buf: SharedBuf) {
-    let cap = max_stream_buf();
-    std::thread::spawn(move || reader_loop(r, buf, cap));
+/// What a reader thread does when its buffer hits the cap.
+///
+/// - `Park`: wait for a drain — the OS pipe/socket fills and the PRODUCER blocks. Correct for
+///   streams the caller consumes by definition (child stdout, sockets, pty output): the cap
+///   becomes real end-to-end backpressure.
+/// - `DropOldest`: discard the oldest buffered bytes to make room and keep reading. Correct
+///   for SIDE channels the caller may legitimately never read (child stderr): parking there
+///   would block the child's stderr write(2) once the pipe also fills, which freezes its
+///   stdout too — turning the old unbounded-growth bug into a deadlock for any program that
+///   ignores stderr. Dropping from the FRONT keeps the newest output (the part a late reader
+///   actually wants); the mid-UTF-8 cut this can produce is exactly what the lossy invalid-
+///   prefix path in `drain_stream` already handles.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CapMode {
+    Park,
+    DropOldest,
 }
 
-/// The reader-thread body, cap-injectable for tests.
-pub(crate) fn reader_loop<R: Read>(mut r: R, buf: SharedBuf, cap: usize) {
+/// Reader thread with `Park` semantics — for streams the caller consumes (stdout/net/pty).
+pub(crate) fn spawn_reader<R: Read + Send + 'static>(r: R, buf: SharedBuf) {
+    let cap = max_stream_buf();
+    std::thread::spawn(move || reader_loop(r, buf, cap, CapMode::Park));
+}
+
+/// Reader thread with `DropOldest` semantics — for side channels (child stderr).
+pub(crate) fn spawn_side_reader<R: Read + Send + 'static>(r: R, buf: SharedBuf) {
+    let cap = max_stream_buf();
+    std::thread::spawn(move || reader_loop(r, buf, cap, CapMode::DropOldest));
+}
+
+/// The reader-thread body, cap/mode-injectable for tests.
+pub(crate) fn reader_loop<R: Read>(mut r: R, buf: SharedBuf, cap: usize, mode: CapMode) {
     let mut tmp = [0u8; 8192];
     loop {
-        // Backpressure: while the buffer is at capacity, park until a drain (or retirement)
-        // makes room. The producer then blocks on the full OS pipe/socket instead of growing
-        // our heap.
-        {
+        // At capacity: park until a drain (or retirement) makes room — Park mode only.
+        if mode == CapMode::Park {
             let (lock, cv) = &*buf;
             let mut b = match lock.lock() {
                 Ok(b) => b,
@@ -107,6 +128,10 @@ pub(crate) fn reader_loop<R: Read>(mut r: R, buf: SharedBuf, cap: usize) {
                         return;
                     }
                     b.data.extend_from_slice(&tmp[..n]);
+                    if mode == CapMode::DropOldest && b.data.len() > cap {
+                        let overflow = b.data.len() - cap;
+                        b.data.drain(..overflow);
+                    }
                 }
                 cv.notify_all();
             }
@@ -293,7 +318,8 @@ mod tests {
         const CAP: usize = 16 * 1024;
         let buf = new_buf();
         let b2 = buf.clone();
-        let handle = std::thread::spawn(move || reader_loop(std::io::repeat(b'x'), b2, CAP));
+        let handle =
+            std::thread::spawn(move || reader_loop(std::io::repeat(b'x'), b2, CAP, CapMode::Park));
 
         // Fills to the cap, then parks. Cap is approximate up to one 8 KiB chunk.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -356,6 +382,38 @@ mod tests {
             g.data.capacity() <= 64 * 1024,
             "capacity not released: {}",
             g.data.capacity()
+        );
+    }
+
+    /// DropOldest (side channels): the reader never parks; at the cap the OLDEST bytes are
+    /// discarded so the newest survive — a child spewing stderr can neither grow the buffer
+    /// past the cap nor be write-blocked by us.
+    #[test]
+    fn side_reader_drops_oldest_and_never_parks() {
+        const CAP: usize = 32 * 1024;
+        let b = new_buf();
+        let b2 = b.clone();
+        // 1 MiB of 'a' then a tail of 'z': far past the cap; a parking reader would hang here.
+        let mut data = vec![b'a'; 1024 * 1024];
+        data.extend_from_slice(&[b'z'; 128]);
+        let handle = std::thread::spawn(move || {
+            reader_loop(std::io::Cursor::new(data), b2, CAP, CapMode::DropOldest)
+        });
+        handle
+            .join()
+            .expect("side reader must run to EOF without parking");
+        let (lock, _) = &*b;
+        let g = lock.lock().unwrap();
+        assert!(g.eof);
+        assert!(
+            g.data.len() <= CAP + 8192,
+            "cap not enforced: {}",
+            g.data.len()
+        );
+        assert_eq!(
+            &g.data[g.data.len() - 128..],
+            &[b'z'; 128][..],
+            "newest bytes must survive"
         );
     }
 }
