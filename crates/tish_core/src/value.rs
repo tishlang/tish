@@ -847,11 +847,15 @@ impl PropMap {
             // Update existing key → value changes, layout (shape) does not.
             return Some(core::mem::replace(&mut slot.1, val));
         }
-        // New key (inline storage) → transition the shape away from the current one.
-        self.shape = crate::shape::transition(self.shape, &key);
         if self.inline.len() >= PROPMAP_INLINE {
-            // Promote inline storage to an insertion-ordered map (keys + their order are preserved,
-            // so the shape stays valid).
+            // Promote inline storage to an insertion-ordered map — and DEMOTE to dictionary
+            // mode. An object growing past PROPMAP_INLINE keys one insert at a time is being
+            // used as a map (`cache[k] = v`), and continuing to transition would intern a
+            // permanent registry node per novel key, forever (#701). Inline caches lose only
+            // the 9+-key tail, whose slot lookups already go through the IndexMap.
+            // NOTE: the transition for THIS key is deliberately skipped (checked before the
+            // old transition call site so the 9th-key edge is never minted).
+            self.shape = crate::shape::DICT_SHAPE;
             let mut m: IndexMap<Arc<str>, Value, RandomState> =
                 IndexMap::with_capacity_and_hasher(self.inline.len() + 1, RandomState::default());
             for (k, v) in self.inline.drain(..) {
@@ -861,6 +865,8 @@ impl PropMap {
             self.map = Some(Box::new(m));
             return None;
         }
+        // New key (inline storage) → transition the shape away from the current one.
+        self.shape = crate::shape::transition(self.shape, &key);
         self.inline.push((key, val));
         None
     }
@@ -2064,6 +2070,94 @@ mod number_to_string_tests {
         for &(value, expected) in cases {
             assert_eq!(js_number_to_string(value), expected, "for {value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod shape_backstop_tests {
+    use super::*;
+
+    // The registry is process-global, so these tests serialize on one lock (parallel
+    // siblings would observe each other's minting) and still use small margins for
+    // unrelated tests running elsewhere in the binary. The leaks these guard against
+    // mint THOUSANDS of nodes per loop, so the margins cannot mask a regression.
+    static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn locked() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// #701 pathology A: fresh `{}` objects each taking a novel first key. Pre-fix this
+    /// minted one EMPTY_SHAPE edge per iteration; the fan-out cap must bound it.
+    #[test]
+    fn fresh_object_novel_first_key_is_bounded() {
+        let _g = locked();
+        let before = crate::shape::shape_count();
+        for i in 0..10_000 {
+            let mut pm = PropMap::new();
+            pm.insert(format!("first-key-backstop-a-{i}").into(), Value::Number(i as f64));
+        }
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 256 + 64, "fan-out cap failed: registry grew by {grown}");
+    }
+
+    /// #701 pathology B: one object accumulating novel keys (`cache[k] = v`). Promotion at
+    /// PROPMAP_INLINE must demote to DICT_SHAPE and stop minting entirely.
+    #[test]
+    fn growing_dictionary_demotes_and_stops_minting() {
+        let _g = locked();
+        let mut pm = PropMap::new();
+        for i in 0..8 {
+            pm.insert(format!("dict-backstop-warm-{i}").into(), Value::Number(i as f64));
+        }
+        let before = crate::shape::shape_count();
+        for i in 0..10_000 {
+            pm.insert(format!("dict-backstop-b-{i}").into(), Value::Number(i as f64));
+        }
+        assert_eq!(pm.shape(), crate::shape::DICT_SHAPE, "promotion must demote to dict mode");
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 64, "dictionary keys kept minting: registry grew by {grown}");
+        assert_eq!(pm.len(), 10_008);
+        assert!(matches!(pm.get("dict-backstop-b-9999"), Some(Value::Number(_))));
+    }
+
+    /// #706 shape of the JSON.parse pathology: repeated small objects whose key SET varies
+    /// per iteration. Depth/fan-out caps must bound total registry growth.
+    #[test]
+    fn novel_key_pairs_are_bounded() {
+        let _g = locked();
+        let before = crate::shape::shape_count();
+        for i in 0..10_000 {
+            let mut pm = PropMap::new();
+            pm.insert(format!("json-backstop-{i}").into(), Value::Number(1.0));
+            pm.insert("b".into(), Value::Number(2.0));
+        }
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 2 * 256 + 64, "novel key pairs unbounded: registry grew by {grown}");
+    }
+
+    /// The intended fast path must still intern and DEDUPE: repeating the same fixed-order
+    /// construction mints its chain once, and the objects keep a real (non-dict) shape.
+    #[test]
+    fn fixed_shape_construction_still_dedupes_and_tracks() {
+        let _g = locked();
+        let mk = || {
+            let mut pm = PropMap::new();
+            pm.insert("fixed-backstop-x".into(), Value::Number(1.0));
+            pm.insert("fixed-backstop-y".into(), Value::Number(2.0));
+            pm.insert("fixed-backstop-z".into(), Value::Number(3.0));
+            pm
+        };
+        let first = mk();
+        let before = crate::shape::shape_count();
+        let mut last_shape = first.shape();
+        for _ in 0..5_000 {
+            let pm = mk();
+            assert_ne!(pm.shape(), crate::shape::DICT_SHAPE, "small fixed objects must stay tracked");
+            last_shape = pm.shape();
+        }
+        assert_eq!(last_shape, first.shape(), "identical construction must share one shape");
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 96, "fixed-shape loop should not mint: registry grew by {grown}");
     }
 }
 
