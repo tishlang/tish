@@ -1060,12 +1060,12 @@ impl<'a> Compiler<'a> {
             self.emit_u16(Opcode::ArgMissing, i as u16);
             let skip = self.emit_jump(Opcode::JumpIfFalse);
             self.compile_expr(default_expr)?;
-            let slot = self
-                .slot_ctx
-                .as_ref()
-                .and_then(|m| m.get(tp.name.as_ref()))
-                .copied();
-            match slot {
+            // #727: resolve through BOTH slot maps (`resolve_slot`), not `slot_ctx` alone. In
+            // GENERAL slot mode params live in `slot_scopes` (declared before this prologue) and
+            // every read of the param lowers to `LoadLocal <slot>` — a `DeclareVarPlain` here wrote
+            // the default into the name-based scope map no read resolves to, leaving the slot's
+            // missing-arg `Null` visible (`f(a, b = 5); f(1)` → `1 + null` → NaN).
+            match self.resolve_slot(tp.name.as_ref()) {
                 Some(slot) => self.emit_u16(Opcode::StoreLocal, slot),
                 None => {
                     let idx = self.name_idx(&tp.name);
