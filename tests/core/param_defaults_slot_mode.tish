@@ -1,0 +1,44 @@
+// #727: default parameter values in VM general slot mode. A body local (`let c`) breaks
+// the param-only fast path; nothing captured, so the chunk compiles in GENERAL slot mode
+// — the applied default must land in the param's frame slot, where reads resolve.
+// Behavior must be identical across interp / vm / native and with TISH_VM_SLOTS=0.
+
+function f(a, b = 5) {
+  let c = a + b
+  return c
+}
+console.log(f(1))
+console.log(f(1, 2))
+
+// Default referencing an EARLIER param (already slot-bound when the default runs).
+function dep(a, b = a + 1) {
+  let c = a + b
+  return c
+}
+console.log(dep(3))
+console.log(dep(3, 10))
+
+// Chained dependent defaults.
+function chain(a, b = a * 2, c = b + a) {
+  let out = [a, b, c]
+  return out[0] + "," + out[1] + "," + out[2]
+}
+console.log(chain(3))
+console.log(chain(3, 10))
+
+// Slot-DISQUALIFIED (the param is captured by a nested fn): name-based path, unchanged.
+function g(a, b = 5) {
+  function h() { return b }
+  let c = a + h()
+  return c
+}
+console.log(g(1))
+console.log(g(1, 2))
+
+// An explicit null is NOT a missing arg: the default must not apply.
+function keepNull(a, b = 5) {
+  let isNull = b === null
+  return isNull
+}
+console.log(keepNull(1, null))
+console.log(keepNull(1))
