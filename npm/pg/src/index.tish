@@ -7,6 +7,11 @@
 //   const stmt = prepare(client, 'SELECT id, message FROM fortune')
 //   const rows = queryPrepared(client, stmt, [])
 //
+//   // prepare is idempotent per (client, sql) — re-preparing identical
+//   // SQL returns the same handle. Free one handle with unprepare(stmt);
+//   // close(client) deallocates everything prepared on that client.
+//   unprepare(stmt)
+//
 //   // Many queries pipelined on one client (concurrent on the wire,
 //   // sequential on the server side):
 //   const results = queryAll(client, [
@@ -21,6 +26,7 @@ import {
   per_worker_client as _perWorkerClient,
   connect as _connect,
   prepare as _prepare,
+  unprepare as _unprepare,
   query_prepared as _queryPrepared,
   query_all as _queryAll,
   migrate as _migrate,
@@ -30,6 +36,7 @@ import {
 export const perWorkerClient = _perWorkerClient
 export const connect = _connect
 export const prepare = _prepare
+export const unprepare = _unprepare
 export const queryPrepared = _queryPrepared
 export const queryAll = _queryAll
 export const migrate = _migrate

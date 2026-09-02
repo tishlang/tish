@@ -16,6 +16,10 @@ pub(crate) fn register_bytecode_native_modules(vm: &mut tishlang_vm::Vm) {
     om.insert(Arc::from("connect"), Value::native(tishlang_pg::connect));
     om.insert(Arc::from("prepare"), Value::native(tishlang_pg::prepare));
     om.insert(
+        Arc::from("unprepare"),
+        Value::native(tishlang_pg::unprepare),
+    );
+    om.insert(
         Arc::from("query_prepared"),
         Value::native(tishlang_pg::query_prepared),
     );
