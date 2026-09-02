@@ -15,24 +15,54 @@ use crate::http::{
     MultipartPart,
 };
 
-// --- Promises (Send payloads only; Value built on awaiting thread) ---
+// --- Promises (Send payloads only; Value built on awaiting/settling thread) ---
+//
+// These are one-shot by construction (the oneshot receiver is taken by the first
+// await OR the first race subscription). `subscribe` awaits the oneshot as a task
+// on the shared subscriber runtime instead of parking a blocking OS thread (plus
+// a per-call tokio runtime) per raced input — issue #702.
+
+fn consumed() -> Value {
+    Value::String("Promise already consumed".into())
+}
 
 struct FetchResponsePromise {
     rx: Mutex<Option<tokio::sync::oneshot::Receiver<Result<reqwest::Response, String>>>>,
+}
+
+impl FetchResponsePromise {
+    fn convert(
+        r: Result<Result<reqwest::Response, String>, tokio::sync::oneshot::error::RecvError>,
+    ) -> std::result::Result<Value, Value> {
+        match r {
+            Ok(Ok(resp)) => Ok(response_value_from_reqwest(resp)),
+            Ok(Err(e)) => Ok(build_error_response(&e)),
+            Err(_) => Err(Value::String("Promise dropped".into())),
+        }
+    }
 }
 
 impl TishPromise for FetchResponsePromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
         let rx = self.rx.lock().unwrap().take();
         if let Some(rx) = rx {
-            let r = crate::http::block_on_http(rx);
-            match r {
-                Ok(Ok(resp)) => Ok(response_value_from_reqwest(resp)),
-                Ok(Err(e)) => Ok(build_error_response(&e)),
-                Err(_) => Err(Value::String("Promise dropped".into())),
-            }
+            Self::convert(crate::http::block_on_http(rx))
         } else {
-            Err(Value::String("Promise already consumed".into()))
+            Err(consumed())
+        }
+    }
+
+    fn subscribe(
+        self: Arc<Self>,
+        on_settled: Box<dyn FnOnce(std::result::Result<Value, Value>) + Send>,
+    ) {
+        match self.rx.lock().unwrap().take() {
+            Some(rx) => {
+                crate::http::subscriber_runtime().spawn(async move {
+                    on_settled(Self::convert(rx.await));
+                });
+            }
+            None => on_settled(Err(consumed())),
         }
     }
 }
@@ -46,27 +76,52 @@ struct FetchAllResponsesPromise {
     >,
 }
 
+impl FetchAllResponsesPromise {
+    #[allow(clippy::type_complexity)]
+    fn convert(
+        r: Result<
+            Result<Vec<Result<reqwest::Response, String>>, String>,
+            tokio::sync::oneshot::error::RecvError,
+        >,
+    ) -> std::result::Result<Value, Value> {
+        match r {
+            Ok(Ok(vec)) => {
+                let out: Vec<Value> = vec
+                    .into_iter()
+                    .map(|x| {
+                        x.map(response_value_from_reqwest)
+                            .unwrap_or_else(|e| build_error_response(&e))
+                    })
+                    .collect();
+                Ok(Value::Array(VmRef::new(out)))
+            }
+            Ok(Err(e)) => Ok(build_error_response(&e)),
+            Err(_) => Err(Value::String("Promise dropped".into())),
+        }
+    }
+}
+
 impl TishPromise for FetchAllResponsesPromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
         let rx = self.rx.lock().unwrap().take();
         if let Some(rx) = rx {
-            let r = crate::http::block_on_http(rx);
-            match r {
-                Ok(Ok(vec)) => {
-                    let out: Vec<Value> = vec
-                        .into_iter()
-                        .map(|x| {
-                            x.map(response_value_from_reqwest)
-                                .unwrap_or_else(|e| build_error_response(&e))
-                        })
-                        .collect();
-                    Ok(Value::Array(VmRef::new(out)))
-                }
-                Ok(Err(e)) => Ok(build_error_response(&e)),
-                Err(_) => Err(Value::String("Promise dropped".into())),
-            }
+            Self::convert(crate::http::block_on_http(rx))
         } else {
-            Err(Value::String("Promise already consumed".into()))
+            Err(consumed())
+        }
+    }
+
+    fn subscribe(
+        self: Arc<Self>,
+        on_settled: Box<dyn FnOnce(std::result::Result<Value, Value>) + Send>,
+    ) {
+        match self.rx.lock().unwrap().take() {
+            Some(rx) => {
+                crate::http::subscriber_runtime().spawn(async move {
+                    on_settled(Self::convert(rx.await));
+                });
+            }
+            None => on_settled(Err(consumed())),
         }
     }
 }
@@ -80,34 +135,55 @@ struct ReadChunkPromise {
     rx: Mutex<Option<tokio::sync::oneshot::Receiver<Result<ReadChunk, String>>>>,
 }
 
+impl ReadChunkPromise {
+    fn convert(
+        r: Result<Result<ReadChunk, String>, tokio::sync::oneshot::error::RecvError>,
+    ) -> std::result::Result<Value, Value> {
+        match r {
+            Ok(Ok(ReadChunk::Done)) => {
+                let mut o = ObjectMap::default();
+                o.insert(Arc::from("done"), Value::Bool(true));
+                o.insert(Arc::from("value"), Value::Null);
+                Ok(Value::object(o))
+            }
+            Ok(Ok(ReadChunk::Bytes(b))) => {
+                let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
+                let mut o = ObjectMap::default();
+                o.insert(Arc::from("done"), Value::Bool(false));
+                o.insert(Arc::from("value"), Value::Array(VmRef::new(arr)));
+                Ok(Value::object(o))
+            }
+            Ok(Err(e)) => Err({
+                let mut obj = ObjectMap::default();
+                obj.insert(Arc::from("error"), Value::String(e.into()));
+                Value::object(obj)
+            }),
+            Err(_) => Err(Value::String("Promise dropped".into())),
+        }
+    }
+}
+
 impl TishPromise for ReadChunkPromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
         let rx = self.rx.lock().unwrap().take();
         if let Some(rx) = rx {
-            let r = crate::http::block_on_http(rx);
-            match r {
-                Ok(Ok(ReadChunk::Done)) => {
-                    let mut o = ObjectMap::default();
-                    o.insert(Arc::from("done"), Value::Bool(true));
-                    o.insert(Arc::from("value"), Value::Null);
-                    Ok(Value::object(o))
-                }
-                Ok(Ok(ReadChunk::Bytes(b))) => {
-                    let arr: Vec<Value> = b.iter().map(|u| Value::Number(*u as f64)).collect();
-                    let mut o = ObjectMap::default();
-                    o.insert(Arc::from("done"), Value::Bool(false));
-                    o.insert(Arc::from("value"), Value::Array(VmRef::new(arr)));
-                    Ok(Value::object(o))
-                }
-                Ok(Err(e)) => Err({
-                    let mut obj = ObjectMap::default();
-                    obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::object(obj)
-                }),
-                Err(_) => Err(Value::String("Promise dropped".into())),
-            }
+            Self::convert(crate::http::block_on_http(rx))
         } else {
-            Err(Value::String("Promise already consumed".into()))
+            Err(consumed())
+        }
+    }
+
+    fn subscribe(
+        self: Arc<Self>,
+        on_settled: Box<dyn FnOnce(std::result::Result<Value, Value>) + Send>,
+    ) {
+        match self.rx.lock().unwrap().take() {
+            Some(rx) => {
+                crate::http::subscriber_runtime().spawn(async move {
+                    on_settled(Self::convert(rx.await));
+                });
+            }
+            None => on_settled(Err(consumed())),
         }
     }
 }
@@ -116,29 +192,47 @@ struct JsonTextPromise {
     rx: Mutex<Option<tokio::sync::oneshot::Receiver<Result<String, String>>>>,
 }
 
+impl JsonTextPromise {
+    fn convert(
+        r: Result<Result<String, String>, tokio::sync::oneshot::error::RecvError>,
+    ) -> std::result::Result<Value, Value> {
+        fn error_obj(e: String) -> Value {
+            let mut obj = ObjectMap::default();
+            obj.insert(Arc::from("error"), Value::String(e.into()));
+            Value::object(obj)
+        }
+        match r {
+            Ok(Ok(s)) => match tishlang_core::json_parse(&s) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(error_obj(e)),
+            },
+            Ok(Err(e)) => Err(error_obj(e)),
+            Err(_) => Err(Value::String("Promise dropped".into())),
+        }
+    }
+}
+
 impl TishPromise for JsonTextPromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
         let rx = self.rx.lock().unwrap().take();
         if let Some(rx) = rx {
-            let r = crate::http::block_on_http(rx);
-            match r {
-                Ok(Ok(s)) => match tishlang_core::json_parse(&s) {
-                    Ok(v) => Ok(v),
-                    Err(e) => Err({
-                        let mut obj = ObjectMap::default();
-                        obj.insert(Arc::from("error"), Value::String(e.into()));
-                        Value::object(obj)
-                    }),
-                },
-                Ok(Err(e)) => Err({
-                    let mut obj = ObjectMap::default();
-                    obj.insert(Arc::from("error"), Value::String(e.into()));
-                    Value::object(obj)
-                }),
-                Err(_) => Err(Value::String("Promise dropped".into())),
-            }
+            Self::convert(crate::http::block_on_http(rx))
         } else {
-            Err(Value::String("Promise already consumed".into()))
+            Err(consumed())
+        }
+    }
+
+    fn subscribe(
+        self: Arc<Self>,
+        on_settled: Box<dyn FnOnce(std::result::Result<Value, Value>) + Send>,
+    ) {
+        match self.rx.lock().unwrap().take() {
+            Some(rx) => {
+                crate::http::subscriber_runtime().spawn(async move {
+                    on_settled(Self::convert(rx.await));
+                });
+            }
+            None => on_settled(Err(consumed())),
         }
     }
 }
