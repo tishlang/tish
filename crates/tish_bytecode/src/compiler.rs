@@ -2056,12 +2056,28 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::LoadConst);
                 let idx = self.constant_idx(Constant::Closure(nested_idx));
                 self.chunk.write_u16(idx);
-                let idx = self.name_idx(name);
-                self.emit_u16(Opcode::DeclareVar, idx);
-                self.scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(Arc::clone(name), false);
+                // #716: bind the function's NAME like any other local. `DeclareVar` inserts the
+                // closure into the very `local_scope` map the closure just captured (vm.rs
+                // `Constant::Closure` → `VmClosure.enclosing`), minting a deterministic
+                // closure→scope→closure cycle per call — refcount-only, so the whole frame leaked.
+                // In general slot mode an UNCAPTURED name gets a frame slot instead: the closure
+                // never enters the captured map, and the frame drops normally on return. A name
+                // referenced from inside ANY nested closure — the function's own body
+                // (self-recursion) or a sibling (mutual recursion) — is in `slot_captured`
+                // (`SlotScan` scans FunDecl bodies as closures) and stays on the `DeclareVar`
+                // path, exactly like a captured `let` (see `Statement::VarDecl` above).
+                // `TISH_VM_SLOTS=0` ⇒ `general_slots` is false ⇒ byte-identical output.
+                if self.general_slots && !self.slot_captured.contains(name.as_ref()) {
+                    let slot = self.declare_slot(name);
+                    self.emit_u16(Opcode::StoreLocal, slot);
+                } else {
+                    let idx = self.name_idx(name);
+                    self.emit_u16(Opcode::DeclareVar, idx);
+                    self.scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(Arc::clone(name), false);
+                }
             }
             Statement::DoWhile { body, cond, .. } => {
                 let body_lets = Self::loop_body_block_lets(body);
