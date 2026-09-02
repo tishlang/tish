@@ -491,6 +491,17 @@ fn handle_ws_upgrade(mut req: Request<hyper::body::Incoming>) -> Response<Full<B
     use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
+    // Enforce the same connection cap as the tish:ws listener BEFORE the 101. This path runs
+    // pre-auth — the VM handler never sees the request — so without the check an unauthenticated
+    // client could register unbounded permanent connections (tasks + fd + buffers each) on any
+    // serve() app built with http-hyper + ws (#707).
+    if !crate::ws::has_ws_capacity() {
+        return simple_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "websocket connection limit reached",
+        );
+    }
+
     let accept = match req.headers().get(hyper::header::SEC_WEBSOCKET_KEY) {
         Some(k) => derive_accept_key(k.as_bytes()),
         None => return simple_error_response(StatusCode::BAD_REQUEST, "missing Sec-WebSocket-Key"),
@@ -501,8 +512,13 @@ fn handle_ws_upgrade(mut req: Request<hyper::body::Incoming>) -> Response<Full<B
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
-                let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, None)
-                    .await;
+                // Shared config: 16 KiB buffers instead of tungstenite's eager 128 KiB default.
+                let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                    io,
+                    Role::Server,
+                    Some(crate::ws::ws_config()),
+                )
+                .await;
                 let id = crate::ws::register_ws_stream(ws);
                 crate::ws::enqueue_upgraded_conn(id);
             }
