@@ -1773,6 +1773,10 @@ pub use tty::{
     tty_enter_alt_screen, tty_is_tty, tty_leave_alt_screen, tty_read, tty_read_line, tty_set_raw_mode, tty_size,
 };
 
+/// Shared reader-thread buffer + UTF-8 drain for the byte-stream modules (pty / process / net).
+#[cfg(any(feature = "pty", feature = "process", feature = "net"))]
+mod stream_buf;
+
 #[cfg(feature = "pty")]
 pub mod pty;
 #[cfg(feature = "pty")]

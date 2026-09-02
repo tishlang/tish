@@ -20,27 +20,31 @@
 //!   - `kill(id) -> bool`
 //!   - `pid(id) -> number | null`
 //!
-//! Two per-session reader threads (stdout, stderr) fill byte buffers that the read fns drain at
-//! a UTF-8 boundary — an incomplete trailing multibyte sequence is held for the next read (no
-//! mojibake). A global `OnceLock<Mutex<HashMap<id, ProcSession>>>` registry mirrors `pty.rs`;
+//! Two per-session reader threads (stdout, stderr) fill bounded byte buffers that the read fns
+//! drain at a UTF-8 boundary (see `stream_buf.rs` for the cap/backpressure and invalid-byte
+//! semantics). A global `OnceLock<Mutex<HashMap<id, ProcSession>>>` registry mirrors `pty.rs`;
 //! errors surface as `null` / `false` rather than panicking.
+//!
+//! Session lifecycle: an entry lives until `kill(id)` — or, since the documented
+//! `spawn -> wait -> forget` flow never kills, until it is *reaped*: once the child has exited
+//! and both stream buffers are fully drained, an opportunistic sweep on each `spawn` (plus a
+//! check when a read returns `null` at EOF) removes the entry. The exit code and pid live on in
+//! a small bounded tombstone map so a late `wait(id)` / `pid(id)` still answers, and `kill(id)`
+//! on a reaped id still reports `true` once. The child's stdin write-end is dropped as soon as
+//! the exit is observed so its fd frees immediately.
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tishlang_core::Value;
 
-/// Output accumulated by a reader thread, drained by `readStdout` / `readStderr`.
-struct StreamBuf {
-    data: Vec<u8>,
-    eof: bool,
-}
-
-type SharedBuf = Arc<(Mutex<StreamBuf>, Condvar)>;
+use crate::stream_buf::{
+    drain_stream, is_drained, new_buf, retire_buf, spawn_reader, spawn_side_reader, SharedBuf,
+};
 
 struct ProcSession {
     child: Mutex<Child>,
@@ -53,6 +57,95 @@ struct ProcSession {
 fn sessions() -> &'static Mutex<HashMap<u64, ProcSession>> {
     static S: OnceLock<Mutex<HashMap<u64, ProcSession>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Exit record kept after a session is reaped, so late `wait`/`pid`/`kill` calls still answer.
+struct Tombstone {
+    code: i32,
+    pid: Option<u32>,
+}
+
+/// Bounded: ids are monotonic, so evicting the smallest key evicts the oldest record.
+const MAX_TOMBSTONES: usize = 1024;
+
+fn tombstones() -> &'static Mutex<BTreeMap<u64, Tombstone>> {
+    static T: OnceLock<Mutex<BTreeMap<u64, Tombstone>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn remember_tombstone(id: u64, t: Tombstone) {
+    if let Ok(mut m) = tombstones().lock() {
+        m.insert(id, t);
+        while m.len() > MAX_TOMBSTONES {
+            m.pop_first();
+        }
+    }
+}
+
+/// Reap every session whose child has exited AND whose streams are fully drained; drop the
+/// stdin write-end of any exited child so its fd frees even when the buffers still hold data.
+fn sweep_sessions() {
+    let mut reaped: Vec<(u64, Tombstone)> = Vec::new();
+    {
+        let mut g = match sessions().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        g.retain(|id, s| {
+            let status = match s.child.lock() {
+                Ok(mut c) => c.try_wait().ok().flatten(),
+                Err(_) => None,
+            };
+            let Some(st) = status else { return true };
+            if let Ok(mut w) = s.stdin.lock() {
+                *w = None;
+            }
+            if is_drained(&s.out) && is_drained(&s.err) {
+                reaped.push((
+                    *id,
+                    Tombstone {
+                        code: st.code().unwrap_or(-1),
+                        pid: s.pid,
+                    },
+                ));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for (id, t) in reaped {
+        remember_tombstone(id, t);
+    }
+}
+
+/// Reap one session if (and only if) its child has exited and both streams are drained.
+fn try_reap(id: u64) {
+    let tomb = {
+        let mut g = match sessions().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let Some(s) = g.get(&id) else { return };
+        let status = match s.child.lock() {
+            Ok(mut c) => c.try_wait().ok().flatten(),
+            Err(_) => None,
+        };
+        let Some(st) = status else { return };
+        if let Ok(mut w) = s.stdin.lock() {
+            *w = None;
+        }
+        if !(is_drained(&s.out) && is_drained(&s.err)) {
+            return;
+        }
+        let tomb = Tombstone {
+            code: st.code().unwrap_or(-1),
+            pid: s.pid,
+        };
+        g.remove(&id);
+        tomb
+    };
+    remember_tombstone(id, tomb);
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -88,95 +181,14 @@ fn obj_str(o: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn new_buf() -> SharedBuf {
-    Arc::new((
-        Mutex::new(StreamBuf {
-            data: Vec::new(),
-            eof: false,
-        }),
-        Condvar::new(),
-    ))
-}
-
-/// Reader thread: block on a pipe, append bytes, wake any waiting reader; mark EOF on 0/err.
-fn spawn_reader<R: Read + Send + 'static>(mut r: R, buf: SharedBuf) {
-    std::thread::spawn(move || {
-        let mut tmp = [0u8; 8192];
-        loop {
-            match r.read(&mut tmp) {
-                Ok(0) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.eof = true;
-                    }
-                    cv.notify_all();
-                    break;
-                }
-                Ok(n) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.data.extend_from_slice(&tmp[..n]);
-                    }
-                    cv.notify_all();
-                }
-                Err(_) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.eof = true;
-                    }
-                    cv.notify_all();
-                    break;
-                }
-            }
-        }
-    });
-}
-
-/// Drain a stream buffer as a string (possibly `""` within the timeout), or `null` at EOF.
-/// Drains only a valid UTF-8 prefix, holding any incomplete trailing multibyte for next time
-/// (identical semantics to `pty::pty_read`).
-fn drain_stream(buf: &SharedBuf, timeout_ms: u64) -> Value {
-    let (lock, cv) = &**buf;
-    let mut b = match lock.lock() {
-        Ok(b) => b,
-        Err(_) => return Value::Null,
-    };
-    if b.data.is_empty() && !b.eof && timeout_ms > 0 {
-        let res = cv.wait_timeout_while(b, Duration::from_millis(timeout_ms), |b| {
-            b.data.is_empty() && !b.eof
-        });
-        b = match res {
-            Ok((g, _)) => g,
-            Err(e) => e.into_inner().0,
-        };
-    }
-    if b.data.is_empty() {
-        if b.eof {
-            return Value::Null;
-        }
-        return Value::String("".into());
-    }
-    let valid = match std::str::from_utf8(&b.data) {
-        Ok(_) => b.data.len(),
-        Err(e) => e.valid_up_to(),
-    };
-    if valid == 0 {
-        if b.eof {
-            let s = String::from_utf8_lossy(&b.data).into_owned();
-            b.data.clear();
-            return Value::String(s.into());
-        }
-        return Value::String("".into());
-    }
-    let out: Vec<u8> = b.data.drain(..valid).collect();
-    let s = String::from_utf8(out).unwrap_or_default();
-    Value::String(s.into())
-}
-
 /// `spawn({ program, args?, cwd?, env? })` → a stable id for read/write/wait/kill, or `null`
 /// on failure. `program` is required; `args` is an array of strings; `env` entries are ADDED to
 /// the inherited environment.
 pub fn process_spawn(args: &[Value]) -> Value {
+    // Opportunistic reap of exited-and-drained sessions, so the documented
+    // spawn -> wait -> forget lifecycle cannot grow the table (or leak fds) without bound.
+    sweep_sessions();
+
     let null = Value::Null;
     let opts = args.first().unwrap_or(&null);
 
@@ -242,7 +254,9 @@ pub fn process_spawn(args: &[Value]) -> Value {
     let out = new_buf();
     let err = new_buf();
     spawn_reader(stdout, out.clone());
-    spawn_reader(stderr, err.clone());
+    // stderr is a SIDE channel programs may never read: DropOldest, not Park — parking would
+    // block the child's stderr write(2) at the cap and freeze its stdout with it.
+    spawn_side_reader(stderr, err.clone());
 
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let session = ProcSession {
@@ -283,7 +297,13 @@ fn read_from(args: &[Value], stderr: bool) -> Value {
             None => return Value::Null,
         }
     };
-    drain_stream(&buf, timeout_ms)
+    let out = drain_stream(&buf, timeout_ms);
+    if matches!(out, Value::Null) {
+        // This stream hit EOF fully drained; if the sibling stream is done too and the child
+        // has exited, the session is fully consumed — reap it (tombstone keeps wait/pid live).
+        try_reap(id);
+    }
+    out
 }
 
 /// `readStdout(id, timeoutMs?)` → available stdout, `""` (live, none yet), or `null` at EOF/unknown.
@@ -352,6 +372,7 @@ pub fn process_close_stdin(args: &[Value]) -> Value {
 
 /// `wait(id, timeoutMs?)` → the child's exit code once it has exited, or `null` while it is still
 /// running (or for an unknown id). Polls up to `timeoutMs` (0 = a single non-blocking check).
+/// Still answers after the session was reaped (the exit code is tombstoned).
 pub fn process_wait(args: &[Value]) -> Value {
     let id = match arg_u64(args, 0) {
         Some(x) => x,
@@ -369,13 +390,30 @@ pub fn process_wait(args: &[Value]) -> Value {
             };
             let s = match g.get(&id) {
                 Some(s) => s,
-                None => return Value::Null,
+                None => {
+                    // Reaped after a natural exit: the tombstoned exit code still answers.
+                    return match tombstones().lock() {
+                        Ok(t) => match t.get(&id) {
+                            Some(tomb) => Value::Number(tomb.code as f64),
+                            None => Value::Null,
+                        },
+                        Err(_) => Value::Null,
+                    };
+                }
             };
             let mut c = match s.child.lock() {
                 Ok(c) => c,
                 Err(_) => return Value::Null,
             };
-            c.try_wait()
+            let status = c.try_wait();
+            if let Ok(Some(_)) = status {
+                // Child gone: release its stdin write-end fd immediately (the session itself
+                // stays until its buffers are drained).
+                if let Ok(mut w) = s.stdin.lock() {
+                    *w = None;
+                }
+            }
+            status
         };
         match status {
             Ok(Some(st)) => return Value::Number(st.code().unwrap_or(-1) as f64),
@@ -389,7 +427,9 @@ pub fn process_wait(args: &[Value]) -> Value {
     }
 }
 
-/// `kill(id)` → terminate the child and drop the session. Returns whether the id was live.
+/// `kill(id)` → terminate the child and drop the session. Returns whether the id was live
+/// (including a reaped id, whose child already exited — reported `true` once, like before
+/// reaping existed).
 pub fn process_kill(args: &[Value]) -> Value {
     let id = match arg_u64(args, 0) {
         Some(x) => x,
@@ -408,25 +448,47 @@ pub fn process_kill(args: &[Value]) -> Value {
                 let _ = c.kill();
                 let _ = c.wait();
             }
+            // Wake reader threads parked at the buffer cap so they exit (a read-blocked
+            // reader exits on its own once the killed child's pipe closes).
+            retire_buf(&s.out);
+            retire_buf(&s.err);
             Value::Bool(true)
         }
-        None => Value::Bool(false),
+        None => {
+            // A reaped session was live from the caller's perspective; consume its tombstone.
+            match tombstones().lock() {
+                Ok(mut t) => Value::Bool(t.remove(&id).is_some()),
+                Err(_) => Value::Bool(false),
+            }
+        }
     }
 }
 
-/// `pid(id)` → the child process id, or `null` for an unknown id.
+/// `pid(id)` → the child process id, or `null` for an unknown id. Still answers after the
+/// session was reaped (the pid is tombstoned).
 pub fn process_pid(args: &[Value]) -> Value {
     let id = match arg_u64(args, 0) {
         Some(x) => x,
         None => return Value::Null,
     };
-    let g = match sessions().lock() {
-        Ok(g) => g,
-        Err(_) => return Value::Null,
-    };
-    match g.get(&id).and_then(|s| s.pid) {
-        Some(p) => Value::Number(p as f64),
-        None => Value::Null,
+    {
+        let g = match sessions().lock() {
+            Ok(g) => g,
+            Err(_) => return Value::Null,
+        };
+        if let Some(s) = g.get(&id) {
+            return match s.pid {
+                Some(p) => Value::Number(p as f64),
+                None => Value::Null,
+            };
+        }
+    }
+    match tombstones().lock() {
+        Ok(t) => match t.get(&id).and_then(|tomb| tomb.pid) {
+            Some(p) => Value::Number(p as f64),
+            None => Value::Null,
+        },
+        Err(_) => Value::Null,
     }
 }
 
@@ -442,6 +504,43 @@ mod tests {
             Value::Number(n) => n,
             other => panic!("spawn failed: {:?}", other),
         }
+    }
+
+    fn spawn_sh(cmd: &str) -> f64 {
+        let mut m = tishlang_core::ObjectMap::default();
+        m.insert(std::sync::Arc::from("program"), Value::String("sh".into()));
+        let args = vec![Value::String("-c".into()), Value::String(cmd.into())];
+        m.insert(
+            std::sync::Arc::from("args"),
+            Value::Array(tishlang_core::VmRef::new(args)),
+        );
+        match process_spawn(&[Value::object(m)]) {
+            Value::Number(n) => n,
+            other => panic!("spawn failed: {:?}", other),
+        }
+    }
+
+    fn wait_code(id: f64) -> f64 {
+        for _ in 0..200 {
+            if let Value::Number(n) = process_wait(&[Value::Number(id), Value::Number(50.0)]) {
+                return n;
+            }
+        }
+        panic!("child did not exit in time");
+    }
+
+    fn drain_to_eof(id: f64, stderr: bool) {
+        for _ in 0..200 {
+            let v = if stderr {
+                process_read_stderr(&[Value::Number(id), Value::Number(50.0)])
+            } else {
+                process_read_stdout(&[Value::Number(id), Value::Number(50.0)])
+            };
+            if matches!(v, Value::Null) {
+                return;
+            }
+        }
+        panic!("stream did not reach EOF in time");
     }
 
     #[test]
@@ -504,5 +603,119 @@ mod tests {
         assert!(matches!(process_wait(&[Value::Number(bad)]), Value::Null));
         assert!(matches!(process_kill(&[Value::Number(bad)]), Value::Bool(false)));
         assert!(matches!(process_pid(&[Value::Number(bad)]), Value::Null));
+    }
+
+    #[test]
+    fn invalid_utf8_byte_does_not_wedge_stdout() {
+        // One invalid byte, then valid text (the issue-#709 wedge shape). Pre-fix, every read
+        // after the 0xFF returned "" forever while the buffer grew unbounded.
+        let id = spawn_sh("printf '\\377'; echo wedge_ok_9");
+        let mut acc = String::new();
+        for _ in 0..200 {
+            match process_read_stdout(&[Value::Number(id), Value::Number(50.0)]) {
+                Value::String(s) => acc.push_str(&s),
+                Value::Null => break,
+                _ => {}
+            }
+            if acc.contains("wedge_ok_9") {
+                break;
+            }
+        }
+        let _ = process_kill(&[Value::Number(id)]);
+        assert!(
+            acc.contains('\u{fffd}'),
+            "invalid byte not replaced: {:?}",
+            acc
+        );
+        assert!(
+            acc.contains("wedge_ok_9"),
+            "stream wedged after invalid byte: {:?}",
+            acc
+        );
+    }
+
+    #[test]
+    fn exited_and_drained_session_is_reaped_with_exit_code_tombstoned() {
+        let id = spawn_sh("exit 7");
+        assert_eq!(wait_code(id), 7.0);
+        // Observing the exit must have released the child's stdin write-end fd already,
+        // even while the session itself is still registered.
+        {
+            let g = sessions().lock().unwrap();
+            if let Some(s) = g.get(&(id as u64)) {
+                assert!(
+                    s.stdin.lock().unwrap().is_none(),
+                    "stdin fd not released on exit"
+                );
+            }
+        }
+        drain_to_eof(id, false);
+        drain_to_eof(id, true);
+        // Reading both streams to EOF reaped the session...
+        assert!(
+            !sessions().lock().unwrap().contains_key(&(id as u64)),
+            "session not reaped after exit + full drain"
+        );
+        // ...but wait/pid still answer from the tombstone, and kill still reports the id as
+        // having been live (once).
+        assert!(matches!(process_wait(&[Value::Number(id)]), Value::Number(n) if n == 7.0));
+        assert!(matches!(
+            process_pid(&[Value::Number(id)]),
+            Value::Number(_)
+        ));
+        assert!(matches!(
+            process_kill(&[Value::Number(id)]),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            process_kill(&[Value::Number(id)]),
+            Value::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn spawn_sweeps_prior_exited_sessions() {
+        let id = spawn_sh("exit 3");
+        assert_eq!(wait_code(id), 3.0);
+        // No reads issued — wait until the reader threads observe EOF so the sweep (the only
+        // eviction path exercised here) can fire on the next spawn.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let g = sessions().lock().unwrap();
+                match g.get(&(id as u64)) {
+                    Some(s) if is_drained(&s.out) && is_drained(&s.err) => break,
+                    Some(_) => {}
+                    None => break, // a concurrent test's spawn already swept it
+                }
+            }
+            assert!(Instant::now() < deadline, "reader threads never hit EOF");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let id2 = spawn_cat();
+        assert!(
+            !sessions().lock().unwrap().contains_key(&(id as u64)),
+            "sweep on spawn did not reap the exited session"
+        );
+        assert!(matches!(process_wait(&[Value::Number(id)]), Value::Number(n) if n == 3.0));
+        let _ = process_kill(&[Value::Number(id2)]);
+    }
+
+    #[test]
+    fn spawn_wait_drain_loop_does_not_accumulate_sessions() {
+        // The G4 harness shape (spawn + wait, no kill) measured exactly +1 pipe fd and +1
+        // table entry per iteration pre-fix. Post-fix every fully-consumed session is reaped.
+        let mut ids = Vec::new();
+        for _ in 0..25 {
+            let id = spawn_sh("exit 0");
+            assert_eq!(wait_code(id), 0.0);
+            drain_to_eof(id, false);
+            drain_to_eof(id, true);
+            ids.push(id);
+        }
+        let g = sessions().lock().unwrap();
+        for id in ids {
+            assert!(!g.contains_key(&(id as u64)), "session {} leaked", id);
+        }
     }
 }

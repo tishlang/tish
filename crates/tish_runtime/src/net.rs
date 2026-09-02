@@ -18,24 +18,28 @@
 //!   - `probe(host, port, timeoutMs?) -> bool`        (can we connect?)
 //!   - `sleep(ms) -> null`                            (blocking backoff for the poll loops above)
 //!
-//! Each connection has a reader thread filling a UTF-8-boundary-drained buffer, exactly like
-//! pty.rs / process_spawn.rs. Global OnceLock<Mutex<HashMap>> registries; errors surface as
+//! Each connection has a reader thread filling a bounded, UTF-8-boundary-drained buffer shared
+//! with pty.rs / process_spawn.rs (see `stream_buf.rs` for the cap/backpressure and
+//! invalid-byte semantics). Global OnceLock<Mutex<HashMap>> registries; errors surface as
 //! null/false.
+//!
+//! Connection lifecycle: `close(id)` shuts the socket down (`Shutdown::Both`) so the reader
+//! thread — which holds a dup of the fd — unblocks and exits, freeing thread + fd + buffer
+//! together, and the peer sees a FIN. Entries whose peer disconnected and whose buffer was
+//! read to EOF (`read` returned `null`) are swept when the next connection registers, so
+//! read-to-EOF-and-forget cannot strand CLOSE_WAIT fds; a swept id keeps returning `null`
+//! from `read`, exactly as before.
 
 use std::collections::HashMap;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tishlang_core::{ObjectMap, Value};
 
-struct StreamBuf {
-    data: Vec<u8>,
-    eof: bool,
-}
-type SharedBuf = Arc<(Mutex<StreamBuf>, Condvar)>;
+use crate::stream_buf::{drain_stream, is_drained, new_buf, retire_buf, spawn_reader, SharedBuf};
 
 struct Conn {
     writer: Mutex<TcpStream>,
@@ -82,95 +86,20 @@ fn arg_timeout(args: &[Value], i: usize) -> u64 {
     }
 }
 
-fn new_buf() -> SharedBuf {
-    Arc::new((
-        Mutex::new(StreamBuf {
-            data: Vec::new(),
-            eof: false,
-        }),
-        Condvar::new(),
-    ))
-}
-
-// Reader thread: block on the socket, append bytes, wake waiters; mark EOF on 0/err.
-fn spawn_reader(mut stream: TcpStream, buf: SharedBuf) {
-    std::thread::spawn(move || {
-        let mut tmp = [0u8; 8192];
-        loop {
-            match stream.read(&mut tmp) {
-                Ok(0) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.eof = true;
-                    }
-                    cv.notify_all();
-                    break;
-                }
-                Ok(n) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.data.extend_from_slice(&tmp[..n]);
-                    }
-                    cv.notify_all();
-                }
-                Err(_) => {
-                    let (lock, cv) = &*buf;
-                    if let Ok(mut b) = lock.lock() {
-                        b.eof = true;
-                    }
-                    cv.notify_all();
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn drain_stream(buf: &SharedBuf, timeout_ms: u64) -> Value {
-    let (lock, cv) = &**buf;
-    let mut b = match lock.lock() {
-        Ok(b) => b,
-        Err(_) => return Value::Null,
-    };
-    if b.data.is_empty() && !b.eof && timeout_ms > 0 {
-        let res = cv.wait_timeout_while(b, Duration::from_millis(timeout_ms), |b| {
-            b.data.is_empty() && !b.eof
-        });
-        b = match res {
-            Ok((g, _)) => g,
-            Err(e) => e.into_inner().0,
-        };
-    }
-    if b.data.is_empty() {
-        if b.eof {
-            return Value::Null;
-        }
-        return Value::String("".into());
-    }
-    let valid = match std::str::from_utf8(&b.data) {
-        Ok(_) => b.data.len(),
-        Err(e) => e.valid_up_to(),
-    };
-    if valid == 0 {
-        if b.eof {
-            let s = String::from_utf8_lossy(&b.data).into_owned();
-            b.data.clear();
-            return Value::String(s.into());
-        }
-        return Value::String("".into());
-    }
-    let out: Vec<u8> = b.data.drain(..valid).collect();
-    Value::String(String::from_utf8(out).unwrap_or_default().into())
-}
-
-// Register a connected stream (reader thread + writer clone) and return its id.
+// Register a connected stream (reader thread + writer clone) and return its id. Also sweeps
+// out entries whose peer disconnected and whose buffer was fully read (`read` already
+// returned `null` for them), so read-to-EOF-and-forget cannot strand CLOSE_WAIT fds — the
+// sweep never touches a conn with undrained data or a live reader, so an id that has not yet
+// returned `null` keeps its full read contract.
 fn register_conn(stream: TcpStream) -> Option<u64> {
     let reader = stream.try_clone().ok()?;
     let _ = reader.set_nonblocking(false);
     let buf = new_buf();
     spawn_reader(reader, buf.clone());
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    conns().lock().ok()?.insert(
+    let mut g = conns().lock().ok()?;
+    g.retain(|_, c| !is_drained(&c.buf));
+    g.insert(
         id,
         Conn {
             writer: Mutex::new(stream),
@@ -262,9 +191,12 @@ pub fn net_write(args: &[Value]) -> Value {
     }
 }
 
-/// `close(id)` → drop a connection (its reader thread ends on EOF) or a listener. Conn and
-/// listener ids share one counter, so an id names at most one of the two; closing a listener frees
-/// its port — the reserve-ephemeral-then-release pattern a TCP DAP `spawn` uses so the child can
+/// `close(id)` → close a connection or a listener. For a connection this actually shuts the
+/// socket down (`Shutdown::Both`, the `http.rs` idiom): the reader thread — which holds a dup
+/// of the fd — unblocks out of its `read()`, exits, and frees thread + fd + buffer together,
+/// and the peer sees a FIN instead of a silently half-alive socket. Conn and listener ids
+/// share one counter, so an id names at most one of the two; closing a listener frees its
+/// port — the reserve-ephemeral-then-release pattern a TCP DAP `spawn` uses so the child can
 /// bind it. Returns whether anything live was removed.
 pub fn net_close(args: &[Value]) -> Value {
     let id = match arg_u64(args, 0) {
@@ -272,10 +204,15 @@ pub fn net_close(args: &[Value]) -> Value {
         None => return Value::Bool(false),
     };
     let removed_conn = match conns().lock() {
-        Ok(mut g) => g.remove(&id).is_some(),
+        Ok(mut g) => g.remove(&id),
         Err(_) => return Value::Bool(false),
     };
-    if removed_conn {
+    if let Some(c) = removed_conn {
+        if let Ok(w) = c.writer.lock() {
+            let _ = w.shutdown(std::net::Shutdown::Both);
+        }
+        // Wake a reader parked at the buffer cap (shutdown only unblocks a read-blocked one).
+        retire_buf(&c.buf);
         return Value::Bool(true);
     }
     let removed_listener = match listeners().lock() {
@@ -466,6 +403,97 @@ mod tests {
 
         assert!(matches!(net_close(&[Value::Number(client)]), Value::Bool(true)));
         assert!(matches!(net_close(&[Value::Number(server)]), Value::Bool(true)));
+    }
+
+    fn listen_pair() -> (f64, f64, f64) {
+        let l = net_listen(&[Value::Number(0.0)]);
+        let (lid, port) = match &l {
+            Value::Object(m) => {
+                let b = m.borrow();
+                let id = match b.strings.get("id") {
+                    Some(Value::Number(i)) => *i,
+                    _ => panic!("no id"),
+                };
+                let port = match b.strings.get("port") {
+                    Some(Value::Number(p)) => *p,
+                    _ => panic!("no port"),
+                };
+                (id, port)
+            }
+            other => panic!("listen failed: {:?}", other),
+        };
+        let client = match net_connect(&[Value::String("127.0.0.1".into()), Value::Number(port)]) {
+            Value::Number(n) => n,
+            other => panic!("connect failed: {:?}", other),
+        };
+        let server = match net_accept(&[Value::Number(lid), Value::Number(1000.0)]) {
+            Value::Number(n) => n,
+            other => panic!("accept failed: {:?}", other),
+        };
+        (lid, client, server)
+    }
+
+    #[test]
+    fn close_shuts_down_the_socket_so_the_peer_sees_eof() {
+        // Pre-fix, net_close only dropped the writer fd: the reader thread's dup kept the
+        // socket alive, no FIN was ever sent, and the peer's reads blocked forever.
+        let (lid, client, server) = listen_pair();
+        assert!(matches!(
+            net_close(&[Value::Number(server)]),
+            Value::Bool(true)
+        ));
+        let mut saw_eof = false;
+        for _ in 0..100 {
+            if let Value::Null = net_read(&[Value::Number(client), Value::Number(100.0)]) {
+                saw_eof = true;
+                break;
+            }
+        }
+        assert!(saw_eof, "peer never saw EOF after close — no FIN was sent");
+        let _ = net_close(&[Value::Number(client)]);
+        let _ = net_close(&[Value::Number(lid)]);
+    }
+
+    #[test]
+    fn conn_read_to_eof_is_swept_on_next_register() {
+        // The natural "read until null, forget the id" pattern: pre-fix the Conn entry (and
+        // its CLOSE_WAIT fd) survived forever.
+        let (lid, client, server) = listen_pair();
+        assert!(matches!(
+            net_write(&[Value::Number(server), Value::String("bye".into())]),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            net_close(&[Value::Number(server)]),
+            Value::Bool(true)
+        ));
+        // Drain the client to EOF (null) — and never close it.
+        let mut got = String::new();
+        let mut saw_eof = false;
+        for _ in 0..100 {
+            match net_read(&[Value::Number(client), Value::Number(100.0)]) {
+                Value::String(s) => got.push_str(&s),
+                Value::Null => {
+                    saw_eof = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_eof, "client never reached EOF");
+        assert!(got.contains("bye"), "payload lost before EOF: {:?}", got);
+        // Registering the next connection sweeps the drained entry.
+        let (lid2, client2, server2) = listen_pair();
+        assert!(
+            !conns().lock().unwrap().contains_key(&(client as u64)),
+            "drained-at-EOF conn was not swept"
+        );
+        // The read-to-EOF-then-read-again contract: the swept id still reads as null.
+        assert!(matches!(net_read(&[Value::Number(client)]), Value::Null));
+        let _ = net_close(&[Value::Number(client2)]);
+        let _ = net_close(&[Value::Number(server2)]);
+        let _ = net_close(&[Value::Number(lid)]);
+        let _ = net_close(&[Value::Number(lid2)]);
     }
 
     #[test]
