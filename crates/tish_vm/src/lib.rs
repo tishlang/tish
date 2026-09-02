@@ -4,6 +4,12 @@
 mod jit;
 mod vm;
 
+/// Test/diagnostic introspection of the process-global JIT cache sizes (#703). Hidden: not a stable
+/// public API — exists so regression tests and embedder diagnostics can observe that the caches grow
+/// with distinct program text, not with closure-instantiation volume.
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub use jit::jit_cache_lens;
 pub use vm::{all_compiled_capabilities, run, run_with_options, Vm, VmRunOptions};
 
 #[cfg(test)]
