@@ -10,6 +10,9 @@ use tishlang_runtime::VmRef;
 mod error;
 pub use error::{format_pg_error, format_tish_pg_error, Result, TishPgError};
 
+#[cfg(feature = "tish-bindings")]
+mod statement_registry;
+
 use deadpool_postgres::{Manager, Pool, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as JsonValue};
