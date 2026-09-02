@@ -287,7 +287,9 @@ edition = "2021"
         .parent()
         .and_then(|p| p.parent())
         .map(|ws| ws.join("target"));
-    let target_dir = workspace_target.filter(|p| p.exists());
+    let target_dir = workspace_target
+        .filter(|p| p.exists())
+        .or_else(shared_native_target_dir);
     let cross = build_config.cargo_target.as_deref();
     let release_sub = if let Some(triple) = cross {
         format!("{triple}/release")
@@ -456,7 +458,10 @@ fn runtime_dep_toml(runtime_path: &str, features_str: &str) -> String {
     if let Some(v) = released_compiler_version() {
         format!("tishlang_runtime = {{ version = {:?}{} }}", v, features_str)
     } else {
-        format!("tishlang_runtime = {{ path = {:?}{} }}", runtime_path, features_str)
+        format!(
+            "tishlang_runtime = {{ path = {:?}{} }}",
+            runtime_path, features_str
+        )
     }
 }
 
@@ -693,8 +698,7 @@ tishlang_runtime = {{ path = {runtime:?}{version}{features} }}
         fs::write(src_dir.join("generated_native.rs"), gen)
             .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
     }
-    fs::write(src_dir.join("lib.rs"), lib_rs)
-        .map_err(|e| format!("Cannot write lib.rs: {}", e))?;
+    fs::write(src_dir.join("lib.rs"), lib_rs).map_err(|e| format!("Cannot write lib.rs: {}", e))?;
 
     println!("Emitted Rust library crate: {}", output_path.display());
     Ok(())
@@ -739,8 +743,7 @@ fn build_gba_rom(
     // the source of truth. The generated ROM crate must depend on the SAME agb: a skew would pull in
     // two agb crates and mismatch types at the sprite-registration boundary. Falls back to a known
     // pin only if the line can't be read (never blocks the build on a parse miss).
-    let agb_version =
-        read_facade_agb_version(&facade_path).unwrap_or_else(|| "0.25.0".to_string());
+    let agb_version = read_facade_agb_version(&facade_path).unwrap_or_else(|| "0.25.0".to_string());
 
     let out_stem = output_path
         .file_stem()
@@ -816,11 +819,13 @@ agb = "{agb_version}"
     // Only the channel is inherited. `components` stays `rust-src` because that is what build-std
     // needs — copying a project's `clippy`/`rustfmt` entries in would fail the ROM build whenever
     // the pinned toolchain lacks a component the ROM never uses.
-    let channel =
-        find_project_toolchain_channel(&base).unwrap_or_else(|| "nightly".to_string());
+    let channel = find_project_toolchain_channel(&base).unwrap_or_else(|| "nightly".to_string());
     fs::write(
         build_dir.join("rust-toolchain.toml"),
-        format!("[toolchain]\nchannel = \"{}\"\ncomponents = [\"rust-src\"]\n", channel),
+        format!(
+            "[toolchain]\nchannel = \"{}\"\ncomponents = [\"rust-src\"]\n",
+            channel
+        ),
     )
     .map_err(|e| format!("Cannot write rust-toolchain.toml: {}", e))?;
 
@@ -969,6 +974,30 @@ fn find_project_toolchain_channel(start: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// `TISH_NATIVE_TARGET_DIR` — opt-in shared cargo target dir for native (desktop) builds.
+///
+/// Native builds compile the generated crate under a per-process temp dir that is deleted on
+/// success (`cleanup_build_dir`), so nothing survives between two `tish build --target native`
+/// invocations and CI recompiles every dependency each run. Inside the tish workspace the
+/// workspace `target/` is shared automatically; a released compiler has no workspace, and this
+/// env var is the equivalent for it: point it at a directory that persists (a CI cache) and
+/// cargo reuses the dependency artifacts across builds. Deliberately NOT the ambient
+/// `CARGO_TARGET_DIR` — see the GBA path for why that is scrubbed (`TISH_GBA_TARGET_DIR` is the
+/// same opt-in for ROM builds). The directory is created if missing.
+fn shared_native_target_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("TISH_NATIVE_TARGET_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())?;
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!(
+            "warning: TISH_NATIVE_TARGET_DIR={} is not usable ({e}); building in the temp dir",
+            dir.display()
+        );
+        return None;
+    }
+    Some(dir)
 }
 
 /// Remove a finished build's per-PID source directory (#384). Called only on SUCCESS, after the
@@ -1126,7 +1155,9 @@ edition = "2021"
         .parent()
         .and_then(|p| p.parent())
         .map(|ws| ws.join("target"));
-    let target_dir = workspace_target.filter(|p| p.exists());
+    let target_dir = workspace_target
+        .filter(|p| p.exists())
+        .or_else(shared_native_target_dir);
     let binary_dir = target_dir
         .as_ref()
         .map(|t| t.join("release"))
@@ -1188,14 +1219,41 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// `TISH_NATIVE_TARGET_DIR`: unset/empty → None (temp-dir build); set → that dir, created.
+    #[test]
+    fn shared_native_target_dir_follows_env() {
+        use super::shared_native_target_dir;
+        use std::fs;
+        use std::path::PathBuf;
+        // Only this test touches TISH_NATIVE_TARGET_DIR; the lock keeps it single-threaded anyway.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TISH_NATIVE_TARGET_DIR");
+        assert!(shared_native_target_dir().is_none());
+        std::env::set_var("TISH_NATIVE_TARGET_DIR", "");
+        assert!(shared_native_target_dir().is_none());
+        // Scratch under the workspace target/ (never /tmp), unique per case.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp_shared_target_test")
+            .join(format!("t_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        std::env::set_var("TISH_NATIVE_TARGET_DIR", &dir);
+        let got = shared_native_target_dir().expect("set → Some");
+        assert_eq!(got, dir);
+        assert!(dir.is_dir(), "the shared target dir is created on demand");
+        std::env::remove_var("TISH_NATIVE_TARGET_DIR");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
     /// #384: `cleanup_build_dir` removes a finished build's dir by default, and preserves it under
     /// `TISH_KEEP_BUILD_DIR=1`.
     #[test]
     fn cleanup_build_dir_removes_by_default_and_keeps_on_flag() {
         use std::path::PathBuf;
         // Scratch under the workspace target/ (never /tmp), unique per case.
-        let base: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tmp_cleanup_test");
+        let base: PathBuf =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp_cleanup_test");
         let removed = base.join("to_remove");
         let kept = base.join("to_keep");
         for d in [&removed, &kept] {
@@ -1209,7 +1267,10 @@ mod tests {
 
         std::env::set_var("TISH_KEEP_BUILD_DIR", "1");
         super::cleanup_build_dir(&kept);
-        assert!(kept.exists(), "TISH_KEEP_BUILD_DIR=1 should preserve the build dir");
+        assert!(
+            kept.exists(),
+            "TISH_KEEP_BUILD_DIR=1 should preserve the build dir"
+        );
         std::env::remove_var("TISH_KEEP_BUILD_DIR");
 
         let _ = std::fs::remove_dir_all(&base);
