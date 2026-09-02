@@ -6,14 +6,22 @@
 //!
 //! ## Concurrency model for race / any / allSettled / spawn
 //!
-//! `TishPromise::block_until_settled` is a *blocking* call. To wait on "whichever of N
-//! settles first" without serializing them, we spawn one OS thread per promise — each
-//! calls `block_until_settled` and forwards the result (with its index) to a shared
-//! `mpsc::channel`. The main thread reads from that channel:
+//! To wait on "whichever of N settles first" without serializing them, each combinator
+//! SUBSCRIBES to its pending inputs ([`TishPromise::subscribe`]): the input promise
+//! stores a completion callback and invokes it from whichever thread settles it, with
+//! the result forwarded (with its index) to a shared `mpsc::channel`. The calling
+//! thread's `recv` on that channel is the only blocking wait — no OS thread is parked
+//! per pending input (issue #702: thread-per-input leaked one uncancellable 2 MiB-stack
+//! thread per never-settling loser until `pthread_create` failed). A loser's callback
+//! fires into a disconnected channel whenever it eventually settles (a no-op), or is
+//! dropped with the promise — no cancellation path is needed. The channel reader:
 //!   - `race`  → first message wins (fulfilled or rejected).
 //!   - `any`   → first *fulfilled* message wins; collect rejections; if all reject →
 //!     `AggregateError` (array of reasons).
 //!   - `allSettled` → drain all N messages, sort by index, build `{status,value|reason}`.
+//!
+//! Settlement itself is memoized in a [`SettleCell`] (peek, not take): awaiting or
+//! racing a promise never consumes it, so an input that lost a race stays awaitable.
 //!
 //! This requires `Value: Send`, which holds under the `send-values` feature (all handles
 //! become `Arc<Mutex<…>>`). The `send-values` feature is enabled in every build that has
@@ -26,38 +34,136 @@
 //! task, so it does not contend with the I/O runtime.
 
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use tishlang_core::{ObjectMap, TishPromise, Value, VmRef};
 
-/// Fulfilled or rejected before anyone awaits — `block_until_settled` consumes the result once.
+/// Completion callback registered on a pending promise; invoked exactly once on settlement.
+type SettleCallback = Box<dyn FnOnce(std::result::Result<Value, Value>) + Send>;
+
+/// Shared, memoizing settlement state for deferred promises (`Promise(executor)`,
+/// `Promise.spawn`). Replaces the one-shot `mpsc` channel that made awaiting CONSUME
+/// the promise and forced `race`/`any` to park one blocking OS thread per pending
+/// input (issue #702):
+///   - the result is stored, not taken — `wait`/`peek` clone it, so a promise can be
+///     awaited any number of times, including after losing a race;
+///   - pending waiters either block on the condvar (plain `await`) or register a
+///     [`SettleCallback`] (`race`/`any`/`allSettled` subscriptions) that the settling
+///     thread invokes — zero threads parked while pending.
+struct SettleCell {
+    state: Mutex<CellState>,
+    settled: Condvar,
+}
+
+enum CellState {
+    Pending(Vec<SettleCallback>),
+    Settled(std::result::Result<Value, Value>),
+}
+
+impl SettleCell {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(CellState::Pending(Vec::new())),
+            settled: Condvar::new(),
+        }
+    }
+
+    /// First settle wins; later calls are no-ops (JS: resolve/reject fire once).
+    /// Registered callbacks run on the settling thread, after the lock is released.
+    fn settle(&self, r: std::result::Result<Value, Value>) {
+        let callbacks = {
+            let mut st = self.state.lock().unwrap();
+            match &mut *st {
+                CellState::Pending(subs) => {
+                    let subs = std::mem::take(subs);
+                    *st = CellState::Settled(r.clone());
+                    self.settled.notify_all();
+                    subs
+                }
+                CellState::Settled(_) => return,
+            }
+        };
+        for cb in callbacks {
+            cb(r.clone());
+        }
+    }
+
+    /// Block until settled. Memoized: peeks the stored result, never consumes it.
+    fn wait(&self) -> std::result::Result<Value, Value> {
+        let mut st = self.state.lock().unwrap();
+        loop {
+            match &*st {
+                CellState::Settled(r) => return r.clone(),
+                CellState::Pending(_) => st = self.settled.wait(st).unwrap(),
+            }
+        }
+    }
+
+    /// Non-blocking peek: `Some(result)` once settled, `None` while pending.
+    fn peek(&self) -> Option<std::result::Result<Value, Value>> {
+        match &*self.state.lock().unwrap() {
+            CellState::Settled(r) => Some(r.clone()),
+            CellState::Pending(_) => None,
+        }
+    }
+
+    /// Register `cb` to run on settlement; runs it inline if already settled.
+    fn subscribe(&self, cb: SettleCallback) {
+        let mut st = self.state.lock().unwrap();
+        match &mut *st {
+            CellState::Pending(subs) => subs.push(cb),
+            CellState::Settled(r) => {
+                let r = r.clone();
+                drop(st);
+                cb(r);
+            }
+        }
+    }
+}
+
+/// Held by the `resolve`/`reject` natives handed to a `Promise(executor)`. If the
+/// executor drops both without calling either (and without stashing them anywhere),
+/// the cell would stay pending forever and every `await` would hang; settling with
+/// the canonical rejection on last-handle drop preserves the historical
+/// "executor did not call resolve or reject" error instead. `settle` is a no-op if
+/// resolve/reject already fired.
+struct SettlerGuard {
+    cell: Arc<SettleCell>,
+}
+
+impl Drop for SettlerGuard {
+    fn drop(&mut self) {
+        self.cell.settle(Err(Value::String(
+            "Promise executor did not call resolve or reject".into(),
+        )));
+    }
+}
+
+/// Fulfilled or rejected at construction — every read peeks the memoized result.
 pub struct ImmediateSettledPromise {
-    slot: Mutex<Option<Result<Value, Value>>>,
+    result: Mutex<Result<Value, Value>>,
 }
 
 impl ImmediateSettledPromise {
     fn new(result: Result<Value, Value>) -> Self {
         Self {
-            slot: Mutex::new(Some(result)),
+            result: Mutex::new(result),
         }
     }
 }
 
 impl TishPromise for ImmediateSettledPromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
-        self.slot
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Err(Value::String(
-                "Promise already settled or consumed".into(),
-            )))
+        self.result.lock().unwrap().clone()
     }
     /// Always already settled — return the result immediately without blocking.
     fn try_settle(&self) -> Option<std::result::Result<Value, Value>> {
-        Some(self.slot.lock().unwrap().take().unwrap_or(
-            Err(Value::String("Promise already consumed".into())),
-        ))
+        Some(self.result.lock().unwrap().clone())
+    }
+    #[cfg(feature = "send-values")]
+    fn subscribe(self: Arc<Self>, on_settled: SettleCallback) {
+        let r = self.result.lock().unwrap().clone();
+        on_settled(r);
     }
 }
 
@@ -76,46 +182,31 @@ fn flatten_chain_out(v: Value) -> std::result::Result<Value, Value> {
     }
 }
 
-/// `Promise(executor)` — executor runs synchronously; `resolve` / `reject` unblock `recv`.
-struct DeferredChannelPromise {
-    rx: Mutex<Option<mpsc::Receiver<Result<Value, Value>>>>,
+/// `Promise(executor)` / `Promise.spawn` — a pending promise settled exactly once
+/// through its shared [`SettleCell`]. Never consumed: awaiting, racing, and peeking
+/// all read the memoized settlement.
+struct DeferredCellPromise {
+    cell: Arc<SettleCell>,
 }
 
-impl TishPromise for DeferredChannelPromise {
+impl TishPromise for DeferredCellPromise {
     fn block_until_settled(&self) -> std::result::Result<Value, Value> {
-        let rx = self.rx.lock().unwrap().take();
-        match rx {
-            Some(r) => r.recv().unwrap_or(Err(Value::String(
-                "Promise executor did not call resolve or reject".into(),
-            ))),
-            None => Err(Value::String(
-                "Promise already consumed or settled".into(),
-            )),
-        }
+        self.cell.wait()
     }
 
-    /// Non-blocking settle: if the executor has already called resolve/reject (the channel
-    /// has a message waiting), return it immediately. Returns `None` if the work is still
-    /// pending (channel empty). This lets `race`/`any`/`allSettled` handle already-settled
-    /// `new Promise(executor)` promises in input-order without spawning threads.
+    /// Non-blocking peek: `Some(result)` once resolve/reject fired (or the executor
+    /// provably never will), `None` while genuinely pending. Lets `race`/`any`/
+    /// `allSettled` handle already-settled `new Promise(executor)` promises in
+    /// input-order without subscriptions.
     fn try_settle(&self) -> Option<std::result::Result<Value, Value>> {
-        let mut lock = self.rx.lock().unwrap();
-        match lock.as_ref() {
-            None => Some(Err(Value::String("Promise already consumed".into()))),
-            Some(rx) => match rx.try_recv() {
-                Ok(r) => {
-                    *lock = None; // consumed — block_until_settled would error now (correct)
-                    Some(r)
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    *lock = None;
-                    Some(Err(Value::String(
-                        "Promise executor did not call resolve or reject".into(),
-                    )))
-                }
-                Err(mpsc::TryRecvError::Empty) => None, // still pending
-            },
-        }
+        self.cell.peek()
+    }
+
+    /// The no-thread path for `race`/`any`/`allSettled` (issue #702): the callback is
+    /// stored in the cell and invoked by whichever thread settles the promise.
+    #[cfg(feature = "send-values")]
+    fn subscribe(self: Arc<Self>, on_settled: SettleCallback) {
+        self.cell.subscribe(on_settled);
     }
 }
 
@@ -126,9 +217,14 @@ pub struct ThenPromise {
     on_rejected: Option<Value>,
 }
 
-impl TishPromise for ThenPromise {
-    fn block_until_settled(&self) -> std::result::Result<Value, Value> {
-        match self.pred.block_until_settled() {
+impl ThenPromise {
+    /// Apply the stored handlers to the predecessor's settlement (shared by the
+    /// blocking await path and the subscription path).
+    fn apply(
+        &self,
+        pred_result: std::result::Result<Value, Value>,
+    ) -> std::result::Result<Value, Value> {
+        match pred_result {
             Ok(v) => {
                 if let Some(Value::Function(f)) = &self.on_fulfilled {
                     flatten_chain_out(f.call(&[v]))
@@ -144,6 +240,29 @@ impl TishPromise for ThenPromise {
                 }
             }
         }
+    }
+}
+
+impl TishPromise for ThenPromise {
+    fn block_until_settled(&self) -> std::result::Result<Value, Value> {
+        let r = self.pred.block_until_settled();
+        self.apply(r)
+    }
+
+    // NOTE: deliberately no `try_settle` — handlers are user code that can block
+    // (a handler returning a promise is settled inline by `flatten_chain_out`), and
+    // `race_channel`'s phase-1 walk must never block on one input.
+
+    /// Subscribe to the predecessor instead of parking a waiter thread (issue #702).
+    /// The handlers run on a TRANSIENT thread spawned only once the predecessor has
+    /// settled: nothing is parked while pending, and the settling thread is never
+    /// blocked by user handler code.
+    #[cfg(feature = "send-values")]
+    fn subscribe(self: Arc<Self>, on_settled: SettleCallback) {
+        let this = Arc::clone(&self);
+        Arc::clone(&self.pred).subscribe(Box::new(move |r| {
+            std::thread::spawn(move || on_settled(this.apply(r)));
+        }));
     }
 }
 
@@ -191,9 +310,12 @@ pub fn promise_all(args: &[Value]) -> Value {
 // ---------------------------------------------------------------------------
 // Concurrent combinators (race / any / allSettled) + Promise.spawn
 //
-// All three combinators need to wait on multiple promises concurrently. We
-// spawn one OS thread per promise; each thread calls block_until_settled and
-// sends (index, Result) to a shared mpsc channel on the calling thread.
+// All three combinators need to wait on multiple promises concurrently. Each
+// pending input gets a SUBSCRIPTION (TishPromise::subscribe) that sends
+// (index, Result) to a shared mpsc channel when the input settles; the calling
+// thread reads from that channel. No OS thread is parked per pending input
+// (issue #702) — losers' callbacks fire into a disconnected channel (no-op)
+// or are dropped with their promise.
 // ---------------------------------------------------------------------------
 
 /// Extract the array of items from `Promise.all/race/any/allSettled(array)`.
@@ -207,11 +329,12 @@ fn combinator_items(args: &[Value]) -> Option<Vec<Value>> {
 /// Concurrent settlement channel for `race`/`any`/`allSettled`.
 ///
 /// **Two-phase:** already-settled promises (`try_settle` returns `Some`) are handled
-/// inline in input-order before any threads are spawned. This gives deterministic
+/// inline in input-order before anything is subscribed. This gives deterministic
 /// JS-compatible ordering for already-settled inputs (e.g. `Promise.any([rej, ok, ok])`
 /// reliably returns the first fulfilled, not a random thread-schedule winner). Only
-/// genuinely-pending promises (e.g. from `Promise.spawn`) go to background threads,
-/// which is where concurrency matters.
+/// genuinely-pending promises (e.g. from `Promise.spawn`) get subscriptions — their
+/// settling thread forwards the result; NO waiter thread is parked per input (#702).
+/// Inputs are peeked, not consumed: they all remain awaitable after the combinator.
 ///
 /// Returns the receiving end of the channel plus the count of items it will send.
 #[cfg(feature = "send-values")]
@@ -225,18 +348,18 @@ fn race_channel(
         count += 1;
         match v {
             Value::Promise(ref p) => {
-                // Phase 1: try non-blocking settle (ImmediateSettledPromise, ThenPromise
-                // over immediate, etc.). These never need a thread; handle in order.
+                // Phase 1: try non-blocking peek (ImmediateSettledPromise, settled
+                // DeferredCellPromise, etc.). These never need a subscription; handle in order.
                 if let Some(r) = p.try_settle() {
                     let _ = tx.send((i, r));
                 } else {
-                    // Phase 2: genuinely pending — spawn a thread.
-                    let p = Arc::clone(p);
+                    // Phase 2: genuinely pending — subscribe. The settling thread sends;
+                    // if this combinator has already returned, the send is a harmless
+                    // no-op on a disconnected channel and the callback is freed.
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
-                        let r = p.block_until_settled();
+                    Arc::clone(p).subscribe(Box::new(move |r| {
                         let _ = tx.send((i, r));
-                    });
+                    }));
                 }
             }
             other => {
@@ -412,19 +535,18 @@ pub fn promise_spawn(args: &[Value]) -> Value {
     };
     #[cfg(feature = "send-values")]
     {
-        let (tx, rx) = mpsc::channel::<std::result::Result<Value, Value>>();
+        let cell = Arc::new(SettleCell::new());
+        let worker_cell = Arc::clone(&cell);
         std::thread::spawn(move || {
             // Wrap in catch_unwind so a panicking GPU/CPU kernel rejects the promise
             // rather than aborting the whole process.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.call(&[])));
-            let _ = tx.send(match result {
+            worker_cell.settle(match result {
                 Ok(v)  => Ok(v),
                 Err(_) => Err(Value::String("Promise.spawn: task panicked".into())),
             });
         });
-        Value::Promise(Arc::new(DeferredChannelPromise {
-            rx: Mutex::new(Some(rx)),
-        }))
+        Value::Promise(Arc::new(DeferredCellPromise { cell }))
     }
     #[cfg(not(feature = "send-values"))]
     {
@@ -443,34 +565,36 @@ pub fn promise_object() -> Value {
 
     let ctor = Value::native(|args: &[Value]| match args.first() {
         Some(Value::Function(f)) => {
-            let (tx, rx) = mpsc::channel();
-            let tx_cell = Arc::new(Mutex::new(Some(tx)));
+            let cell = Arc::new(SettleCell::new());
+            // Both natives share one guard; when the executor drops the last handle
+            // without settling, the guard rejects with the canonical error (see
+            // `SettlerGuard`). First settle wins — later resolve/reject calls no-op.
+            let guard = Arc::new(SettlerGuard {
+                cell: Arc::clone(&cell),
+            });
             let resolve = Value::native({
-                let tx_cell = Arc::clone(&tx_cell);
+                let guard = Arc::clone(&guard);
                 move |a: &[Value]| {
-                    if let Some(t) = tx_cell.lock().unwrap().take() {
-                        let _ = t.send(Ok(
-                            a.first().cloned().unwrap_or(Value::Null),
-                        ));
-                    }
+                    guard
+                        .cell
+                        .settle(Ok(a.first().cloned().unwrap_or(Value::Null)));
                     Value::Null
                 }
             });
             let reject = Value::native({
-                let tx_cell = Arc::clone(&tx_cell);
+                let guard = Arc::clone(&guard);
                 move |a: &[Value]| {
-                    if let Some(t) = tx_cell.lock().unwrap().take() {
-                        let _ = t.send(Err(
-                            a.first().cloned().unwrap_or(Value::Null),
-                        ));
-                    }
+                    guard
+                        .cell
+                        .settle(Err(a.first().cloned().unwrap_or(Value::Null)));
                     Value::Null
                 }
             });
+            // The ctor's own guard handle must die before the executor runs, so the
+            // resolve/reject natives hold the only references.
+            drop(guard);
             let _ = f.call(&[resolve, reject]);
-            Value::Promise(Arc::new(DeferredChannelPromise {
-                rx: Mutex::new(Some(rx)),
-            }))
+            Value::Promise(Arc::new(DeferredCellPromise { cell }))
         }
         _ => Value::Null,
     });
@@ -554,5 +678,312 @@ pub fn await_promise_throw(v: Value) -> Result<Value, Box<dyn std::error::Error>
         }
     } else {
         Ok(v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — issue #702: Promise.race / Promise.any must not park one OS thread
+// per pending input, and combinator inputs must remain awaitable afterwards.
+// Everything goes through the public surface (`promise_object`, `promise_race`,
+// `promise_any`, `promise_all_settled`) so the tests are independent of the
+// promise internals they guard.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tishlang_core::object_get;
+
+    /// Build `new Promise(executor)` through the public `Promise.__call` ctor, with an
+    /// executor that stashes `resolve` for later (or never) — the genuinely-pending
+    /// shape from issue #702 (event-registry / never-settling loser).
+    /// Returns `(promise, resolve)`.
+    fn deferred() -> (Value, Value) {
+        let stash: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let executor = Value::native({
+            let stash = Arc::clone(&stash);
+            move |args: &[Value]| {
+                stash
+                    .lock()
+                    .unwrap()
+                    .push(args.first().cloned().unwrap_or(Value::Null));
+                Value::Null
+            }
+        });
+        let promise_global = promise_object();
+        let ctor = object_get(&promise_global, &Value::String("__call".into()))
+            .expect("Promise global has __call");
+        let p = match &ctor {
+            Value::Function(f) => f.call(std::slice::from_ref(&executor)),
+            _ => panic!("Promise.__call is not callable"),
+        };
+        let resolve = stash
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .expect("executor ran synchronously");
+        (p, resolve)
+    }
+
+    fn call_value(f: &Value, args: &[Value]) {
+        match f {
+            Value::Function(f) => {
+                f.call(args);
+            }
+            _ => panic!("expected a callable Value"),
+        }
+    }
+
+    /// Await a `Value::Promise` (panics on non-promise).
+    fn settle(v: &Value) -> std::result::Result<Value, Value> {
+        match v {
+            Value::Promise(p) => p.block_until_settled(),
+            other => panic!("expected a promise, got {}", other.type_name()),
+        }
+    }
+
+    fn expect_num(r: std::result::Result<Value, Value>) -> f64 {
+        match r {
+            Ok(Value::Number(n)) => n,
+            other => panic!("expected fulfilled number, got {other:?}"),
+        }
+    }
+
+    /// Live OS threads in this process (macOS via `ps -M`, Linux via /proc).
+    fn os_thread_count() -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_dir("/proc/self/task").unwrap().count()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let pid = std::process::id().to_string();
+            let out = std::process::Command::new("ps")
+                .args(["-M", &pid])
+                .output()
+                .expect("run ps -M");
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .count()
+                .saturating_sub(1) // header line
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            0
+        }
+    }
+
+    /// Issue #702 regression: N races against never-settling losers must NOT grow the
+    /// process thread count by N. Before the subscription redesign each pending input
+    /// parked one uncancellable OS thread in `block_until_settled` forever.
+    #[test]
+    fn race_with_never_settling_loser_does_not_park_threads() {
+        if os_thread_count() == 0 {
+            return; // platform without a thread-count probe
+        }
+        let n = 64usize;
+        // Keep the losers (and their stashed resolvers) alive: the leak is conditional
+        // on the loser never settling, which requires its resolve to stay reachable.
+        let mut keep: Vec<(Value, Value)> = Vec::new();
+
+        // Warm up lazy machinery so it doesn't count against the delta.
+        let (wp, wr) = deferred();
+        let out = promise_race(&[Value::array(vec![
+            promise_resolve(&[Value::Number(-1.0)]),
+            wp.clone(),
+        ])]);
+        assert_eq!(expect_num(settle(&out)), -1.0);
+        keep.push((wp, wr));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let baseline = os_thread_count();
+        for i in 0..n {
+            let (p, r) = deferred();
+            let out = promise_race(&[Value::array(vec![
+                promise_resolve(&[Value::Number(i as f64)]),
+                p.clone(),
+            ])]);
+            assert_eq!(expect_num(settle(&out)), i as f64);
+            keep.push((p, r));
+        }
+        // Give any transient threads a moment to exit before measuring.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let after = os_thread_count();
+        let grown = after.saturating_sub(baseline);
+        assert!(
+            grown < n / 4,
+            "Promise.race parked ~1 thread per never-settling loser: baseline {} -> {} (+{}) after {} races",
+            baseline,
+            after,
+            grown,
+            n
+        );
+    }
+
+    /// Same regression for `Promise.any`.
+    #[test]
+    fn any_with_never_settling_loser_does_not_park_threads() {
+        if os_thread_count() == 0 {
+            return;
+        }
+        let n = 64usize;
+        let mut keep: Vec<(Value, Value)> = Vec::new();
+
+        let (wp, wr) = deferred();
+        let out = promise_any(&[Value::array(vec![
+            wp.clone(),
+            promise_resolve(&[Value::Number(-1.0)]),
+        ])]);
+        assert_eq!(expect_num(settle(&out)), -1.0);
+        keep.push((wp, wr));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let baseline = os_thread_count();
+        for i in 0..n {
+            let (p, r) = deferred();
+            let out = promise_any(&[Value::array(vec![
+                p.clone(),
+                promise_resolve(&[Value::Number(i as f64)]),
+            ])]);
+            assert_eq!(expect_num(settle(&out)), i as f64);
+            keep.push((p, r));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let after = os_thread_count();
+        let grown = after.saturating_sub(baseline);
+        assert!(
+            grown < n / 4,
+            "Promise.any parked ~1 thread per never-settling loser: baseline {} -> {} (+{}) after {} calls",
+            baseline,
+            after,
+            grown,
+            n
+        );
+    }
+
+    /// Semantics guard: race settles with the first settled input.
+    #[test]
+    fn race_first_settled_input_wins() {
+        let (pending, _r) = deferred();
+        let out = promise_race(&[Value::array(vec![
+            promise_resolve(&[Value::Number(1.0)]),
+            pending,
+        ])]);
+        assert_eq!(expect_num(settle(&out)), 1.0);
+    }
+
+    /// Semantics guard: a genuinely-pending winner settled from another thread wins the race.
+    #[test]
+    fn race_pending_winner_settled_from_another_thread() {
+        let (winner, resolve) = deferred();
+        let (never, _keep) = deferred();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            call_value(&resolve, &[Value::Number(7.0)]);
+        });
+        let out = promise_race(&[Value::array(vec![winner, never])]);
+        assert_eq!(expect_num(settle(&out)), 7.0);
+        t.join().unwrap();
+    }
+
+    /// Semantics guard: any returns the first FULFILLMENT even with a pending loser present.
+    #[test]
+    fn any_first_fulfillment_wins_with_pending_loser() {
+        let (never, _keep) = deferred();
+        let out = promise_any(&[Value::array(vec![
+            never,
+            promise_reject(&[Value::String("nope".into())]),
+            promise_resolve(&[Value::Number(3.0)]),
+        ])]);
+        assert_eq!(expect_num(settle(&out)), 3.0);
+    }
+
+    /// Semantics guard: any rejects with all reasons, in input order, when every input rejects.
+    #[test]
+    fn any_all_rejected_yields_reasons_in_order() {
+        let out = promise_any(&[Value::array(vec![
+            promise_reject(&[Value::String("a".into())]),
+            promise_reject(&[Value::String("b".into())]),
+        ])]);
+        match settle(&out) {
+            Err(Value::Array(arr)) => {
+                let arr = arr.borrow();
+                assert_eq!(arr.len(), 2);
+                assert!(matches!(&arr[0], Value::String(s) if s.as_str() == "a"));
+                assert!(matches!(&arr[1], Value::String(s) if s.as_str() == "b"));
+            }
+            other => panic!("expected rejection with reasons array, got {other:?}"),
+        }
+    }
+
+    /// Semantics guard: allSettled drains pending inputs settled from another thread.
+    #[test]
+    fn all_settled_waits_for_pending_inputs() {
+        let (p1, r1) = deferred();
+        let (p2, r2) = deferred();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            call_value(&r1, &[Value::Number(1.0)]);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            call_value(&r2, &[Value::Number(2.0)]);
+        });
+        let out = promise_all_settled(&[Value::array(vec![p1, p2])]);
+        let settled = settle(&out).expect("allSettled fulfills");
+        let Value::Array(arr) = settled else {
+            panic!("allSettled must fulfill with an array")
+        };
+        let arr = arr.borrow();
+        assert_eq!(arr.len(), 2);
+        for (i, expected) in [(0usize, 1.0f64), (1, 2.0)] {
+            let v = object_get(&arr[i], &Value::String("value".into())).expect("value key");
+            assert!(matches!(v, Value::Number(n) if n == expected), "slot {i}");
+        }
+        t.join().unwrap();
+    }
+
+    /// Issue #702 adjacent defect: `race_channel` must not CONSUME its inputs. A promise
+    /// that loses a race stays awaitable — settling it later and awaiting must yield the
+    /// value, not "Promise already settled or consumed".
+    #[test]
+    fn race_loser_remains_awaitable() {
+        let (loser, resolve) = deferred();
+        let out = promise_race(&[Value::array(vec![
+            promise_resolve(&[Value::Number(1.0)]),
+            loser.clone(),
+        ])]);
+        assert_eq!(expect_num(settle(&out)), 1.0);
+
+        call_value(&resolve, &[Value::Number(9.0)]);
+        // Give the (pre-fix) parked waiter thread time to consume the settlement, so the
+        // pre-fix failure is deterministic rather than a race with the test body.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            expect_num(settle(&loser)),
+            9.0,
+            "a promise that lost a race must remain awaitable"
+        );
+    }
+
+    /// Issue #702 adjacent defect (peek-not-take): an already-settled promise can be
+    /// awaited more than once, like in JS — including after losing a race.
+    #[test]
+    fn settled_promise_is_reawaitable() {
+        let p = promise_resolve(&[Value::Number(5.0)]);
+        assert_eq!(expect_num(settle(&p)), 5.0);
+        assert_eq!(
+            expect_num(settle(&p)),
+            5.0,
+            "second await of a settled promise must yield the value again"
+        );
+
+        // And after being consumed by a race in phase 1 (try_settle path):
+        let q = promise_resolve(&[Value::Number(6.0)]);
+        let out = promise_race(&[Value::array(vec![q.clone()])]);
+        assert_eq!(expect_num(settle(&out)), 6.0);
+        assert_eq!(
+            expect_num(settle(&q)),
+            6.0,
+            "a settled promise that entered a race must remain awaitable"
+        );
     }
 }

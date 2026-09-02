@@ -1068,6 +1068,9 @@ allSettled[1] rejected: boom
 allSettled[2] ok: 30
 race winner: A
 any passthrough: 42
+race pending-loser winner: fast
+loser still awaitable: late
+re-await: 7 7
 ";
     for backend_args in [vec!["run"], vec!["run", "--backend", "interp"]] {
         let mut args = backend_args.clone();

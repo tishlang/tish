@@ -46,3 +46,23 @@ console.log("race winner:", winner)
 // === non-promise passthrough ===
 let pt = await Promise.any([42, "ignored"])
 console.log("any passthrough:", pt)
+
+// === race with a genuinely-PENDING loser (issue #702) ===
+// The loser's resolve is stashed for later — the race must settle with the fast
+// winner without parking anything on the loser, and the loser must remain
+// awaitable after it finally settles (inputs are peeked, not consumed).
+let keptResolvers = []
+let pendingLoser = new Promise((resolve) => { keptResolvers.push(resolve) })
+let fastWin = await Promise.race([
+    new Promise((resolve) => resolve("fast")),
+    pendingLoser,
+])
+console.log("race pending-loser winner:", fastWin)
+keptResolvers[0]("late")
+console.log("loser still awaitable:", await pendingLoser)
+
+// === settled promises are re-awaitable (peek, not consume) ===
+let settledOnce = Promise.resolve(7)
+let firstAwait = await settledOnce
+let secondAwait = await settledOnce
+console.log("re-await:", firstAwait, secondAwait)

@@ -196,18 +196,45 @@ pub trait TishStruct {
 
 /// Trait for Promise-like values that can be awaited (block until settled).
 /// Implemented by the runtime for native compile; interpreter uses its own Promise.
-pub trait TishPromise: Send + Sync {
+///
+/// (`'static` is part of the contract: promises are shared as `Arc<dyn TishPromise>`
+/// inside `Value::Promise`, and settlement subscriptions outlive the subscribing frame.)
+pub trait TishPromise: Send + Sync + 'static {
     fn block_until_settled(&self) -> core::result::Result<Value, Value>;
     /// Try to settle WITHOUT blocking. Returns `Some(result)` if the promise was already
     /// settled before this call; returns `None` if it is still pending (a background thread
     /// / I/O task has not completed yet). Default: always pending — implementors of async
-    /// promises (fetch, spawn) leave this as `None`; `ImmediateSettledPromise` overrides it.
+    /// promises (fetch) leave this as `None`; settled/state-backed promises override it.
+    /// Must PEEK, not consume: a promise reporting `Some` here stays awaitable.
     ///
     /// Used by `race`/`any`/`allSettled` to handle already-settled promises in input-order
-    /// (deterministic, JS-compatible) before falling back to concurrent thread waiting for
-    /// genuinely-pending ones.
+    /// (deterministic, JS-compatible) before subscribing to genuinely-pending ones.
     fn try_settle(&self) -> Option<core::result::Result<Value, Value>> {
         None
+    }
+
+    /// Register a callback to run exactly once when this promise settles (issue #702).
+    ///
+    /// `Promise.race` / `Promise.any` / `Promise.allSettled` use this to wait on N
+    /// promises concurrently WITHOUT parking one OS thread per pending input: an
+    /// implementor that can store the callback (state-cell or channel-backed promises)
+    /// invokes it from whichever thread settles the promise, so the combinator's own
+    /// channel `recv` is the only blocking wait. A subscription that loses a race is
+    /// simply dropped after (or instead of) firing — no cancellation path is needed.
+    ///
+    /// The default implementation is the legacy behavior — a detached waiter thread
+    /// blocking in [`Self::block_until_settled`] — so implementors that cannot register
+    /// callbacks keep working; they only miss the no-thread optimization until they
+    /// override this. Overrides MUST NOT block while the promise is pending.
+    #[cfg(feature = "send-values")]
+    fn subscribe(
+        self: Arc<Self>,
+        on_settled: Box<dyn FnOnce(core::result::Result<Value, Value>) + Send>,
+    ) {
+        std::thread::spawn(move || {
+            let r = self.block_until_settled();
+            on_settled(r);
+        });
     }
 }
 

@@ -64,6 +64,25 @@ where
     })
 }
 
+/// Runtime hosting settlement-subscription waiters registered by `Promise.race` /
+/// `Promise.any` / `Promise.allSettled` on oneshot-backed fetch/IO promises
+/// (`TishPromise::subscribe`, issue #702). Process-global and immortal ON PURPOSE:
+/// a subscription must be able to outlive the subscribing thread (the promise may
+/// settle long after the racer moved on), so it cannot live on the thread-local
+/// [`RUNTIME`]. One lazily-created worker thread total, shared by every waiter —
+/// never one per pending input.
+pub(crate) fn subscriber_runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("tish-promise-subscriber")
+            .enable_all()
+            .build()
+            .expect("Failed to create promise subscriber runtime")
+    })
+}
+
 pub fn await_fetch(args: Vec<Value>) -> Value {
     crate::promise::await_promise(crate::native_promise::fetch_promise(args))
 }
