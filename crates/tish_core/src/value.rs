@@ -2185,10 +2185,10 @@ mod dict_propagation_tests {
     // Shares the backstop tests' lock: all registry-count assertions serialize together.
     use super::shape_backstop_tests::locked;
 
-    fn dict_source(n: usize, salt: &str) -> VmRef<ObjectData> {
+    fn dict_source(n: usize, tag: &str) -> VmRef<ObjectData> {
         let mut m = ObjectMap::default();
         for i in 0..n {
-            m.insert(format!("hdr-{salt}-{i}").into(), Value::Number(i as f64));
+            m.insert(format!("hdr-{tag}-{i}").into(), Value::Number(i as f64));
         }
         let Value::Object(od) = Value::object(m) else { unreachable!() };
         od
