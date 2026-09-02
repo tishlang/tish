@@ -978,6 +978,13 @@ impl PropMap {
         if incoming == 0 {
             return;
         }
+        // Dictionary-ness PROPAGATES: a DICT_SHAPE source stores its keys in whatever order it
+        // was built with (for hashed-map sources, a random per-instance order — see
+        // `from_unordered`). Walking that order through tracked `insert` re-minted a fresh
+        // permanent shape chain per merge (#708: `{ ...headers, id }` at 100 req/s ≈ 950 MB/h).
+        // Copies of dictionaries are dictionaries; copies of tracked objects stay tracked.
+        let dict = self.shape == crate::shape::DICT_SHAPE
+            || other.shape == crate::shape::DICT_SHAPE;
         // If the combined worst-case size escapes inline storage, promote once up front so the
         // per-key inserts below never reallocate or re-promote.
         if self.map.is_none() && self.inline.len() + incoming > PROPMAP_INLINE {
@@ -992,8 +999,15 @@ impl PropMap {
         } else if let Some(m) = &mut self.map {
             m.reserve(incoming);
         }
-        for (k, v) in other.iter() {
-            self.insert(Arc::clone(k), v.clone());
+        if dict {
+            for (k, v) in other.iter() {
+                self.insert_untracked(Arc::clone(k), v.clone());
+            }
+            self.shape = crate::shape::DICT_SHAPE;
+        } else {
+            for (k, v) in other.iter() {
+                self.insert(Arc::clone(k), v.clone());
+            }
         }
     }
 }
@@ -1320,9 +1334,12 @@ pub fn value_call(callee: &Value, args: &[Value]) -> Value {
 pub fn merge_object_data(left: &VmRef<ObjectData>, right: &VmRef<ObjectData>) -> ObjectData {
     let l = left.borrow();
     let r = right.borrow();
-    let mut strings = PropMap::with_capacity(l.strings.len() + r.strings.len());
-    strings.extend(l.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
-    strings.extend(r.strings.iter().map(|(k, v)| (Arc::clone(k), v.clone())));
+    // Seed from a CLONE of the left side: its shape id and storage carry over, so spreading
+    // the same left never re-walks (or re-mints) its chain — the old rebuild-from-empty walked
+    // BOTH sides' stored orders through tracked inserts, which for dictionary-mode sources
+    // minted a fresh permanent shape chain on every single spread (#708).
+    let mut strings = l.strings.clone();
+    strings.merge_from(&r.strings);
     let mut symbols: Option<AHashMap<u64, Value>> = None;
     if let Some(ls) = &l.symbols {
         symbols = Some(ls.clone());
@@ -2082,7 +2099,7 @@ mod shape_backstop_tests {
     // unrelated tests running elsewhere in the binary. The leaks these guard against
     // mint THOUSANDS of nodes per loop, so the margins cannot mask a regression.
     static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn locked() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn locked() -> std::sync::MutexGuard<'static, ()> {
         REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -2158,6 +2175,84 @@ mod shape_backstop_tests {
         assert_eq!(last_shape, first.shape(), "identical construction must share one shape");
         let grown = crate::shape::shape_count() - before;
         assert!(grown <= 96, "fixed-shape loop should not mint: registry grew by {grown}");
+    }
+}
+
+#[cfg(test)]
+mod dict_propagation_tests {
+    use super::*;
+
+    // Shares the backstop tests' lock: all registry-count assertions serialize together.
+    use super::shape_backstop_tests::locked;
+
+    fn dict_source(n: usize, tag: &str) -> VmRef<ObjectData> {
+        let mut m = ObjectMap::default();
+        for i in 0..n {
+            m.insert(format!("hdr-{tag}-{i}").into(), Value::Number(i as f64));
+        }
+        let Value::Object(od) = Value::object(m) else { unreachable!() };
+        od
+    }
+
+    /// #708: spreading a dictionary-mode source must not mint shape chains, and the result
+    /// must itself be dictionary-mode (so downstream copies stay clean too).
+    #[test]
+    fn spread_from_dict_source_is_flat_and_dict() {
+        let _g = locked();
+        let left = dict_source(12, "left");
+        let right = dict_source(12, "right");
+        let before = crate::shape::shape_count();
+        let mut last = None;
+        for _ in 0..5_000 {
+            last = Some(merge_object_data(&left, &right));
+        }
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 64, "dict spread minted shapes: registry grew by {grown}");
+        let merged = last.unwrap();
+        assert_eq!(merged.strings.shape(), crate::shape::DICT_SHAPE);
+        assert_eq!(merged.strings.len(), 24);
+        assert!(matches!(merged.strings.get("hdr-right-11"), Some(Value::Number(_))));
+    }
+
+    /// Tracked x tracked spreads must still dedupe to one chain and keep a tracked result —
+    /// the fast path is preserved, not blanket-demoted.
+    #[test]
+    fn spread_tracked_sources_stays_tracked_and_dedupes() {
+        let _g = locked();
+        let mk = |a: &str, b: &str| {
+            let mut pm = PropMap::new();
+            pm.insert(a.into(), Value::Number(1.0));
+            pm.insert(b.into(), Value::Number(2.0));
+            VmRef::new(ObjectData { strings: pm, symbols: None, frozen: false })
+        };
+        let left = mk("prop-track-a", "prop-track-b");
+        let right = mk("prop-track-c", "prop-track-d");
+        let first = merge_object_data(&left, &right);
+        assert_ne!(first.strings.shape(), crate::shape::DICT_SHAPE);
+        let before = crate::shape::shape_count();
+        let mut last_shape = first.strings.shape();
+        for _ in 0..5_000 {
+            let m = merge_object_data(&left, &right);
+            last_shape = m.strings.shape();
+        }
+        assert_eq!(last_shape, first.strings.shape(), "repeated identical spread must share one shape");
+        let grown = crate::shape::shape_count() - before;
+        assert!(grown <= 96, "tracked spread re-minted: registry grew by {grown}");
+    }
+
+    /// Last-write-wins override order must be unchanged by the reseeded merge.
+    #[test]
+    fn spread_override_semantics_preserved() {
+        let mut lm = ObjectMap::default();
+        lm.insert("shared-key".into(), Value::Number(1.0));
+        lm.insert("only-left".into(), Value::Number(2.0));
+        let Value::Object(l) = Value::object(lm) else { unreachable!() };
+        let mut rm = ObjectMap::default();
+        rm.insert("shared-key".into(), Value::Number(9.0));
+        let Value::Object(r) = Value::object(rm) else { unreachable!() };
+        let m = merge_object_data(&l, &r);
+        assert!(matches!(m.strings.get("shared-key"), Some(Value::Number(n)) if *n == 9.0));
+        assert!(matches!(m.strings.get("only-left"), Some(Value::Number(n)) if *n == 2.0));
     }
 }
 
