@@ -844,8 +844,11 @@ impl SlotScan {
 
 /// Capture-aware eligibility for general slot-based locals in a FUNCTION. Returns the captured-name set
 /// (names that must stay name-based) when eligible, else `None` (compile name-based). Eligible iff the
-/// flag is on, no rest param, all params simple, the body fully analysable, and no PARAM is captured
-/// (the VM binds params into slots 0..n, but a closure reads captures by name from `local_scope`).
+/// flag is on, no rest param, all params simple, and the body fully analysable. A CAPTURED param does
+/// NOT disqualify the chunk (#716 follow-up): the VM still binds the arg into its positional slot, and
+/// a copy-in prologue moves it into `local_scope` at entry — from then on the scope is that param's
+/// single source of truth (its name stays out of the slot map, so every body read/write compiles
+/// name-based to the very map closures capture — shared-cell mutation semantics preserved exactly).
 fn slot_analyze(
     params: &[FunParam],
     has_rest: bool,
@@ -862,13 +865,6 @@ fn slot_analyze(
     let mut scan = SlotScan::default();
     if !scan.stmt(body, false) {
         return None;
-    }
-    for p in params {
-        if let FunParam::Simple(tp) = p {
-            if scan.captured.contains(&tp.name) {
-                return None;
-            }
-        }
     }
     Some(scan.captured)
 }
@@ -2022,14 +2018,42 @@ impl<'a> Compiler<'a> {
                     inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_fn_body(body)?;
                 } else if let Some(cap) = captured {
-                    // Params (all uncaptured — gated) → slots 0..n (matching the VM's param binding);
-                    // uncaptured body `let`s get fresh slots via the scope-aware allocator; captured
-                    // locals stay name-based in `local_scope` (which closures capture).
+                    // Params → slots 0..n (matching the VM's positional arg binding); uncaptured
+                    // body `let`s get fresh slots via the scope-aware allocator; captured locals
+                    // stay name-based in `local_scope` (which closures capture).
+                    //
+                    // #716 follow-up: a CAPTURED param no longer disqualifies the chunk. It keeps
+                    // its slot NUMBER (the VM binds args positionally, so numbering must stay
+                    // 0..n) but is NOT slot-resolvable: its name never enters `slot_scopes`, so
+                    // every body read/write compiles name-based (`LoadVar`/`StoreVar`) against
+                    // `local_scope` — the very map closures capture — keeping the scope the
+                    // single source of truth (shared-cell mutation semantics preserved exactly;
+                    // a body reassignment is visible to the closure and vice versa). The COPY-IN
+                    // prologue below moves each captured arg slot → scope once at entry, BEFORE
+                    // the defaults prologue so an applied default (stored name-based for a
+                    // captured param) overwrites the copied-in missing-arg null, never the other
+                    // way around. This keeps the chunk in slot mode, so the #716 fix (#728) slot-
+                    // binds an uncaptured body-level fn NAME and the per-call frame-scope↔closure
+                    // cycle never forms for the `handleEvent(payload){ function fmt(){…payload…} }`
+                    // shape.
                     inner_comp.general_slots = true;
                     inner_comp.slot_captured = cap;
                     inner_comp.slot_scopes.push(HashMap::new());
+                    let mut captured_param_copy_ins: Vec<(u16, Arc<str>)> = Vec::new();
                     for p in &param_names {
-                        inner_comp.declare_slot(p);
+                        if inner_comp.slot_captured.contains(p.as_ref()) {
+                            // Reserve the positional slot without making it resolvable.
+                            let slot = inner_comp.next_slot;
+                            inner_comp.next_slot += 1;
+                            captured_param_copy_ins.push((slot, Arc::clone(p)));
+                        } else {
+                            inner_comp.declare_slot(p);
+                        }
+                    }
+                    for (slot, p) in &captured_param_copy_ins {
+                        inner_comp.emit_u16(Opcode::LoadLocal, *slot);
+                        let idx = inner_comp.name_idx(p);
+                        inner_comp.emit_u16(Opcode::DeclareVarPlain, idx);
                     }
                     inner_comp.emit_param_defaults_prologue(params)?;
                     inner_comp.compile_fn_body(body)?;
