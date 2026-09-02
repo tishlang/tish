@@ -43,8 +43,7 @@ pub const TISH_TAG_OTHER: i32 = 6;
 
 /// An `extern "C"` native function: receives a borrowed array of argument handles (owned by the
 /// host for the call) and returns a freshly-owned result handle (the host drops it).
-pub type TishNativeFn =
-    extern "C" fn(args: *const TishValueRef, argc: usize) -> TishValueRef;
+pub type TishNativeFn = extern "C" fn(args: *const TishValueRef, argc: usize) -> TishValueRef;
 
 /// One named export in a module's table.
 #[repr(C)]
@@ -304,6 +303,33 @@ pub fn wrap_native_fn(func: TishNativeFn) -> Value {
     })
 }
 
+/// Cached exports of one loaded module: name → C-ABI fn pointer. Fn pointers — unlike `Value`,
+/// whose containers may be `Rc` — are `Send + Sync`, so the process-global cache stores the raw
+/// export list and re-wraps it into fresh `Value::native`s per `load_module` call.
+#[cfg(not(target_arch = "wasm32"))]
+type CachedExports = Vec<(String, TishNativeFn)>;
+
+/// Process-global module cache keyed by RESOLVED path (#711): repeated loads of the same cdylib in
+/// one process (an embedder host running programs back to back) reuse the first dlopen mapping
+/// instead of leaking a freshly forgotten `Library` handle per call, and canonicalizing the key
+/// collapses distinct spellings of one path into one entry.
+#[cfg(not(target_arch = "wasm32"))]
+fn module_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, CachedExports>> {
+    static LOADED_MODULES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, CachedExports>>,
+    > = std::sync::OnceLock::new();
+    LOADED_MODULES.get_or_init(Default::default)
+}
+
+/// Number of distinct modules in the process-global cache. Test-only accessor (the integration
+/// loader test asserts a re-spelled path hits the cache instead of re-mapping).
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn loaded_module_count() -> usize {
+    module_cache().lock().unwrap().len()
+}
+
 /// Load a native C-ABI extension (`cdylib`) and return its exports as a name→`Value::native` map,
 /// ready for the interpreter's `with_modules` or the VM's `register_native_module`. The module
 /// must export `extern "C" fn tish_module_register() -> *const TishExportTable`.
@@ -311,12 +337,33 @@ pub fn wrap_native_fn(func: TishNativeFn) -> Value {
 /// The extension imports the host's `tish_value_*` accessors, so the host must export them at link
 /// time (`-rdynamic` / `-Wl,-export_dynamic`). The loaded library is intentionally leaked so the
 /// function pointers stay valid for the process — the load-once model (matches the JIT module).
+/// "Once" is enforced by [`module_cache`]: only the first load of a given resolved path maps the
+/// library; every later call re-wraps the cached export list (#711).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_module(path: &str) -> Result<tishlang_core::ObjectMap, String> {
     use tishlang_core::ObjectMap;
+
+    fn wrap_exports(exports: &CachedExports) -> ObjectMap {
+        let mut map = ObjectMap::default();
+        for (name, func) in exports {
+            map.insert(name.as_str().into(), wrap_native_fn(*func));
+        }
+        map
+    }
+
+    // #711: key on the RESOLVED path so `./lib.dylib` and its absolute spelling share one entry.
+    // When canonicalize fails (e.g. a bare dyld/ld.so-searched name), the literal path is still a
+    // correct — merely less collapsing — key. Failed loads are never cached.
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+
+    if let Some(cached) = module_cache().lock().unwrap().get(&key) {
+        return Ok(wrap_exports(cached));
+    }
+
     // SAFETY: dlopen of a caller-supplied path; the export table is validated (null checks) and the
-    // function pointers are wrapped behind the marshaling shim.
-    unsafe {
+    // function pointers are wrapped behind the marshaling shim. The dlopen runs WITHOUT the cache
+    // lock held — it may execute arbitrary static initializers.
+    let exports: CachedExports = unsafe {
         let lib =
             libloading::Library::new(path).map_err(|e| format!("ffi: load {}: {}", path, e))?;
         let register: libloading::Symbol<unsafe extern "C" fn() -> *const TishExportTable> = lib
@@ -330,20 +377,29 @@ pub fn load_module(path: &str) -> Result<tishlang_core::ObjectMap, String> {
         if table.count > 0 && table.exports.is_null() {
             return Err(format!("ffi: {}: null export table", path));
         }
-        let exports = std::slice::from_raw_parts(table.exports, table.count);
-        let mut map = ObjectMap::default();
-        for exp in exports {
+        let raw = std::slice::from_raw_parts(table.exports, table.count);
+        let mut exports = CachedExports::with_capacity(raw.len());
+        for exp in raw {
             if exp.name.is_null() {
                 continue;
             }
             let name = CStr::from_ptr(exp.name)
                 .to_str()
                 .map_err(|_| format!("ffi: {}: non-UTF-8 export name", path))?;
-            map.insert(name.into(), wrap_native_fn(exp.func));
+            exports.push((name.to_owned(), exp.func));
         }
+        // Still deliberate: the cached fn pointers must outlive every wrapped value, and dlopened
+        // extensions are immortal by contract. The #711 fix is not re-leaking a fresh mapping per
+        // call, not making the first one reclaimable.
         std::mem::forget(lib); // keep symbols live for the process lifetime
-        Ok(map)
-    }
+        exports
+    };
+
+    // Re-check under the lock: a concurrent first load of the same path only bumps the OS dlopen
+    // refcount, and whichever insert wins becomes the canonical copy.
+    let mut cache = module_cache().lock().unwrap();
+    let entry = cache.entry(key).or_insert(exports);
+    Ok(wrap_exports(entry))
 }
 
 #[cfg(test)]
@@ -463,8 +519,14 @@ mod tests {
             tish_value_drop(b);
             // A module table referencing it type-checks (the `tish_module_register` shape).
             let name = CString::new("add").unwrap();
-            let exports = [TishExport { name: name.as_ptr(), func: add_fn }];
-            let table = TishExportTable { exports: exports.as_ptr(), count: 1 };
+            let exports = [TishExport {
+                name: name.as_ptr(),
+                func: add_fn,
+            }];
+            let table = TishExportTable {
+                exports: exports.as_ptr(),
+                count: 1,
+            };
             assert_eq!(table.count, 1);
         }
     }

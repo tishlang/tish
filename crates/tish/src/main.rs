@@ -57,13 +57,17 @@ fn vm_capabilities_for_cli_run(cli_features: &[String]) -> HashSet<String> {
 /// `--feature` list for `tish build --target native`: same default as `tish run` (all linked-in caps).
 fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
     let mut v: Vec<String> = if cli_features.is_empty() {
-        tishlang_vm::all_compiled_capabilities().into_iter().collect()
+        tishlang_vm::all_compiled_capabilities()
+            .into_iter()
+            .collect()
     } else {
         // Normalize exactly like `tish run`: split comma-separated values (`--feature http,timers`)
         // and expand `full`. Without this, a value like "http,timers,process" was treated as one
         // opaque feature name, so `has_feature("http")` was false and the http runtime imports were
         // never emitted — async `fetch` then failed to compile (issue #209).
-        normalize_capability_flags(cli_features).into_iter().collect()
+        normalize_capability_flags(cli_features)
+            .into_iter()
+            .collect()
     };
     v.sort();
     v
@@ -73,8 +77,15 @@ fn native_build_features_from_cli(cli_features: &[String]) -> Vec<String> {
 fn argv_with_implicit_run(mut argv: Vec<String>) -> Vec<String> {
     if argv.len() >= 2 {
         let first = argv[1].as_str();
-        const SUBCOMMANDS: &[&str] =
-            &["run", "repl", "test", "build", "compile-module", "resolve-id", "dump-ast"];
+        const SUBCOMMANDS: &[&str] = &[
+            "run",
+            "repl",
+            "test",
+            "build",
+            "compile-module",
+            "resolve-id",
+            "dump-ast",
+        ];
         let looks_like_file = !first.starts_with('-') && !SUBCOMMANDS.contains(&first);
         if looks_like_file {
             argv.insert(1, "run".to_string());
@@ -112,19 +123,26 @@ fn main() {
             // Expose a node-shaped `process.argv` to the script: `[tish-exe, <file>, args...]`,
             // so `tish run main.tish a b` gives the script `["…/tish", "main.tish", "a", "b"]`
             // (not the `run` subcommand). Interp/VM read this via `tishlang_core::process_argv`. #88
-            let exe = std::env::args().next().unwrap_or_else(|| "tish".to_string());
+            let exe = std::env::args()
+                .next()
+                .unwrap_or_else(|| "tish".to_string());
             let mut argv = Vec::with_capacity(a.script_args.len() + 2);
             argv.push(exe);
             argv.push(a.file.clone());
             argv.extend(a.script_args.iter().cloned());
             tishlang_core::set_process_argv(argv);
-            run_file(&a.file, &a.backend, &a.features, a.no_optimize || no_opt_env)
+            run_file(
+                &a.file,
+                &a.backend,
+                &a.features,
+                a.no_optimize || no_opt_env,
+            )
         }
         Some(Commands::Test(a)) => {
             #[cfg(feature = "test-runner")]
             {
-                use tishlang_test::{run_tests, TestOptions};
                 use tishlang_test::report::ReporterKind;
+                use tishlang_test::{run_tests, TestOptions};
 
                 let reporter = match a.reporter.as_str() {
                     "dots" => ReporterKind::Dots,
@@ -169,7 +187,9 @@ fn main() {
                     } else {
                         "`--backend native` is not implemented yet"
                     };
-                    eprintln!("error: unsupported --backend `{backend}` for tish test (use `vm`); {hint}");
+                    eprintln!(
+                        "error: unsupported --backend `{backend}` for tish test (use `vm`); {hint}"
+                    );
                     std::process::exit(2);
                 }
                 let opts = TestOptions {
@@ -219,10 +239,9 @@ fn main() {
             if let Some(mode) = &a.check {
                 std::env::set_var("TISH_CHECK", mode);
             }
-            if let Err(e) = tishlang_compile::apply_resolve_env(
-                a.platform.as_deref(),
-                a.surface.as_deref(),
-            ) {
+            if let Err(e) =
+                tishlang_compile::apply_resolve_env(a.platform.as_deref(), a.surface.as_deref())
+            {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -241,10 +260,9 @@ fn main() {
             )
         }
         Some(Commands::CompileModule(a)) => {
-            if let Err(e) = tishlang_compile::apply_resolve_env(
-                a.platform.as_deref(),
-                a.surface.as_deref(),
-            ) {
+            if let Err(e) =
+                tishlang_compile::apply_resolve_env(a.platform.as_deref(), a.surface.as_deref())
+            {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -371,7 +389,14 @@ fn run_file(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    run_program(&program, &ffi_base, backend, no_optimize, features, Some(path))
+    run_program(
+        &program,
+        &ffi_base,
+        backend,
+        no_optimize,
+        features,
+        Some(path),
+    )
 }
 
 /// Load every `ffi:<path>` cdylib the program imports, resolving each path relative to `base_dir`
@@ -382,6 +407,8 @@ fn load_ffi_modules(
     base_dir: &Path,
 ) -> Result<Vec<(String, tishlang_core::ObjectMap)>, String> {
     let mut out = Vec::new();
+    // `ffi_native_specs` yields each spec once (deduplicated in first-seen order); distinct
+    // spellings of the same library collapse inside `load_module`'s resolved-path cache (#711).
     for spec in tishlang_compile::ffi_native_specs(program) {
         let rel = spec.strip_prefix("ffi:").unwrap_or(spec.as_str());
         let lib_path = base_dir.join(rel);
@@ -804,17 +831,27 @@ fn compile_to_js_esm(
                 .into(),
         );
     }
-    let modules =
-        tishlang_compile_js::compile_project_esm(input_path, project_root, optimize, jsx_import_source)
-            .map_err(|e| format!("{}", e))?;
+    let modules = tishlang_compile_js::compile_project_esm(
+        input_path,
+        project_root,
+        optimize,
+        jsx_import_source,
+    )
+    .map_err(|e| format!("{}", e))?;
     let out_dir = Path::new(output_path);
-    fs::create_dir_all(out_dir)
-        .map_err(|e| format!("Cannot create output directory {}: {}", out_dir.display(), e))?;
+    fs::create_dir_all(out_dir).map_err(|e| {
+        format!(
+            "Cannot create output directory {}: {}",
+            out_dir.display(),
+            e
+        )
+    })?;
     for module in &modules {
         let out = out_dir.join(&module.relative_path);
         if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create output directory {}: {}", parent.display(), e))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("Cannot create output directory {}: {}", parent.display(), e)
+            })?;
         }
         fs::write(&out, &module.js)
             .map_err(|e| format!("Cannot write {}: {}", out.display(), e))?;
@@ -1195,7 +1232,10 @@ mod cli_tests {
         // `full` expands to every capability, matching `tish run`.
         let full = native_build_features_from_cli(&["full".to_string()]);
         for cap in ["http", "timers", "fs", "process", "regex", "ws", "tty"] {
-            assert!(full.iter().any(|s| s == cap), "`full` missing `{cap}` in {full:?}");
+            assert!(
+                full.iter().any(|s| s == cap),
+                "`full` missing `{cap}` in {full:?}"
+            );
         }
     }
 
