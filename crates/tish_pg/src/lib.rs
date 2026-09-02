@@ -10,6 +10,9 @@ use tishlang_runtime::VmRef;
 mod error;
 pub use error::{format_pg_error, format_tish_pg_error, Result, TishPgError};
 
+#[cfg(feature = "tish-bindings")]
+mod statement_registry;
+
 use deadpool_postgres::{Manager, Pool, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as JsonValue};
@@ -537,10 +540,15 @@ mod tish_sync {
     // worker threads each doing thousands of QPS, the prior `Mutex<Slab>`
     // serialised every query through one global lock; `RwLock` lets all
     // concurrent reads run lock-free against each other.
+    use crate::statement_registry::StatementRegistry;
     use std::sync::RwLock;
     static CLIENTS: Lazy<RwLock<Slab<PerWorkerClient>>> = Lazy::new(|| RwLock::new(Slab::new()));
-    static STATEMENTS: Lazy<RwLock<Slab<(usize, Statement)>>> =
-        Lazy::new(|| RwLock::new(Slab::new()));
+    // Statement lifecycle (see statement_registry.rs and tishlang/tish#712):
+    // entries are interned per (client, sql), validated against the owning
+    // client on every lookup, swept by `close`, and individually freed by
+    // `unprepare`.
+    static STATEMENTS: Lazy<RwLock<StatementRegistry<Statement>>> =
+        Lazy::new(|| RwLock::new(StatementRegistry::new()));
 
     /// Drive a future on our tokio runtime without panicking when called from
     /// inside another runtime's worker thread.
@@ -709,9 +717,13 @@ mod tish_sync {
         g.get(id as usize).cloned()
     }
 
-    fn get_statement(id: f64) -> Option<(usize, Statement)> {
+    /// Resolve a statement handle **for a specific client**. A handle whose
+    /// stored client id does not match is a miss: after `close()` recycles a
+    /// CLIENTS slab index, a stale statement handle must not be replayed
+    /// against whichever new connection reused that index.
+    fn get_statement(id: f64, client_id: f64) -> Option<Statement> {
         let g = STATEMENTS.read().unwrap();
-        g.get(id as usize).cloned()
+        g.get(id as usize, client_id as usize)
     }
 
     /// `prepare(client_handle, sql) -> statement_handle`.
@@ -726,10 +738,23 @@ mod tish_sync {
             return tish_err("prepare: unknown client handle");
         };
         let sql = sql.to_string();
+        // Idempotent per (client, sql): re-preparing identical SQL returns
+        // the interned handle without a server round-trip, so the statement
+        // table is bounded by distinct SQL text instead of prepare() calls.
+        {
+            let g = STATEMENTS.read().unwrap();
+            if let Some(id) = g.lookup(*client_id as usize, &sql) {
+                return TishValue::Number(id as f64);
+            }
+        }
         match block_on(client.prepare(&sql)) {
             Ok(stmt) => {
                 let mut g = STATEMENTS.write().unwrap();
-                let id = g.insert((*client_id as usize, stmt));
+                // insert() re-checks the intern map under the write lock: if
+                // a concurrent identical prepare won the race, its handle is
+                // reused and this fresh Statement drops (emitting the
+                // server-side DEALLOCATE).
+                let id = g.insert(*client_id as usize, &sql, stmt);
                 TishValue::Number(id as f64)
             }
             Err(e) => tish_err(format!("prepare: {}", crate::format_tish_pg_error(&e))),
@@ -752,7 +777,7 @@ mod tish_sync {
         let Some(client) = get_client(*client_id) else {
             return tish_err("queryPrepared: unknown client");
         };
-        let Some((_cid, stmt)) = get_statement(*stmt_id) else {
+        let Some(stmt) = get_statement(*stmt_id, *client_id) else {
             return tish_err("queryPrepared: unknown statement");
         };
         // Fast path: build `Value::Object` rows directly from `Row` so we
@@ -792,7 +817,7 @@ mod tish_sync {
                 let Some(TishValue::Number(stmt_id)) = pair_b.first() else {
                     return tish_err("queryAll: spec[0] must be a statement handle");
                 };
-                let Some((_cid, stmt)) = get_statement(*stmt_id) else {
+                let Some(stmt) = get_statement(*stmt_id, *client_id) else {
                     return tish_err("queryAll: unknown statement");
                 };
                 let params = match pair_b.get(1) {
@@ -821,12 +846,38 @@ mod tish_sync {
     }
 
     /// `close(client_handle) -> null`.
+    ///
+    /// Also sweeps the client's prepared statements. The sweep runs first,
+    /// while the connection is still alive, so each dropped `Statement`
+    /// emits its server-side `DEALLOCATE`; purging the intern entries keeps
+    /// a later client that reuses this slab index from inheriting stale
+    /// handles.
     pub fn close(args: &[TishValue]) -> TishValue {
         if let Some(TishValue::Number(id)) = args.first() {
+            {
+                let mut s = STATEMENTS.write().unwrap();
+                s.sweep_client(*id as usize);
+            }
             let mut g = CLIENTS.write().unwrap();
             if g.contains(*id as usize) {
                 g.remove(*id as usize);
             }
+        }
+        TishValue::Null
+    }
+
+    /// `unprepare(statement_handle) -> null`.
+    ///
+    /// Frees one prepared-statement entry. Dropping the `Statement` sends
+    /// the server-side `DEALLOCATE` (tokio-postgres emits a `Close` message
+    /// on drop) as long as the owning connection is still alive; if the
+    /// client was already closed the drop is inert and the server reclaimed
+    /// the statement on disconnect. Unknown handles are ignored, mirroring
+    /// `close`.
+    pub fn unprepare(args: &[TishValue]) -> TishValue {
+        if let Some(TishValue::Number(id)) = args.first() {
+            let mut g = STATEMENTS.write().unwrap();
+            g.remove(*id as usize);
         }
         TishValue::Null
     }
@@ -940,7 +991,7 @@ mod tish_sync {
 // the Rust side (camelCase `queryAll` in .tish -> snake `query_all` here).
 #[cfg(feature = "tish-bindings")]
 pub use tish_sync::{
-    close, connect, migrate, per_worker_client, prepare, query_all, query_prepared,
+    close, connect, migrate, per_worker_client, prepare, query_all, query_prepared, unprepare,
 };
 
 #[cfg(test)]
