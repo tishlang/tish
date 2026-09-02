@@ -2350,10 +2350,11 @@ impl Vm {
         let names = &chunk.names;
 
         let mut ip = 0;
-        // Lazily allocated name-keyed scope. Slot-based chunks never WRITE it (params + body locals
-        // live in `slot_locals`; `StoreVar` checks-then-falls-through to globals; a slot-based chunk
-        // has no captured locals by construction), so on the hot slot-based call path we skip the
-        // `VmRef::new(Arc<Mutex<HashMap>>)` box entirely. Non-slot chunks need it eagerly for params.
+        // Lazily allocated name-keyed scope. A slot-based chunk with no captured names never writes
+        // it (params + body locals live in `slot_locals`), so the hot slot-based call path skips the
+        // `VmRef::new(Arc<Mutex<HashMap>>)` box entirely; captured locals (`DeclareVar`) and captured
+        // params (the #716 copy-in prologue's `DeclareVarPlain`) materialise it on first use.
+        // Non-slot chunks need it eagerly for params.
         // `ls_get_or_init!()` lazily creates it on the first write/capture; reads treat `None` as empty.
         let mut local_scope: Option<ScopeMap> = if chunk.slot_based {
             None
