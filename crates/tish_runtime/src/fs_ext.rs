@@ -218,8 +218,24 @@ pub fn copy_file_core(args: &[Value]) -> Result<Value, Value> {
 }
 pub fn realpath_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::canonicalize(path_arg(args, 0))
-        .map(|p| Value::String(p.to_string_lossy().into()))
+        .map(|p| Value::String(strip_verbatim_prefix(&p.to_string_lossy()).into()))
         .map_err(io_err)
+}
+
+/// `std::fs::canonicalize` on Windows returns the verbatim form — `\\?\C:\Users\…` for a drive
+/// path, `\\?\UNC\server\share\…` for a network one. Node's `fs.realpath` never does: it hands
+/// back `C:\Users\…` / `\\server\share\…`, and programs treat the result as a display / URL /
+/// comparison string, not just an OS handle (Dune showed `\\?\C:\…` as its workspace title, and a
+/// `?` inside a URL path starts the query string). Match Node. No-op on POSIX and for paths
+/// that carry no prefix.
+pub(crate) fn strip_verbatim_prefix(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = p.strip_prefix("\\\\?\\") {
+        rest.to_string()
+    } else {
+        p.to_string()
+    }
 }
 pub fn readlink_core(args: &[Value]) -> Result<Value, Value> {
     std::fs::read_link(path_arg(args, 0))
@@ -392,4 +408,17 @@ pub fn constants() -> Value {
     m.insert("W_OK".into(), Value::Number(2.0));
     m.insert("X_OK".into(), Value::Number(1.0));
     Value::object(m)
+}
+
+#[cfg(test)]
+mod verbatim_prefix_tests {
+    use super::strip_verbatim_prefix;
+
+    #[test]
+    fn strips_windows_verbatim_prefixes_like_node() {
+        assert_eq!(strip_verbatim_prefix("\\\\?\\C:\\Users\\x\\ui"), "C:\\Users\\x\\ui");
+        assert_eq!(strip_verbatim_prefix("\\\\?\\UNC\\srv\\share\\d"), "\\\\srv\\share\\d");
+        assert_eq!(strip_verbatim_prefix("C:\\Users\\x"), "C:\\Users\\x");
+        assert_eq!(strip_verbatim_prefix("/Users/x/ui"), "/Users/x/ui");
+    }
 }
