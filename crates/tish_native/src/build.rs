@@ -45,6 +45,13 @@ fn runtime_features_for_cargo(features: &[String]) -> Vec<String> {
 }
 
 /// `[profile.release]` for nested `cargo build` of generated crates.
+///
+/// - default: fat LTO, one codegen unit — smallest and fastest binary, slowest to produce (the
+///   final link is single-threaded and dominates a warm build of a large app).
+/// - `TISH_FAST_NATIVE_BUILD=1`: iteration profile, no LTO, opt-level 1.
+/// - `TISH_NATIVE_THIN_LTO=1`: thin LTO over 8 codegen units — keeps most of fat's size/speed win
+///   while letting rustc parallelise the link. Same trade the GBA path offers via
+///   `TISH_GBA_THIN_LTO`; for desktop apps this is the CI-friendly shipping profile.
 fn nested_release_profile_toml() -> &'static str {
     if std::env::var("TISH_FAST_NATIVE_BUILD").as_deref() == Ok("1") {
         r#"[profile.release]
@@ -55,6 +62,13 @@ incremental = true
 strip = false
 debug = 0
 panic = "abort"
+"#
+    } else if std::env::var("TISH_NATIVE_THIN_LTO").as_deref() == Ok("1") {
+        r#"[profile.release]
+strip = true
+panic = "abort"
+codegen-units = 8
+lto = "thin"
 "#
     } else {
         r#"[profile.release]
@@ -1179,6 +1193,7 @@ edition = "2021"
 
 #[cfg(test)]
 mod tests {
+    use super::nested_release_profile_toml;
     use super::runtime_features_for_cargo;
 
     /// The generated ROM crate must inherit the project's pin, or GBA builds float against whatever
@@ -1217,6 +1232,27 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `TISH_NATIVE_THIN_LTO=1` selects thin LTO for native release builds; fast wins over it.
+    #[test]
+    fn native_release_profile_follows_env() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TISH_FAST_NATIVE_BUILD");
+        std::env::remove_var("TISH_NATIVE_THIN_LTO");
+        assert!(nested_release_profile_toml().contains("lto = \"fat\""));
+        std::env::set_var("TISH_NATIVE_THIN_LTO", "1");
+        let thin = nested_release_profile_toml();
+        assert!(thin.contains("lto = \"thin\"") && thin.contains("codegen-units = 8"));
+        std::env::set_var("TISH_FAST_NATIVE_BUILD", "1");
+        assert!(
+            nested_release_profile_toml().contains("lto = false"),
+            "fast wins over thin"
+        );
+        std::env::remove_var("TISH_FAST_NATIVE_BUILD");
+        std::env::remove_var("TISH_NATIVE_THIN_LTO");
     }
 
     /// `TISH_NATIVE_TARGET_DIR`: unset/empty → None (temp-dir build); set → that dir, created.
