@@ -108,6 +108,7 @@ pub fn spawn_children(n: usize) -> io::Result<Vec<Child>> {
     let mut out = Vec::with_capacity(n - 1);
     for i in 1..n {
         let mut cmd = Command::new(&exe);
+        crate::no_console_window(&mut cmd);
         cmd.args(&args);
         cmd.env("TISH_WORKER_ID", i.to_string());
         cmd.env("TISH_HTTP_PREFORK", "child");

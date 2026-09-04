@@ -198,6 +198,7 @@ pub fn process_spawn(args: &[Value]) -> Value {
     };
 
     let mut cmd = Command::new(program);
+    crate::no_console_window(&mut cmd);
     if let Some(Value::Array(a)) = obj_field(opts, "args") {
         for v in a.borrow().iter() {
             cmd.arg(v.to_display_string());
