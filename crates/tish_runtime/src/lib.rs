@@ -1013,6 +1013,20 @@ pub fn process_cwd(_args: &[Value]) -> Value {
 }
 
 #[cfg(feature = "process")]
+/// Windows: a child spawned from a GUI-subsystem parent (a desktop app) gets its own console
+/// window unless created with CREATE_NO_WINDOW — a packaged app spawning git / node / shell
+/// helpers at boot flashed a terminal window per child and stole focus. No-op elsewhere.
+#[cfg(windows)]
+pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+#[cfg(not(windows))]
+pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd
+}
+
 pub fn process_exec(args: &[Value]) -> Value {
     use std::process::Command;
     let cmd = args
@@ -1022,7 +1036,7 @@ pub fn process_exec(args: &[Value]) -> Value {
     if cmd.is_empty() {
         return Value::Number(0.0);
     }
-    match Command::new("sh").arg("-c").arg(&cmd).status() {
+    match no_console_window(Command::new("sh").arg("-c").arg(&cmd)).status() {
         Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
         Err(_) => Value::Number(1.0),
     }
@@ -1046,7 +1060,7 @@ pub fn process_exec_file(args: &[Value]) -> Value {
         Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
         _ => Vec::new(),
     };
-    match Command::new(&program).args(&argv).status() {
+    match no_console_window(Command::new(&program).args(&argv)).status() {
         Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
         Err(_) => Value::Number(1.0),
     }
@@ -1093,7 +1107,7 @@ pub fn process_exec_capture(args: &[Value]) -> Value {
     if cmd.is_empty() {
         return process_capture_obj(0, String::new(), String::new());
     }
-    process_capture_result(Command::new("sh").arg("-c").arg(&cmd).output())
+    process_capture_result(no_console_window(Command::new("sh").arg("-c").arg(&cmd)).output())
 }
 
 /// `process.execFileCapture(program, [args])` — run a program directly, WITHOUT a shell, capturing
@@ -1115,7 +1129,7 @@ pub fn process_exec_file_capture(args: &[Value]) -> Value {
         Some(Value::Array(a)) => a.borrow().iter().map(|v| v.to_display_string()).collect(),
         _ => Vec::new(),
     };
-    process_capture_result(Command::new(&program).args(&argv).output())
+    process_capture_result(no_console_window(Command::new(&program).args(&argv)).output())
 }
 
 #[cfg(all(test, feature = "process", unix))]
