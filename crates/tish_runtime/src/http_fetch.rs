@@ -12,7 +12,7 @@ use tishlang_core::{NativeFn, ObjectMap, TishOpaque, TishPromise, Value};
 
 use crate::http::{
     build_error_response, extract_body, extract_headers, extract_method, extract_multipart,
-    MultipartPart,
+    extract_timeout_ms, MultipartPart,
 };
 
 // --- Promises (Send payloads only; Value built on awaiting/settling thread) ---
@@ -452,21 +452,56 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     Value::object(obj)
 }
 
-/// Shared, hardened outbound HTTP client: request + connect timeouts (a no-timeout fetch is
+/// Default TOTAL request timeout (headers + whole body), applied per request unless the caller
+/// passes `{ timeout: ms }`. Override the default with `TISH_FETCH_TIMEOUT_MS`.
+const DEFAULT_TOTAL_TIMEOUT_MS: u64 = 30_000;
+/// Idle READ timeout: the longest the body may go without a single byte before the request is
+/// failed. This is what bounds a `{ timeout: 0 }` stream (an SSE chat completion that legitimately
+/// runs for minutes). Override with `TISH_FETCH_READ_TIMEOUT_MS`.
+const DEFAULT_READ_TIMEOUT_MS: u64 = 120_000;
+
+/// Pure env parse for a millisecond timeout knob: a valid non-negative integer, else the default.
+fn parse_timeout_ms(env: Option<String>, default: u64) -> u64 {
+    env.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default)
+}
+
+fn default_total_timeout_ms() -> u64 {
+    use std::sync::OnceLock;
+    static MS: OnceLock<u64> = OnceLock::new();
+    *MS.get_or_init(|| {
+        parse_timeout_ms(
+            std::env::var("TISH_FETCH_TIMEOUT_MS").ok(),
+            DEFAULT_TOTAL_TIMEOUT_MS,
+        )
+    })
+}
+
+/// Shared, hardened outbound HTTP client: connect + idle-read timeouts (a no-timeout fetch is
 /// an outbound resource-pinning / slowloris vector) and a bounded redirect chain. Cached so
 /// the connection pool is reused across requests.
+///
+/// The TOTAL timeout is deliberately NOT set on the client: `ClientBuilder::timeout` covers the
+/// entire body, so a streaming response that ran past it died as "error decoding response body"
+/// no matter how healthily bytes were flowing (an LLM tool-call stream at 30s+ was cut every
+/// time). It is applied per request in `send_request_parts` instead, where `{ timeout: ms }` can
+/// override it and `{ timeout: 0 }` can turn it off, leaving the idle read timeout as the guard.
 /// NOTE: this does NOT yet block internal/metadata IPs — full SSRF defense (deny loopback /
 /// link-local / RFC1918 after DNS resolution) is a follow-up that needs a policy decision.
 fn fetch_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+        let read_ms = parse_timeout_ms(
+            std::env::var("TISH_FETCH_READ_TIMEOUT_MS").ok(),
+            DEFAULT_READ_TIMEOUT_MS,
+        );
+        let mut b = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .redirect(reqwest::redirect::Policy::limited(5));
+        if read_ms > 0 {
+            b = b.read_timeout(std::time::Duration::from_millis(read_ms));
+        }
+        b.build().unwrap_or_else(|_| reqwest::Client::new())
     })
 }
 
@@ -577,6 +612,7 @@ async fn send_request_parts(
     headers: Vec<(String, String)>,
     body: Option<String>,
     multipart: Option<Vec<MultipartPart>>,
+    timeout_ms: Option<u64>,
 ) -> Result<reqwest::Response, String> {
     if fetch_block_private() {
         ssrf_preflight(&url).await?;
@@ -591,6 +627,11 @@ async fn send_request_parts(
         "HEAD" => client.head(&url),
         _ => client.get(&url),
     };
+    // Total timeout: the request's own `{ timeout }` (0 = none) else the process default.
+    let total_ms = timeout_ms.unwrap_or_else(default_total_timeout_ms);
+    if total_ms > 0 {
+        req = req.timeout(std::time::Duration::from_millis(total_ms));
+    }
     for (key, value) in headers {
         req = req.header(key, value);
     }
@@ -648,10 +689,11 @@ pub fn fetch_promise_from_args(args: Vec<Value>) -> Value {
     let headers = extract_headers(args.get(1));
     let body = extract_body(args.get(1));
     let multipart = extract_multipart(args.get(1));
+    let timeout_ms = extract_timeout_ms(args.get(1));
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::http::RUNTIME.with(|rt| {
         rt.spawn(async move {
-            let r = send_request_parts(url, method, headers, body, multipart).await;
+            let r = send_request_parts(url, method, headers, body, multipart, timeout_ms).await;
             let _ = tx.send(r);
         });
     });
@@ -678,6 +720,7 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
         Vec<(String, String)>,
         Option<String>,
         Option<Vec<MultipartPart>>,
+        Option<u64>,
     )> = Vec::new();
     for req in requests {
         let (url, opt) = match &req {
@@ -714,14 +757,15 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
         let headers = extract_headers(opt.as_ref());
         let body = extract_body(opt.as_ref());
         let multipart = extract_multipart(opt.as_ref());
-        parts.push((url, method, headers, body, multipart));
+        let timeout_ms = extract_timeout_ms(opt.as_ref());
+        parts.push((url, method, headers, body, multipart, timeout_ms));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     crate::http::RUNTIME.with(|rt| {
         rt.spawn(async move {
             let futs: Vec<_> = parts
                 .into_iter()
-                .map(|(url, m, h, b, mp)| send_request_parts(url, m, h, b, mp))
+                .map(|(url, m, h, b, mp, t)| send_request_parts(url, m, h, b, mp, t))
                 .collect();
             let results = futures::future::join_all(futs).await;
             let mapped: Vec<Result<reqwest::Response, String>> = results.into_iter().collect();
@@ -735,7 +779,36 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
 
 #[cfg(test)]
 mod fetch_cap_tests_383 {
-    use super::{is_blocked_ip, parse_max_body};
+    use super::{is_blocked_ip, parse_max_body, parse_timeout_ms, DEFAULT_READ_TIMEOUT_MS, DEFAULT_TOTAL_TIMEOUT_MS};
+
+    #[test]
+    fn timeout_env_defaults_when_unset_or_invalid() {
+        assert_eq!(parse_timeout_ms(None, DEFAULT_TOTAL_TIMEOUT_MS), 30_000);
+        assert_eq!(parse_timeout_ms(Some("nope".into()), DEFAULT_READ_TIMEOUT_MS), 120_000);
+        assert_eq!(parse_timeout_ms(Some("-5".into()), DEFAULT_TOTAL_TIMEOUT_MS), 30_000);
+    }
+
+    #[test]
+    fn timeout_env_parses_including_zero_meaning_off() {
+        assert_eq!(parse_timeout_ms(Some(" 45000 ".into()), DEFAULT_TOTAL_TIMEOUT_MS), 45_000);
+        assert_eq!(parse_timeout_ms(Some("0".into()), DEFAULT_TOTAL_TIMEOUT_MS), 0);
+    }
+
+    #[test]
+    fn per_request_timeout_option_extraction() {
+        use crate::http::extract_timeout_ms;
+        use tishlang_core::{ObjectMap, Value};
+        let mut m = ObjectMap::default();
+        m.insert(std::sync::Arc::from("timeout"), Value::Number(0.0));
+        assert_eq!(extract_timeout_ms(Some(&Value::object(m))), Some(0));
+        let mut m2 = ObjectMap::default();
+        m2.insert(std::sync::Arc::from("timeout"), Value::Number(90_000.0));
+        assert_eq!(extract_timeout_ms(Some(&Value::object(m2))), Some(90_000));
+        let mut m3 = ObjectMap::default();
+        m3.insert(std::sync::Arc::from("timeout"), Value::String("soon".into()));
+        assert_eq!(extract_timeout_ms(Some(&Value::object(m3))), None);
+        assert_eq!(extract_timeout_ms(None), None);
+    }
     use std::net::IpAddr;
 
     #[test]

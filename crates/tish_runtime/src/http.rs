@@ -130,6 +130,19 @@ pub(crate) fn extract_body(options: Option<&Value>) -> Option<String> {
     })
 }
 
+/// `fetch(url, { timeout: ms })` — per-request TOTAL timeout in milliseconds. `None` when absent
+/// (the sender applies the default), `Some(0)` disables the total timeout for that request (a
+/// long-lived stream such as an SSE chat completion); the client's idle read timeout still bounds it.
+pub(crate) fn extract_timeout_ms(options: Option<&Value>) -> Option<u64> {
+    options.and_then(|v| match v {
+        Value::Object(obj) => obj.borrow().strings.get("timeout").and_then(|t| match t {
+            Value::Number(n) if n.is_finite() && *n >= 0.0 => Some(*n as u64),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
 /// A single `multipart/form-data` part extracted from a `fetch` options object's `multipart` array.
 pub(crate) enum MultipartPart {
     /// A text field: `{ name, value }`.
