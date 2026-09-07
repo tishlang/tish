@@ -373,7 +373,7 @@ impl TishOpaque for HttpStreamReader {
             let inner = Arc::clone(&inner);
             let body = Arc::clone(&body);
             let (tx, rx) = tokio::sync::oneshot::channel();
-            crate::http::RUNTIME.with(|rt| {
+            crate::http::FETCH_RT.with(|rt| {
                 rt.spawn(async move {
                     let mut slot = inner.lock().await;
                     match slot.stream.next().await {
@@ -421,7 +421,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     let text_fn: NativeFn = tishlang_core::native_fn(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_text);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        crate::http::RUNTIME.with(|rt| {
+        crate::http::FETCH_RT.with(|rt| {
             rt.spawn(async move {
                 let r = bh.take_text_async().await;
                 let _ = tx.send(r);
@@ -432,7 +432,7 @@ pub fn response_value_from_reqwest(response: reqwest::Response) -> Value {
     let json_fn: NativeFn = tishlang_core::native_fn(move |_args: &[Value]| {
         let bh = Arc::clone(&bh_json);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        crate::http::RUNTIME.with(|rt| {
+        crate::http::FETCH_RT.with(|rt| {
             rt.spawn(async move {
                 let r = bh.take_text_async().await;
                 let _ = tx.send(r);
@@ -691,7 +691,7 @@ pub fn fetch_promise_from_args(args: Vec<Value>) -> Value {
     let multipart = extract_multipart(args.get(1));
     let timeout_ms = extract_timeout_ms(args.get(1));
     let (tx, rx) = tokio::sync::oneshot::channel();
-    crate::http::RUNTIME.with(|rt| {
+    crate::http::FETCH_RT.with(|rt| {
         rt.spawn(async move {
             let r = send_request_parts(url, method, headers, body, multipart, timeout_ms).await;
             let _ = tx.send(r);
@@ -761,7 +761,7 @@ pub fn fetch_all_promise_from_args(args: Vec<Value>) -> Value {
         parts.push((url, method, headers, body, multipart, timeout_ms));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    crate::http::RUNTIME.with(|rt| {
+    crate::http::FETCH_RT.with(|rt| {
         rt.spawn(async move {
             let futs: Vec<_> = parts
                 .into_iter()

@@ -83,6 +83,37 @@ pub(crate) fn subscriber_runtime() -> &'static Runtime {
     })
 }
 
+/// Process-global runtime that drives every outbound `fetch` (send, body reads, text/json).
+///
+/// Outbound fetch used the thread-local [`RUNTIME`] of whichever thread issued the call. The
+/// reqwest client — and its keep-alive connection POOL — is process-global, but each pooled
+/// connection's driver task lives on the runtime that opened it. In a multi-threaded host
+/// (tish-desktop dispatches each invoke on a pool thread; `block_on_http` even runs on a scoped
+/// thread that dies with the call) the NEXT request could pick a pooled connection whose runtime
+/// was idle or gone: the body then failed mid-stream as "error decoding response body". It hit
+/// exactly the request after a completed stream, intermittently, and never in a single-threaded
+/// program. One immortal runtime for all fetch I/O makes pooled connections always driven.
+pub(crate) fn fetch_runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("tish-fetch")
+            .enable_all()
+            .build()
+            .expect("Failed to create fetch runtime")
+    })
+}
+
+/// `RUNTIME.with(|rt| …)`-shaped handle onto [`fetch_runtime`], so call sites keep their shape.
+pub(crate) struct FetchRt;
+impl FetchRt {
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&Runtime) -> R) -> R {
+        f(fetch_runtime())
+    }
+}
+pub(crate) static FETCH_RT: FetchRt = FetchRt;
+
 pub fn await_fetch(args: Vec<Value>) -> Value {
     crate::promise::await_promise(crate::native_promise::fetch_promise(args))
 }
