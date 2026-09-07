@@ -106,9 +106,34 @@ else
   echo "  ✗ serve smoke FAILED"; FAIL=1
 fi
 
+# 7. Outbound fetch on a STREAMING body — regression for the 30s total timeout that cut every stream
+# longer than 30s ("error decoding response body"). A python chunked-stream server on a local port;
+# the app asserts { timeout: 0 } completes a 34s stream, { timeout: 2000 } cuts at ~2s, an idle stall
+# still dies under TISH_FETCH_READ_TIMEOUT_MS, and plain json() is unaffected. ~45s wall clock.
+echo "──────── fetch stream timeouts (tests/native_smoke/fetch_stream_app.tish) ────────"
+FSBIN="target/native_smoke_fetch_stream"
+FSPORT=18877
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  ✗ python3 not available for the stream server"; FAIL=1
+elif ! "$TISH" build tests/native_smoke/fetch_stream_app.tish -o "$FSBIN" \
+      --target native --native-backend rust --feature http --feature process >"$FSBIN.build.log" 2>&1; then
+  echo "  ✗ BUILD FAILED"; tail -30 "$FSBIN.build.log"; FAIL=1
+else
+  python3 tests/native_smoke/slow_stream_server.py "$FSPORT" & FSPID=$!
+  sleep 1
+  FSOUT=$(SMOKE_PORT="$FSPORT" TISH_FETCH_READ_TIMEOUT_MS=3000 "$FSBIN" 2>/dev/null)
+  kill "$FSPID" 2>/dev/null; wait "$FSPID" 2>/dev/null
+  if echo "$FSOUT" | grep -q "fetch-stream: ok" && ! echo "$FSOUT" | grep -q "fetch-stream: FAIL"; then
+    echo "  ✓ streaming fetch: timeout:0 completes >30s, timeout:N honored, idle stall bounded, json ok"
+  else
+    echo "  ✗ streaming fetch FAILED"; echo "$FSOUT"; FAIL=1
+  fi
+fi
+rm -f "$FSBIN" "$FSBIN.build.log"
+
 echo "════════════════════════════════"
 if [[ "$FAIL" == 0 ]]; then
-  echo "ALL NATIVE SMOKE TESTS PASSED (cli + fs + pty + stat + ws + http×2)"
+  echo "ALL NATIVE SMOKE TESTS PASSED (cli + fs + pty + stat + ws + http×2 + fetch-stream)"
 else
   echo "NATIVE SMOKE FAILURES — see above"
 fi
