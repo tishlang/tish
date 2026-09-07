@@ -1,0 +1,54 @@
+// Native smoke — outbound `fetch` timeouts on a STREAMING body (regression for the 30s cut that killed
+// every LLM tool-call stream longer than 30s with "error decoding response body").
+//
+// Run against tests/native_smoke/slow_stream_server.py on SMOKE_PORT. Asserts:
+//   1. `{ timeout: 0 }` lets a body that streams for LONGER than the 30s default complete.
+//   2. `{ timeout: 2000 }` cuts a 10s stream at ~2s (the per-request option is honored).
+//   3. `{ timeout: 0 }` on an idle stall still dies under the client's read timeout
+//      (run with TISH_FETCH_READ_TIMEOUT_MS=3000).
+//   4. A plain non-streaming json() request is unaffected.
+// Expected stdout: "fetch-stream: ok"
+
+fn readAll(resp) {
+  let reader = resp.body.getReader()
+  let total = 0
+  let t0 = Date.now()
+  let err = ""
+  let running = true
+  while (running) {
+    let c = null
+    try { c = await reader.read() } catch (e) { err = String(e.error !== null && typeof e.error === "string" ? e.error : "read error"); running = false; c = null }
+    if (c === null) { running = false }
+    else if (c.done) { running = false }
+    else { total = total + c.value.length }
+  }
+  return { ms: Date.now() - t0, bytes: total, err: err }
+}
+
+let port = typeof process.env.SMOKE_PORT === "string" && process.env.SMOKE_PORT !== "" ? process.env.SMOKE_PORT : "18888"
+let base = "http://127.0.0.1:" + port
+let fails = []
+
+// 1. longer than the 30s default, no total timeout → must complete
+let a = await readAll(await fetch(base + "/slow?secs=34", { timeout: 0 }))
+if (a.err !== "" || a.ms < 33000) { fails.push("long stream with timeout:0 did not complete: ms=" + a.ms + " err=" + a.err) }
+
+// 2. explicit short timeout is honored
+let b = await readAll(await fetch(base + "/slow?secs=10", { timeout: 2000 }))
+if (b.err === "" || b.ms < 1500 || b.ms > 6000) { fails.push("timeout:2000 not honored: ms=" + b.ms + " err=" + b.err) }
+
+// 3. idle stall still bounded by the read timeout (TISH_FETCH_READ_TIMEOUT_MS=3000)
+let d = await readAll(await fetch(base + "/stall", { timeout: 0 }))
+if (d.err === "" || d.ms > 10000) { fails.push("idle stall not cut by read timeout: ms=" + d.ms + " err=" + d.err) }
+
+// 4. non-streaming path unaffected
+let e = await fetch(base + "/json", {})
+let ej = await e.json()
+if (ej === null || ej.ok !== true) { fails.push("json() path broken") }
+
+if (fails.length === 0) {
+  console.log("fetch-stream: ok")
+} else {
+  let i = 0
+  while (i < fails.length) { console.log("fetch-stream: FAIL " + fails[i]); i = i + 1 }
+}
