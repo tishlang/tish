@@ -1,6 +1,8 @@
 # Build Tish binaries, run tests, and on main push create a release branch + prerelease (with npm package and platform binaries).
 # One "compile" job runs first to populate sccache + rust-cache; test and build jobs depend on it
 # so they restore cached cargo and avoid a parallel compile stampede.
+# PRs build the Linux binaries only; the macOS/Windows entries run on main, workflow_dispatch and
+# PRs labelled `build:all` (see the build_matrix job).
 
 name: CI (test, coverage, build)
 
@@ -9,6 +11,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # labeled/unlabeled so adding `build:all` re-runs the workflow with the full build matrix.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 env:
@@ -285,34 +289,49 @@ jobs:
             --runtimes vm,interp,rust,cranelift,llvm,wasi,node,bun,qjs \
             --github-step-summary
 
+  build_matrix:
+    name: Plan build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      # Only the main-push `release` job consumes the platform binaries, yet every PR built all
+      # five. The macOS entries take ~8 min and Windows ~10 min per run, all for artifacts nobody
+      # downloads. PRs now build the Linux entries only (they still prove the release build
+      # compiles); main pushes, workflow_dispatch and PRs carrying the `build:all` label get the
+      # full matrix. The `pr` flag is stripped from the output so the matrix job names are the same
+      # as before (`build (darwin-arm64, macos-14, ...)`).
+      - name: Select platforms
+        id: plan
+        env:
+          FULL: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'build:all') }}
+        run: |
+          set -euo pipefail
+          cat > matrix.json <<'JSON'
+          [
+            { "platform": "linux-x64",    "os": "ubuntu-22.04",                    "target": "x86_64-unknown-linux-gnu",  "binary_name": "tish",     "pr": true  },
+            { "platform": "linux-arm64",  "os": "blacksmith-4vcpu-ubuntu-2404-arm", "target": "aarch64-unknown-linux-gnu", "binary_name": "tish",     "pr": true  },
+            { "platform": "darwin-arm64", "os": "macos-14",                        "target": "aarch64-apple-darwin",      "binary_name": "tish",     "pr": false },
+            { "platform": "darwin-x64",   "os": "macos-14",                        "target": "x86_64-apple-darwin",       "binary_name": "tish",     "pr": false },
+            { "platform": "win32-x64",    "os": "windows-latest",                  "target": "x86_64-pc-windows-msvc",    "binary_name": "tish.exe", "pr": false }
+          ]
+          JSON
+          if [ "$FULL" = "true" ]; then
+            INCLUDE=$(jq -c 'map(del(.pr))' matrix.json)
+          else
+            INCLUDE=$(jq -c 'map(select(.pr) | del(.pr))' matrix.json)
+          fi
+          echo "Build matrix (full=$FULL): $INCLUDE"
+          echo "include=$INCLUDE" >> "$GITHUB_OUTPUT"
+
   build:
-    needs: [compile, version]
+    needs: [compile, version, build_matrix]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux-x64
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            binary_name: tish
-          - platform: linux-arm64
-            os: blacksmith-4vcpu-ubuntu-2404-arm
-            target: aarch64-unknown-linux-gnu
-            binary_name: tish
-          - platform: darwin-arm64
-            os: macos-14
-            target: aarch64-apple-darwin
-            binary_name: tish
-          - platform: darwin-x64
-            os: macos-14
-            target: x86_64-apple-darwin
-            binary_name: tish
-          - platform: win32-x64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: tish.exe
+        include: ${{ fromJSON(needs.build_matrix.outputs.include) }}
 
     runs-on: ${{ matrix.os }}
     env:
