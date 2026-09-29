@@ -360,23 +360,13 @@ jobs:
         run: cargo clean -p tishlang -p tishlang_vm
 
       - name: Build (native / rustup target)
-        if: ${{ !matrix.use_cross }}
+        # Every entry builds natively: linux-arm64 runs on an arm64 runner, so there is no cross path.
         run: |
           cargo build --release -p tishlang --target ${{ matrix.target }} --features full
           cargo build --release -p tishlang_cargo_bindgen --target ${{ matrix.target }}
           cargo build --release -p tishlang_fmt --target ${{ matrix.target }}
           cargo build --release -p tishlang_lint --target ${{ matrix.target }}
           cargo build --release -p tishlang_lsp --target ${{ matrix.target }}
-
-      - name: Install cross and build (Linux ARM64)
-        if: ${{ matrix.use_cross }}
-        run: |
-          cargo install cross
-          cross build --target ${{ matrix.target }} -p tishlang --release --features full
-          cross build --target ${{ matrix.target }} -p tishlang_cargo_bindgen --release
-          cross build --target ${{ matrix.target }} -p tishlang_fmt --release
-          cross build --target ${{ matrix.target }} -p tishlang_lint --release
-          cross build --target ${{ matrix.target }} -p tishlang_lsp --release
 
       - name: Stage binary for upload
         shell: bash
