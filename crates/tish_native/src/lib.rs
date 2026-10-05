@@ -107,7 +107,12 @@ pub fn compile_to_native_with_config(
                     ios_runtime_features(f)
                 }
             };
-            let cross_cap = build_config.cargo_target.as_ref().map(|_| {
+            // A desktop triple (one slice of a universal macOS build) is not a restricted target.
+            let capped = build_config
+                .cargo_target
+                .as_deref()
+                .filter(|t| is_gba || !t.ends_with("-apple-darwin"));
+            let cross_cap = capped.map(|_| {
                 cap(features)
                     .into_iter()
                     .collect::<std::collections::HashSet<_>>()
@@ -130,7 +135,7 @@ pub fn compile_to_native_with_config(
                     message: e.to_string(),
                 })?;
 
-            let features_for_cargo = if build_config.cargo_target.is_some() {
+            let features_for_cargo = if capped.is_some() {
                 cap(&effective_features)
             } else {
                 effective_features
