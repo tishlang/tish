@@ -32,6 +32,8 @@ http = ["dep:tishlang_runtime", "tishlang_runtime/http", "send-values", "timers"
 # Promise + `tish:http.await` / `Promise` export without the full HTTP client stack (e.g. wasm32-wasip1).
 promise = ["dep:tishlang_runtime", "tishlang_runtime/promise", "send-values"]
 ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
+# `tish:ffi` loadModule: runtime loading of tish FFI cdylibs.
+ffi = ["dep:tishlang_runtime", "tishlang_runtime/ffi"]
 
 [dependencies]
 tishlang_ast = { path = "../tish_ast", version = ">=0.1" }

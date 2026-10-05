@@ -134,7 +134,9 @@ fn value_object_from_map(m: ObjectMap) -> Value {
     feature = "promise",
     feature = "timers",
     feature = "process",
-    feature = "ws"
+    feature = "ws",
+    feature = "tty",
+    feature = "ffi"
 ))]
 #[inline]
 fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
@@ -161,6 +163,8 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     s.insert("ws".to_string());
     #[cfg(feature = "tty")]
     s.insert("tty".to_string());
+    #[cfg(feature = "ffi")]
+    s.insert("ffi".to_string());
     s
 }
 
@@ -173,7 +177,8 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
         feature = "timers",
         feature = "process",
         feature = "ws",
-        feature = "tty"
+        feature = "tty",
+        feature = "ffi"
     )),
     allow(unused_variables)
 )]
@@ -451,6 +456,15 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             })),
             "readLine" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::tty_read_line(args)
+            })),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "ffi")]
+    if spec == "tish:ffi" && cap_allows(enabled, "ffi") {
+        return match export_name {
+            "loadModule" => Some(Value::native(|args: &[Value]| {
+                tishlang_runtime::ffi_load_module(args)
             })),
             _ => None,
         };

@@ -2446,6 +2446,10 @@ impl Codegen {
                     "entries" => Some("Value::native(|args: &[Value]| tishlang_runtime::zip_entries(args))"),
                     _ => None,
                 },
+            "tish:ffi" if self.has_feature("ffi") => match export_name {
+                    "loadModule" => Some("Value::native(|args: &[Value]| tishlang_runtime::ffi_load_module(args))"),
+                    _ => None,
+                },
             _ => return None,
         };
         init.map(String::from)
@@ -2456,7 +2460,7 @@ impl Codegen {
             matches!(
                 name,
                 "http" | "timers" | "fs" | "process" | "regex" | "ws" | "tty" | "pty" | "net"
-                    | "encoding" | "crypto" | "zip"
+                    | "encoding" | "crypto" | "zip" | "ffi"
             )
         } else {
             self.features.contains(name)
@@ -3150,7 +3154,7 @@ impl Codegen {
         // `VmRef`) from THIS crate and cannot version-skew them against a separate `tishlang_runtime`
         // dependency of their own. Also avoids a duplicate-import error, since `Value` is already in
         // this list and could not be re-exported a second time at the crate root.
-        if self.emit_mode == crate::NativeEmitMode::RustLib {
+        if self.is_lib_surface() {
             self.write("pub ");
         }
         self.write("use tishlang_runtime::{console_debug as tish_console_debug, console_info as tish_console_info, console_log as tish_console_log, console_warn as tish_console_warn, console_error as tish_console_error, boolean as tish_boolean, decode_uri as tish_decode_uri, encode_uri as tish_encode_uri, encode_uri_component as tish_encode_uri_component, decode_uri_component as tish_decode_uri_component, string_escape_html_impl as tish_escape_html, in_operator as tish_in_operator, is_finite as tish_is_finite, is_nan as tish_is_nan, json_parse as tish_json_parse, json_stringify as tish_json_stringify, math_abs as tish_math_abs, math_ceil as tish_math_ceil, math_floor as tish_math_floor, math_max as tish_math_max, math_min as tish_math_min, math_round as tish_math_round, math_sqrt as tish_math_sqrt, parse_float as tish_parse_float, parse_int as tish_parse_int, math_random as tish_math_random, math_pow as tish_math_pow, math_sin as tish_math_sin, math_cos as tish_math_cos, math_tan as tish_math_tan, math_log as tish_math_log, math_exp as tish_math_exp, math_sign as tish_math_sign, math_trunc as tish_math_trunc, math_imul as tish_math_imul, math_sinh as tish_math_sinh, math_cosh as tish_math_cosh, math_tanh as tish_math_tanh, math_asinh as tish_math_asinh, math_acosh as tish_math_acosh, math_atanh as tish_math_atanh, math_cbrt as tish_math_cbrt, math_log2 as tish_math_log2, math_log10 as tish_math_log10, math_expm1 as tish_math_expm1, math_log1p as tish_math_log1p, math_clz32 as tish_math_clz32, math_fround as tish_math_fround, math_hypot as tish_math_hypot, math_atan2 as tish_math_atan2, math_asin as tish_math_asin, math_acos as tish_math_acos, math_atan as tish_math_atan, array_is_array as tish_array_is_array, array_of as tish_array_of, array_from as tish_array_from, object_is as tish_object_is, object_has_own as tish_object_has_own, structured_clone as tish_structured_clone, array_construct as tish_array_construct, string_from_char_code as tish_string_from_char_code, string_convert as tish_string_convert, number_convert as tish_number_convert, number_is_integer as tish_number_is_integer, number_is_safe_integer as tish_number_is_safe_integer, number_is_nan as tish_number_is_nan, number_is_finite as tish_number_is_finite, object_assign as tish_object_assign, object_freeze as tish_object_freeze, object_is_frozen as tish_object_is_frozen, object_keys as tish_object_keys, object_values as tish_object_values, object_entries as tish_object_entries, object_from_entries as tish_object_from_entries, symbol_object as tish_symbol_object, tish_construct, tish_error_constructor, tish_date_constructor, tish_set_constructor, tish_map_constructor, map_get as tish_map_get, map_has as tish_map_has, map_set as tish_map_set, map_values as tish_map_values, tish_float64_array_constructor, tish_float32_array_constructor, tish_int8_array_constructor, tish_uint8_array_constructor, tish_uint8_clamped_array_constructor, tish_int16_array_constructor, tish_uint16_array_constructor, tish_int32_array_constructor, tish_uint32_array_constructor, tish_audio_context_constructor, ObjectMap, ObjectData, PropMap, TishError, Value, VmRef};\n");
@@ -3268,7 +3272,7 @@ impl Codegen {
             self.writeln("}");
             self.writeln("");
         }
-        if self.emit_mode == crate::NativeEmitMode::RustLib {
+        if self.is_lib_surface() {
             self.emit_rust_lib_surface(program)?;
         }
         // M5 (default-on via native_opts_enabled; TISH_NATIVE_OPT=0 opts out): emit a parallel
@@ -3432,6 +3436,15 @@ impl Codegen {
             for s in &program.statements {
                 Self::collect_value_used_stmt(s, &mut self.value_used_names);
             }
+            // A library surface publishes each exported binding as a `Value`
+            // (`__tish_publish_exports`), so an exported fn is value-used even if the module only
+            // ever calls it. Without this a numeric `export fn add(a, b)` lost its boxed wrapper
+            // and the published list named a binding that didn't exist (E0308 / E0425).
+            if self.is_lib_surface() {
+                for e in self.rust_lib_exports(program) {
+                    self.value_used_names.insert(e.local_name.to_string());
+                }
+            }
             // Which of the survivors carry the all-`i32` signature. Computed AFTER the fixpoint,
             // so a function the proof rejected never reaches the i32 ABI either.
             self.native_fns_i32 = program
@@ -3571,7 +3584,7 @@ impl Codegen {
             .unwrap_or(self.emit_mode == crate::NativeEmitMode::Gba || !threads_possible);
         // `RustLib` publishes its exports by naming the `run()` local, so its bindings must stay
         // locals; the whole point there is that the frame outlives the call anyway.
-        if self.emit_mode == crate::NativeEmitMode::RustLib {
+        if self.is_lib_surface() {
             self.module_statics_on = false;
         }
         if crate::module_statics_flag().unwrap_or(true) {
@@ -4084,7 +4097,7 @@ impl Codegen {
         // `Rc`, so the closure — and every module-level cell it captured — stays alive and shared.
         // That is what makes module state survive between `pub fn` calls (and stay mutable through
         // `clear*`-style reassignment, since captures are `VmRef` cells, not copies).
-        if self.emit_mode == crate::NativeEmitMode::RustLib {
+        if self.is_lib_surface() {
             let pairs: Vec<String> = self
                 .rust_lib_exports(program)
                 .iter()
@@ -4171,6 +4184,51 @@ impl Codegen {
     /// unless the `send-values` feature is on (it follows `http`), so a `static` would not compile
     /// for the common configuration. Per-thread instances also match how a consumer uses this:
     /// register into the module's registries, then call it, on one thread.
+    /// Library emit modes: the entry module's exports become a crate surface (no `fn main`).
+    fn is_lib_surface(&self) -> bool {
+        matches!(
+            self.emit_mode,
+            crate::NativeEmitMode::RustLib | crate::NativeEmitMode::FfiModule
+        )
+    }
+
+    /// The tish FFI ABI v2 surface for [`crate::NativeEmitMode::FfiModule`]: one `extern "C"`
+    /// trampoline per export (marshaling through `tishlang_ffi_guest`) and
+    /// `tish_module_register_v2`, which installs the host's API table and returns the export table.
+    fn emit_ffi_module_surface(&mut self, export_names: &[String]) {
+        self.writeln("// ── tish FFI module (ABI v2) ──────────────────────────────────────────");
+        self.writeln("mod __tish_ffi {");
+        self.indent += 1;
+        self.writeln("use super::*;");
+        self.writeln("use tishlang_ffi_guest as guest;");
+        for (i, name) in export_names.iter().enumerate() {
+            self.writeln(&format!(
+                "extern \"C\" fn __tish_ffi_export_{i}(args: *const guest::TishValueRef, argc: usize) -> guest::TishValueRef {{"
+            ));
+            self.writeln(&format!(
+                "    unsafe {{ guest::export_call(args, argc, |a| __tish_call_export({name:?}, &a), tish_last_throw) }}"
+            ));
+            self.writeln("}");
+        }
+        self.writeln("#[no_mangle]");
+        self.writeln("pub unsafe extern \"C\" fn tish_module_register_v2(api: *const guest::TishHostApi) -> *const guest::TishExportTable {");
+        self.indent += 1;
+        self.writeln("if !guest::install(api) { return ::std::ptr::null(); }");
+        self.writeln("guest::export_table(&[");
+        for (i, name) in export_names.iter().enumerate() {
+            let cname = format!("{name}\\0");
+            self.writeln(&format!(
+                "    (b\"{cname}\", __tish_ffi_export_{i} as guest::TishNativeFn),"
+            ));
+        }
+        self.writeln("])");
+        self.indent -= 1;
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln("");
+    }
+
     fn emit_rust_lib_surface(&mut self, program: &Program) -> Result<(), CompileError> {
         if self.is_async {
             return Err(CompileError::new(
@@ -4299,7 +4357,32 @@ impl Codegen {
         self.writeln("}");
         self.writeln("");
 
+        // Items the surface itself defines: a same-named `pub fn` would not compile.
+        let reserved = |name: &str| {
+            matches!(name, "run" | "main" | "tish_last_throw" | "runtime") || name.starts_with("__tish")
+        };
+        let clashing: Vec<&str> = exports
+            .iter()
+            .map(|e| e.exported_name.as_str())
+            .filter(|n| reserved(n))
+            .collect();
+        if !clashing.is_empty() && self.emit_mode == crate::NativeEmitMode::RustLib {
+            return Err(CompileError::new(
+                format!(
+                    "--target rust-lib: the export name(s) `{}` clash with items the generated crate \
+                     defines. Rename them (e.g. `export {{ {} as start }}`).",
+                    clashing.join("`, `"),
+                    clashing[0]
+                ),
+                None,
+            ));
+        }
+
         for e in &exports {
+            // FFI modules export by string name, so a clashing Rust wrapper is simply not emitted.
+            if reserved(&e.exported_name) {
+                continue;
+            }
             // Checked above: every remaining export is a `fn`, so the arity is present.
             let n = e.arity.unwrap_or(0);
             let params: Vec<String> = (0..n).map(|i| format!("a{}: Value", i)).collect();
@@ -4319,6 +4402,10 @@ impl Codegen {
             self.writeln("}");
         }
         self.writeln("");
+        if self.emit_mode == crate::NativeEmitMode::FfiModule {
+            let names: Vec<String> = exports.iter().map(|e| e.exported_name.clone()).collect();
+            self.emit_ffi_module_surface(&names);
+        }
         Ok(())
     }
 
@@ -25239,7 +25326,7 @@ impl Codegen {
         // exported fn that got de-virtualized would leave the emitted `__tish_publish_exports` call
         // referencing a binding that no longer exists. The unboxed path is a numeric fast path;
         // a correct public surface outranks it.
-        if self.emit_mode == crate::NativeEmitMode::RustLib {
+        if self.is_lib_surface() {
             return;
         }
         let dbg = std::env::var("TISH_AGG_DEBUG").is_ok();

@@ -65,6 +65,9 @@ encoding = ["dep:base64"]
 crypto = ["dep:sha2", "dep:rand"]
 # Zip extraction (tish:zip) — VSIX / archive extract with `..`-traversal guard + unix-mode preserved.
 zip = ["dep:zip"]
+# Runtime loading of tish FFI cdylibs (tish:ffi `loadModule`), e.g. plugins built with
+# `tish build --crate-type cdylib`. Hosts need no linker flags: ABI v2 passes the accessor table.
+ffi = ["dep:tishlang_ffi"]
 # Interactive terminal I/O (issue #101): raw mode, key/resize events, size, alt screen.
 tty = ["dep:crossterm"]
 # Pseudoterminal hosting (issue #493): spawn a shell/program on a real PTY, read/write/resize/kill —
@@ -97,6 +100,7 @@ futures = { version = "0.3.32", optional = true }
 base64 = { version = "0.22", optional = true }
 sha2 = { version = "0.10", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+tishlang_ffi = { path = "../tish_ffi", version = ">=0.1", optional = true }
 bytes = { version = "1", optional = true }
 tiny_http = { version = "0.12.0", optional = true }
 # fs feature only: random suffix for `mkdtemp`.
