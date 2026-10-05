@@ -50,6 +50,7 @@ jobs:
             tishlang_build_utils
             tishlang_core
             tishlang_ffi
+            tishlang_ffi_guest
             tishlang_ast
             tishlang_resolve
             tishlang_ui
