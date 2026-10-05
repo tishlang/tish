@@ -1090,6 +1090,16 @@ fn build_file(
     } else {
         tishlang_native::NativeBuildConfig::desktop()
     };
+    // Release builds name the triple so the binary targets the platform baseline instead of the
+    // build machine's CPU, and so one host can build each slice of a universal binary.
+    let mut build_config = build_config;
+    if build_config.cargo_target.is_none() {
+        if let Ok(triple) = std::env::var("TISH_NATIVE_CARGO_TARGET") {
+            if !triple.is_empty() {
+                build_config.cargo_target = Some(triple);
+            }
+        }
+    }
 
     if is_js {
         let source = fs::read_to_string(&input_path).map_err(|e| format!("{}", e))?;

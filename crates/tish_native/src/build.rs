@@ -225,12 +225,16 @@ pub fn build_via_cargo_with_config(
     };
 
     // mimalloc as the program's global allocator — binary output only (a staticlib does not own the
-    // allocator), native only (don't cross-compile mimalloc's C). Adds one cached dep + a global_alloc
+    // allocator), native or another macOS slice only (the host clang builds mimalloc's C for both
+    // Mac architectures; other cross targets are skipped). Adds one cached dep + a global_alloc
     // statement; semantically transparent. `TISH_NATIVE_FAST_ALLOC=0` opts out.
     let use_fast_alloc = fast_alloc_enabled()
         && build_config.artifact != NativeArtifact::StaticLib
         && build_config.artifact != NativeArtifact::FfiModule
-        && build_config.cargo_target.is_none();
+        && build_config
+            .cargo_target
+            .as_deref()
+            .map_or(true, |t| cfg!(target_os = "macos") && t.ends_with("-apple-darwin"));
     if build_config.artifact == NativeArtifact::FfiModule {
         let guest_path = Path::new(&runtime_path)
             .parent()
