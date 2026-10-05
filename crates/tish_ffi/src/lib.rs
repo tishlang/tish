@@ -25,6 +25,12 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use tishlang_core::{ObjectData, Value, VmRef};
 
+mod v2;
+pub use v2::{
+    TishCallbackFn, TishCtxDropFn, TishHostApi, TISH_FFI_ABI_VERSION, TISH_HOST_API,
+    TISH_TAG_FUNCTION,
+};
+
 /// Opaque handle to a tish value. Internally `*mut Value` (a leaked `Box`); never inspect or
 /// free it except through the accessors. `null` is a valid "no value" sentinel for fallible
 /// accessors (e.g. `tish_value_object_get` on a missing key returns a fresh null handle, not
@@ -279,28 +285,33 @@ pub unsafe extern "C" fn tish_value_drop(r: TishValueRef) {
 /// reference semantics, so an extension can mutate a passed array); the per-call handles and the
 /// result handle are dropped here.
 pub fn wrap_native_fn(func: TishNativeFn) -> Value {
-    Value::native(move |args: &[Value]| -> Value {
-        let handles: Vec<TishValueRef> = args.iter().map(|v| box_value(v.clone())).collect();
-        // Calling an `extern "C"` fn pointer is a safe operation; the unsafety is in the accessors.
-        let result = func(handles.as_ptr(), handles.len());
-        // SAFETY: every `handles[i]` came from `box_value`; `result` is a freshly-owned handle
-        // from a `_new_*`/`_clone` accessor (the documented return contract).
-        unsafe {
-            let out = as_value(result).cloned().unwrap_or(Value::Null);
-            // #384: a buggy extension may violate the "return a fresh handle" contract and hand back
-            // one of its INPUT handles. `out` has already been cloned out of it, so the underlying
-            // value is safe — but dropping both `handles[i]` and `result` would then be a double-free
-            // (heap corruption). Drop each input once; drop `result` only if it is not an input alias.
-            let result_aliases_input = handles.iter().any(|h| std::ptr::eq(*h, result));
-            for h in handles {
-                tish_value_drop(h);
-            }
-            if !result_aliases_input {
-                tish_value_drop(result);
-            }
-            out
+    Value::native(move |args: &[Value]| -> Value { call_through_handles(args, |argv, argc| func(argv, argc)) })
+}
+
+/// Box `args` as owned handles, invoke `call`, unwrap the returned handle, and release them all.
+pub(crate) fn call_through_handles(
+    args: &[Value],
+    call: impl FnOnce(*const TishValueRef, usize) -> TishValueRef,
+) -> Value {
+    let handles: Vec<TishValueRef> = args.iter().map(|v| box_value(v.clone())).collect();
+    let result = call(handles.as_ptr(), handles.len());
+    // SAFETY: every `handles[i]` came from `box_value`; `result` is a freshly-owned handle
+    // from a `_new_*`/`_clone` accessor (the documented return contract).
+    unsafe {
+        let out = as_value(result).cloned().unwrap_or(Value::Null);
+        // #384: a buggy extension may violate the "return a fresh handle" contract and hand back
+        // one of its INPUT handles. `out` has already been cloned out of it, so the underlying
+        // value is safe — but dropping both `handles[i]` and `result` would then be a double-free
+        // (heap corruption). Drop each input once; drop `result` only if it is not an input alias.
+        let result_aliases_input = handles.iter().any(|h| std::ptr::eq(*h, result));
+        for h in handles {
+            tish_value_drop(h);
         }
-    })
+        if !result_aliases_input {
+            tish_value_drop(result);
+        }
+        out
+    }
 }
 
 /// Cached exports of one loaded module: name → C-ABI fn pointer. Fn pointers — unlike `Value`,
@@ -366,10 +377,22 @@ pub fn load_module(path: &str) -> Result<tishlang_core::ObjectMap, String> {
     let exports: CachedExports = unsafe {
         let lib =
             libloading::Library::new(path).map_err(|e| format!("ffi: load {}: {}", path, e))?;
-        let register: libloading::Symbol<unsafe extern "C" fn() -> *const TishExportTable> = lib
-            .get(b"tish_module_register")
-            .map_err(|e| format!("ffi: {}: no tish_module_register: {}", path, e))?;
-        let table = register();
+        // v2 modules receive the host API table; v1 modules resolve exported accessors.
+        let table = match lib.get::<unsafe extern "C" fn(*const TishHostApi) -> *const TishExportTable>(
+            b"tish_module_register_v2",
+        ) {
+            Ok(register_v2) => register_v2(&TISH_HOST_API),
+            Err(_) => {
+                let register: libloading::Symbol<unsafe extern "C" fn() -> *const TishExportTable> =
+                    lib.get(b"tish_module_register").map_err(|e| {
+                        format!(
+                            "ffi: {}: no tish_module_register_v2 or tish_module_register: {}",
+                            path, e
+                        )
+                    })?;
+                register()
+            }
+        };
         if table.is_null() {
             return Err(format!("ffi: {}: tish_module_register returned null", path));
         }

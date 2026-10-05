@@ -16,6 +16,8 @@ timers = ["tishlang_vm/timers"]
 ws = ["tishlang_vm/ws"]
 tty = ["tishlang_vm/tty"]
 regex = ["tishlang_vm/regex"]
+# tish:ffi loadModule; builds with every capability (`full`) pass it through like the others.
+ffi = ["tishlang_vm/ffi"]
 
 [lib]
 crate-type = ["staticlib", "rlib"]
