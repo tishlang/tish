@@ -556,7 +556,8 @@ pub(crate) struct BuildArgs {
     /// Cross-compile to an Apple iOS triple (e.g. `aarch64-apple-ios-sim`). Implies `--crate-type staticlib`.
     #[arg(long, value_name = "TRIPLE", help_heading = "Options")]
     pub ios_triple: Option<String>,
-    /// Output artifact for `--target native` (default: `bin`; use `staticlib` for embedded iOS).
+    /// Output artifact for `--target native` (default: `bin`; `staticlib` for embedded iOS; `cdylib`
+    /// for a dynamically loadable tish FFI module whose `export fn`s any tish host can load).
     #[arg(long, value_name = "TYPE", default_value = "bin", help_heading = "Options")]
     pub crate_type: String,
     #[arg(long, help_heading = "Options")]

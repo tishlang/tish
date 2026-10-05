@@ -30,7 +30,7 @@ fn normalize_capability_flags(features: &[String]) -> HashSet<String> {
     for s in features {
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             if part == "full" {
-                for name in ["http", "timers", "fs", "process", "regex", "ws", "tty"] {
+                for name in ["http", "timers", "fs", "process", "regex", "ws", "tty", "ffi"] {
                     out.insert(name.to_string());
                 }
             } else {
@@ -1077,9 +1077,14 @@ fn build_file(
             cargo_target: None,
             emit_mode: tishlang_compile::NativeEmitMode::EmbeddedLib,
         }
+    } else if crate_type == "cdylib" {
+        if is_js {
+            return Err("--crate-type cdylib requires a .tish entry file.".to_string());
+        }
+        tishlang_native::NativeBuildConfig::ffi_module()
     } else if crate_type != "bin" {
         return Err(format!(
-            "Unknown --crate-type: {}. Use 'bin' or 'staticlib'.",
+            "Unknown --crate-type: {}. Use 'bin', 'staticlib' or 'cdylib'.",
             crate_type
         ));
     } else {
@@ -1129,6 +1134,10 @@ fn build_file(
     // `rust-lib` writes a crate DIRECTORY at `-o`, and already reported it — the artifact-path
     // rewriting below is all about locating a single built file, which does not apply.
     if build_config.artifact == tishlang_native::NativeArtifact::RustLib {
+        return Ok(());
+    }
+    if build_config.artifact == tishlang_native::NativeArtifact::FfiModule {
+        println!("Built tish FFI module: {}", output_path);
         return Ok(());
     }
 

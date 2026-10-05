@@ -22,6 +22,7 @@ const RUNTIME_CARGO_FEATURES: &[&str] = &[
     "encoding",
     "crypto",
     "zip",
+    "ffi",
 ];
 
 /// Map CLI/compile features to flags passed to `tishlang_runtime` in the temp crate's Cargo.toml.
@@ -229,10 +230,21 @@ pub fn build_via_cargo_with_config(
     // statement; semantically transparent. `TISH_NATIVE_FAST_ALLOC=0` opts out.
     let use_fast_alloc = fast_alloc_enabled()
         && build_config.artifact != NativeArtifact::StaticLib
+        && build_config.artifact != NativeArtifact::FfiModule
         && build_config
             .cargo_target
             .as_deref()
             .map_or(true, |t| cfg!(target_os = "macos") && t.ends_with("-apple-darwin"));
+    if build_config.artifact == NativeArtifact::FfiModule {
+        let guest_path = Path::new(&runtime_path)
+            .parent()
+            .map(|crates| crates.join("tish_ffi_guest"))
+            .ok_or_else(|| format!("Cannot locate tish_ffi_guest next to {}", runtime_path))?;
+        more_deps.push_str(&format!(
+            "\ntishlang_ffi_guest = {{ path = {:?} }}\n",
+            guest_path.display().to_string().replace('\\', "/")
+        ));
+    }
     if use_fast_alloc {
         more_deps.push_str("\nmimalloc = \"0.1\"\n");
     }
@@ -245,20 +257,25 @@ pub fn build_via_cargo_with_config(
     let ui_dep = ui_dep_toml(&runtime_path, rust_code);
 
     let profile = nested_release_profile_toml();
-    let src_file = if build_config.artifact == NativeArtifact::StaticLib {
-        "lib.rs"
-    } else {
-        "main.rs"
-    };
-    let crate_section = if build_config.artifact == NativeArtifact::StaticLib {
+    let is_lib_artifact = matches!(
+        build_config.artifact,
+        NativeArtifact::StaticLib | NativeArtifact::FfiModule
+    );
+    let src_file = if is_lib_artifact { "lib.rs" } else { "main.rs" };
+    let crate_section = if is_lib_artifact {
+        let crate_type = if build_config.artifact == NativeArtifact::FfiModule {
+            "cdylib"
+        } else {
+            "staticlib"
+        };
         format!(
             r#"[lib]
 name = "{}"
-crate-type = ["staticlib"]
+crate-type = ["{}"]
 path = "src/lib.rs"
 
 "#,
-            cargo_name
+            cargo_name, crate_type
         )
     } else {
         format!(
@@ -321,12 +338,16 @@ edition = "2021"
 
     tishlang_build_utils::run_cargo_build(&build_dir, target_dir.as_deref(), cross)?;
 
-    let artifact = if build_config.artifact == NativeArtifact::StaticLib {
-        tishlang_build_utils::find_release_staticlib(&binary_dir, &cargo_name)?
-    } else {
-        tishlang_build_utils::find_release_binary(&binary_dir, &cargo_name)?
+    let artifact = match build_config.artifact {
+        NativeArtifact::StaticLib => {
+            tishlang_build_utils::find_release_staticlib(&binary_dir, &cargo_name)?
+        }
+        NativeArtifact::FfiModule => find_release_cdylib(&binary_dir, &cargo_name)?,
+        _ => tishlang_build_utils::find_release_binary(&binary_dir, &cargo_name)?,
     };
-    let target = if build_config.artifact == NativeArtifact::StaticLib {
+    let target = if build_config.artifact == NativeArtifact::FfiModule {
+        output_path.to_path_buf()
+    } else if build_config.artifact == NativeArtifact::StaticLib {
         if output_path.extension().is_some_and(|e| e == "a") {
             output_path.to_path_buf()
         } else if output_path.to_string_lossy().ends_with('/') || output_path.is_dir() {
@@ -341,6 +362,20 @@ edition = "2021"
 
     cleanup_build_dir(&build_dir);
     Ok(())
+}
+
+/// The built `cdylib` for `cargo_name` under `dir` (`lib<name>.dylib` / `lib<name>.so` / `<name>.dll`).
+fn find_release_cdylib(dir: &Path, cargo_name: &str) -> Result<PathBuf, String> {
+    let candidates = [
+        format!("lib{cargo_name}.dylib"),
+        format!("lib{cargo_name}.so"),
+        format!("{cargo_name}.dll"),
+    ];
+    candidates
+        .iter()
+        .map(|c| dir.join(c))
+        .find(|p| p.is_file())
+        .ok_or_else(|| format!("Built cdylib not found in {} (looked for {:?})", dir.display(), candidates))
 }
 
 /// Read the agb version the facade pins, from `<facade>/Cargo.toml`. This keeps the generated ROM
