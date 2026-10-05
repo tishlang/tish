@@ -53,14 +53,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # Pinned: agb_hashmap 0.25 (via agb) stops compiling on nightlies from 2026-10-04
+      # (`Vec::new_in` is no longer const-stable for it). Move forward once agb releases a fix.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-20
           components: rust-src
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: build facade for thumbv4t (build-std core+alloc)
         run: >
-          cargo +nightly build
+          cargo +nightly-2026-09-20 build
           --manifest-path crates/tish_runtime_gba/Cargo.toml
           --target thumbv4t-none-eabi
           -Z build-std=core,alloc
