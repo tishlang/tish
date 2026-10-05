@@ -3086,8 +3086,9 @@ impl<'a> Compiler<'a> {
         props: &[JsxProp],
         children: &[JsxChild],
     ) -> Result<(), CompileError> {
-        let h_idx = self.name_idx(&Arc::from("h"));
-        self.emit_u16(Opcode::LoadGlobal, h_idx);
+        // `h`, `Fragment` and component tags resolve lexically (imports, module `fn`s, locals)
+        // and fall back to globals, so embedder-injected `h` via `set_global` still works.
+        self.emit_var_load(&Arc::from("h"));
         let tag_str = tag.as_ref();
         let is_component = tag_str
             .chars()
@@ -3095,8 +3096,7 @@ impl<'a> Compiler<'a> {
             .map(|c| c.is_uppercase())
             .unwrap_or(false);
         if is_component {
-            let tag_idx = self.name_idx(tag);
-            self.emit_u16(Opcode::LoadGlobal, tag_idx);
+            self.emit_var_load(tag);
         } else {
             let tag_const = self.constant_idx(Constant::String(Arc::from(tag_str)));
             self.emit(Opcode::LoadConst);
@@ -3109,10 +3109,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_jsx_fragment(&mut self, children: &[JsxChild]) -> Result<(), CompileError> {
-        let h_idx = self.name_idx(&Arc::from("h"));
-        self.emit_u16(Opcode::LoadGlobal, h_idx);
-        let fragment_idx = self.name_idx(&Arc::from("Fragment"));
-        self.emit_u16(Opcode::LoadGlobal, fragment_idx);
+        self.emit_var_load(&Arc::from("h"));
+        self.emit_var_load(&Arc::from("Fragment"));
         let null_idx = self.constant_idx(Constant::Null);
         self.emit(Opcode::LoadConst);
         self.chunk.write_u16(null_idx);
