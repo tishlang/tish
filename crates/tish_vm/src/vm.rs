@@ -1183,6 +1183,13 @@ pub struct Vm {
     /// [`register_native_module`]). Phase-2 item 11: unblocks `cargo:`
     /// imports on the cranelift and llvm backends which run this VM.
     native_modules: VmRef<HashMap<String, VmRef<ObjectMap>>>,
+    /// Numeric JIT + OSR for code this VM runs (default on). The JIT's code caches and callee
+    /// registry are process-global and the registry is keyed by bare global name, so two VMs in one
+    /// process that both JIT can resolve each other's same-named functions. An embedder hosting
+    /// mutually untrusted programs turns this off ([`Vm::set_jit_enabled`]): such a VM never
+    /// compiles, never OSRs (so every loop polls the execution deadline), and never touches the
+    /// shared registry. Inherited by every closure the VM creates.
+    jit: bool,
 }
 
 /// A bytecode-VM closure: a compiled chunk plus its captured lexical chain and shared VM state.
@@ -1598,6 +1605,8 @@ struct VmClosure {
     globals: VmRef<ObjectMap>,
     capabilities: Arc<HashSet<String>>,
     native_modules: VmRef<HashMap<String, VmRef<ObjectMap>>>,
+    /// The creating VM's [`Vm::jit`] setting, carried into every `Vm` built to run this closure.
+    jit: bool,
 }
 
 impl tishlang_core::Callable for VmClosure {
@@ -1695,6 +1704,11 @@ impl tishlang_core::Callable for VmClosure {
         // than overflowing the native stack (this recursive re-entry is the DEFAULT `tish run` path).
         // The counter is thread-local because each closure call builds a fresh `Vm`; the parked throw
         // is picked up by the caller's `take_pending_throw()` check (Call/SelfCall post-call).
+        // Loop-free recursion (e.g. naive `fib`) never reaches a back-edge, so calls poll too.
+        if tishlang_core::execution_deadline_exceeded() {
+            set_pending_throw(construct_builtin::error_object("Error", tishlang_core::DEADLINE_ERROR));
+            return Value::Null;
+        }
         let depth = tishlang_core::inc_call_depth();
         if depth > max_call_depth() {
             tishlang_core::dec_call_depth();
@@ -1708,6 +1722,7 @@ impl tishlang_core::Callable for VmClosure {
             globals: self.globals.clone(),
             capabilities: Arc::clone(&self.capabilities),
             native_modules: self.native_modules.clone(),
+            jit: self.jit,
         };
         #[cfg(not(target_arch = "wasm32"))]
         let run = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
@@ -1756,7 +1771,19 @@ impl Vm {
             globals: VmRef::new(init_globals(capabilities.as_ref())),
             capabilities,
             native_modules: VmRef::new(HashMap::new()),
+            jit: true,
         }
+    }
+
+    /// Turn the numeric JIT and OSR on or off for this VM and every closure it creates from now on
+    /// (see [`Vm::jit`]). Set before [`Vm::run`]. Off isolates a VM from other VMs' JIT state in the
+    /// same process and guarantees every loop polls the execution deadline; it never changes results.
+    pub fn set_jit_enabled(&mut self, on: bool) {
+        self.jit = on;
+    }
+
+    pub fn jit_enabled(&self) -> bool {
+        self.jit
     }
 
     /// Register an externally-supplied native module under a `cargo:`-style
@@ -1825,8 +1852,11 @@ impl Vm {
         // here (the outermost entry — closures run via `run_chunk`, not this) so a long-lived process
         // (REPL / embedder) running a NEW program never resolves a stale callee registered by a prior
         // one. A cross-caller and its callee always compile within the same run, so this is sufficient.
+        // A JIT-off VM registers no callees, so it must not clear other VMs' registrations either.
         #[cfg(not(target_arch = "wasm32"))]
-        crate::jit::reset_callees();
+        if self.jit {
+            crate::jit::reset_callees();
+        }
         let result = self.run_chunk(chunk, &chunk.nested, &[], repl_mode);
         // A throw that escaped every `catch` reaches here as the pending-throw sentinel; turn the
         // parked value into the conventional uncaught-error message (issue #60).
@@ -2202,7 +2232,7 @@ impl Vm {
                     // `region_end - dist`. Once a loop is hot, try to run its remaining iterations in
                     // native code (numeric slot loops only; anything else falls straight through).
                     #[cfg(not(target_arch = "wasm32"))]
-                    if Self::osr_enabled() {
+                    if self.jit && Self::osr_enabled() {
                         let region_end = ip;
                         let header_ip = ip.saturating_sub(dist);
                         let key = (Arc::as_ptr(&cur) as usize, header_ip);
@@ -2251,6 +2281,9 @@ impl Vm {
                         set_pending_throw(stack_overflow_error());
                         return Some(Err(PENDING_THROW_SENTINEL.to_string()));
                     }
+                    if tishlang_core::execution_deadline_exceeded() {
+                        return Some(Err(tishlang_core::DEADLINE_ERROR.to_string()));
+                    }
                     frames.push((cur.clone(), ip, slot_base, stack_base, enclosing.clone()));
                     let new_base = slots.len();
                     slots.resize(new_base + cur.num_slots as usize, Value::Null);
@@ -2289,6 +2322,9 @@ impl Vm {
                                 if frames.len() >= max_call_depth() {
                                     set_pending_throw(stack_overflow_error());
                                     return Some(Err(PENDING_THROW_SENTINEL.to_string()));
+                                }
+                                if tishlang_core::execution_deadline_exceeded() {
+                                    return Some(Err(tishlang_core::DEADLINE_ERROR.to_string()));
                                 }
                                 frames.push((cur, ip, slot_base, stack_base, enclosing));
                                 cur = next_chunk;
@@ -2631,7 +2667,7 @@ impl Vm {
                             // and call native code when all args are numbers; else fall back to
                             // the interpreter below. Purely additive — can't change behaviour.
                             #[cfg(not(target_arch = "wasm32"))]
-                            let jit_fn = crate::jit::try_compile_numeric(inner);
+                            let jit_fn = if self.jit { crate::jit::try_compile_numeric(inner) } else { None };
                             let inner_clone = inner.clone();
                             let globals = self.globals.clone();
                             // The closure captures its defining frame's scope PLUS that frame's own
@@ -2688,6 +2724,7 @@ impl Vm {
                                 globals,
                                 capabilities,
                                 native_modules,
+                                jit: self.jit,
                             };
                             #[cfg(feature = "send-values")]
                             {
@@ -2971,6 +3008,9 @@ impl Vm {
                     // #381: SelfCall is a second native recursive re-entry (a self-recursive function
                     // re-enters run_chunk directly). Bound it with the same shared counter; `raise!` is
                     // in scope here, so throw the catchable RangeError directly.
+                    if tishlang_core::execution_deadline_exceeded() {
+                        return Err(tishlang_core::DEADLINE_ERROR.to_string());
+                    }
                     let depth = tishlang_core::inc_call_depth();
                     if depth > max_call_depth() {
                         tishlang_core::dec_call_depth();
@@ -2983,6 +3023,7 @@ impl Vm {
                         globals: self.globals.clone(),
                         capabilities: Arc::clone(&self.capabilities),
                         native_modules: self.native_modules.clone(),
+                        jit: self.jit,
                     };
                     #[cfg(not(target_arch = "wasm32"))]
                     let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
@@ -3123,7 +3164,7 @@ impl Vm {
                     // only (`slot_locals` is the live frame); non-slot / non-numeric loops fail the
                     // whitelist or the live-in check and fall straight through to the interpreter.
                     #[cfg(not(target_arch = "wasm32"))]
-                    if chunk.slot_based && Self::osr_enabled() {
+                    if self.jit && chunk.slot_based && Self::osr_enabled() {
                         let region_end = ip;
                         let header_ip = ip.saturating_sub(dist);
                         // Count on the RAW header via the single-entry fast slot — byte-identical to the
