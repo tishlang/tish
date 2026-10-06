@@ -363,6 +363,18 @@ fn parse_key<'a>(input: &'a str, cache: &mut KeyCache) -> Result<(Arc<str>, &'a 
     }
 }
 
+/// The four hex digits after `\\u`, consuming them (and counting their bytes); None if they
+/// aren't four hex digits.
+fn hex4(chars: &mut core::iter::Peekable<core::str::Chars<'_>>, byte_count: &mut usize) -> Option<u32> {
+    let mut hex = String::new();
+    for _ in 0..4 {
+        let c = chars.next()?;
+        hex.push(c);
+        *byte_count += c.len_utf8();
+    }
+    u32::from_str_radix(&hex, 16).ok()
+}
+
 /// Decode a JSON string that contains at least one escape (the slow path).
 fn parse_string_escaped(input: &str) -> Result<(Value, &str), String> {
     let input = &input[1..]; // skip opening quote
@@ -404,19 +416,39 @@ fn parse_string_escaped(input: &str) -> Result<(Value, &str), String> {
                         result.push('/');
                         byte_count += 1;
                     }
+                    Some('b') => {
+                        result.push('\u{8}');
+                        byte_count += 1;
+                    }
+                    Some('f') => {
+                        result.push('\u{c}');
+                        byte_count += 1;
+                    }
                     Some('u') => {
                         byte_count += 1;
-                        let mut hex = String::new();
-                        for _ in 0..4 {
-                            if let Some(c) = chars.next() {
-                                hex.push(c);
-                                byte_count += c.len_utf8();
+                        match hex4(&mut chars, &mut byte_count) {
+                            // A UTF-16 surrogate pair (`\ud83d\ude00`) is one character. A lone
+                            // surrogate has no character of its own, so it reads as U+FFFD.
+                            Some(high @ 0xD800..=0xDBFF) => {
+                                let mut ahead = chars.clone();
+                                let mut ahead_bytes = 0;
+                                let low = if ahead.next() == Some('\\') && ahead.next() == Some('u') {
+                                    hex4(&mut ahead, &mut ahead_bytes)
+                                } else {
+                                    None
+                                };
+                                match low {
+                                    Some(low @ 0xDC00..=0xDFFF) => {
+                                        chars = ahead;
+                                        byte_count += 2 + ahead_bytes;
+                                        let n = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                                        result.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+                                    }
+                                    _ => result.push('\u{FFFD}'),
+                                }
                             }
-                        }
-                        if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                            if let Some(c) = char::from_u32(n) {
-                                result.push(c);
-                            }
+                            Some(n) => result.push(char::from_u32(n).unwrap_or('\u{FFFD}')),
+                            None => {}
                         }
                     }
                     Some(c) => {
@@ -662,5 +694,33 @@ mod tests {
             Value::Array(arr) => assert_eq!(arr.borrow().len(), n),
             _ => panic!("expected array"),
         }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::json_parse;
+    use crate::Value;
+
+    fn text(json: &str) -> String {
+        match json_parse(json).unwrap() {
+            Value::String(s) => s.to_string(),
+            other => panic!("not a string: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surrogate_pairs_are_one_character() {
+        assert_eq!(text(r#""😀 ok""#), "😀 ok");
+        assert_eq!(text(r#""a😀b""#), "a😀b");
+        assert_eq!(text(r#""é""#), "é");
+    }
+
+    #[test]
+    fn lone_surrogates_and_short_escapes() {
+        assert_eq!(text(r#""\ud83d x""#), "\u{FFFD} x");
+        assert_eq!(text(r#""\ude00""#), "\u{FFFD}");
+        assert_eq!(text(r#""\ud83dA""#), "\u{FFFD}A");
+        assert_eq!(text(r#""\b\f\n""#), "\u{8}\u{c}\n");
     }
 }
