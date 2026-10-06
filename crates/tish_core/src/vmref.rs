@@ -15,7 +15,7 @@
 //! | feature `send-values`     | `VmRef<T>`              | `NativeFn`                       | targets                                          |
 //! |---------------------------|-------------------------|----------------------------------|--------------------------------------------------|
 //! | **off** *(default)*       | `Rc<RefCell<T>>`        | `Rc<dyn Fn + 'static>`           | wasm32, wasi, interpreter, cranelift/llvm VMs    |
-//! | **on**                    | `Arc<Mutex<T>>`         | `Arc<dyn Fn + Send + Sync>`      | Rust native with `http` enabled (server workloads) |
+//! | **on**                    | `Arc<RwLock<T>>`        | `Arc<dyn Fn + Send + Sync>`      | Rust native with `http` enabled (server workloads) |
 //!
 //! The *API* is identical in both configurations (`borrow` / `borrow_mut`
 //! / `ptr_eq` / `Clone`), so every existing call site in the workspace
@@ -28,7 +28,7 @@
 //!   bit-identical to the pre-migration baseline.
 //! * **Rust native, non-server**: same — `send-values` only activates
 //!   when something in the dependency graph (usually `http`) needs it.
-//! * **Rust native with server**: `Arc<Mutex<T>>` pays ~3–5 ns per
+//! * **Rust native with server**: `Arc<RwLock<T>>` pays ~3–5 ns per
 //!   `borrow` in the uncontended case (single atomic CAS). On Tish's
 //!   hot paths — roughly 6–12 borrows per request — that's ~30–60 ns of
 //!   overhead. In exchange we get `N×` handler scaling across cores,
@@ -45,7 +45,7 @@
 //! ```
 //!
 //! Returned guard types (`VmReadGuard<'_, T>`, `VmWriteGuard<'_, T>`) are
-//! type aliases that pick `Ref`/`RefMut` or `MutexGuard` depending on the
+//! type aliases that pick `Ref`/`RefMut` or `RwLock` read/write guards depending on the
 //! feature. They both `Deref` (and, for write guards, `DerefMut`) to `T`
 //! just like the underlying types.
 
@@ -113,45 +113,45 @@ mod imp {
 }
 
 // --------------------------------------------------------------------------
-// Thread-safe backing store (opt-in): Arc<Mutex<T>>
+// Thread-safe backing store (opt-in): Arc<RwLock<T>>
 // --------------------------------------------------------------------------
 #[cfg(feature = "send-values")]
 mod imp {
-    use parking_lot::Mutex;
+    use parking_lot::RwLock;
     use std::sync::Arc;
 
     #[derive(Default)]
-    pub struct VmRef<T: ?Sized>(pub(super) Arc<Mutex<T>>);
+    pub struct VmRef<T: ?Sized>(pub(super) Arc<RwLock<T>>);
 
-    /// Read guard alias. On the multi-threaded path both readers and
-    /// writers share a single `MutexGuard` (exclusive access).
-    pub type ReadGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
-    /// Write guard alias.
-    pub type WriteGuard<'a, T> = parking_lot::MutexGuard<'a, T>;
+    /// Read guard alias. Readers share the lock, like `RefCell::borrow`: native codegen reads the
+    /// same cell more than once within one statement (`{ a: x, b: n - x }` → two
+    /// `(*x.borrow())` temporaries alive until the statement ends), which an exclusive lock turned
+    /// into a self-deadlock.
+    pub type ReadGuard<'a, T> = parking_lot::RwLockReadGuard<'a, T>;
+    /// Write guard alias (exclusive).
+    pub type WriteGuard<'a, T> = parking_lot::RwLockWriteGuard<'a, T>;
 
     impl<T> VmRef<T> {
         #[inline]
         pub fn new(value: T) -> Self {
-            VmRef(Arc::new(Mutex::new(value)))
+            VmRef(Arc::new(RwLock::new(value)))
         }
     }
 
     impl<T: ?Sized> VmRef<T> {
-        /// Acquire the inner mutex. `parking_lot::Mutex` is used (not
-        /// `std::sync::Mutex`): its uncontended lock is a single atomic with
-        /// no pthread syscall — a profile of object/array-heavy code showed
-        /// `pthread_mutex_lock/unlock` as a top cost under send-values, since
-        /// every property/element access locks. It also has no poisoning, so
-        /// there is no `Result` to swallow (a handler panic aborts the thread
-        /// regardless).
+        /// Shared access. `read_recursive` so a thread that already holds a read guard can take
+        /// another even while a writer on another thread waits (a plain `read` would queue behind
+        /// that writer and deadlock). `parking_lot` rather than `std`: its uncontended lock is a
+        /// single atomic, and every property/element access takes one.
         #[inline]
         pub fn borrow(&self) -> ReadGuard<'_, T> {
-            self.0.lock()
+            self.0.read_recursive()
         }
 
+        /// Exclusive access.
         #[inline]
         pub fn borrow_mut(&self) -> WriteGuard<'_, T> {
-            self.0.lock()
+            self.0.write()
         }
 
         #[inline]
@@ -205,5 +205,40 @@ impl<T: fmt::Debug> fmt::Debug for VmRef<T> {
 impl<T: fmt::Debug> fmt::Debug for VmRef<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "RefCell {{ value: {:?} }}", &*self.borrow())
+    }
+}
+
+#[cfg(all(test, feature = "send-values"))]
+mod send_values_tests {
+    use super::VmRef;
+
+    /// Native codegen keeps `(*x.borrow())` temporaries alive to the end of a statement, so one
+    /// statement can read the same cell twice: `{ a: x, b: n - x }`. That must not deadlock.
+    #[test]
+    fn two_reads_of_one_cell_at_once() {
+        let x = VmRef::new(2.0_f64);
+        let sum = *x.borrow() + *x.borrow();
+        assert_eq!(sum, 4.0);
+        *x.borrow_mut() = sum;
+        assert_eq!(*x.borrow(), 4.0);
+    }
+
+    /// Readers on other threads still see writes, and a held read guard doesn't block another
+    /// reader while a writer waits elsewhere.
+    #[test]
+    fn readers_and_writers_across_threads() {
+        let x = VmRef::new(0_u32);
+        let held = x.borrow();
+        let writer = {
+            let x = x.clone();
+            std::thread::spawn(move || {
+                *x.borrow_mut() += 1;
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(*x.borrow(), 0, "a second read while a writer waits");
+        drop(held);
+        writer.join().unwrap();
+        assert_eq!(*x.borrow(), 1);
     }
 }
