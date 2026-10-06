@@ -236,14 +236,7 @@ pub fn build_via_cargo_with_config(
             .as_deref()
             .map_or(true, |t| cfg!(target_os = "macos") && t.ends_with("-apple-darwin"));
     if build_config.artifact == NativeArtifact::FfiModule {
-        let guest_path = Path::new(&runtime_path)
-            .parent()
-            .map(|crates| crates.join("tish_ffi_guest"))
-            .ok_or_else(|| format!("Cannot locate tish_ffi_guest next to {}", runtime_path))?;
-        more_deps.push_str(&format!(
-            "\ntishlang_ffi_guest = {{ path = {:?} }}\n",
-            guest_path.display().to_string().replace('\\', "/")
-        ));
+        more_deps.push_str(&ffi_guest_dep_toml(&runtime_path)?);
     }
     if use_fast_alloc {
         more_deps.push_str("\nmimalloc = \"0.1\"\n");
@@ -516,6 +509,24 @@ fn runtime_dep_toml(runtime_path: &str, features_str: &str) -> String {
             runtime_path, features_str
         )
     }
+}
+
+/// The `tishlang_ffi_guest` dependency line for an FFI module (same source policy as the runtime).
+/// A released compiler's module must take it from the registry: as a path it would bring its own
+/// path-built `tishlang_core` next to the registry one the runtime uses, and the two `Value` types
+/// don't match.
+fn ffi_guest_dep_toml(runtime_path: &str) -> Result<String, String> {
+    if let Some(v) = released_compiler_version() {
+        return Ok(format!("\ntishlang_ffi_guest = {{ version = {:?} }}\n", v));
+    }
+    let guest_path = Path::new(runtime_path)
+        .parent()
+        .map(|crates| crates.join("tish_ffi_guest"))
+        .ok_or_else(|| format!("Cannot locate tish_ffi_guest next to {}", runtime_path))?;
+    Ok(format!(
+        "\ntishlang_ffi_guest = {{ path = {:?} }}\n",
+        guest_path.display().to_string().replace('\\', "/")
+    ))
 }
 
 /// The optional `tishlang_ui` dependency line (same source policy as the runtime).
