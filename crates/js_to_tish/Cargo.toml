@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Vanilla JavaScript to Tish AST converter"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 oxc = { version = "0.121", features = ["semantic"] }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "LLVM backend for Tish (bytecode → native via clang/LLVM)"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 tishlang_bytecode = { path = "../tish_bytecode", version = ">=0.1" }

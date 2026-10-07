@@ -3,7 +3,7 @@ name = "tishlang"
 version = "0.0.0-dev"
 edition = "2021"
 description = "Tish CLI - run, REPL, compile to native"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 # tishlang_runtime has no direct source use here — it's required by the http/fs/process/

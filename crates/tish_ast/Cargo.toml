@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Tish AST types and span info"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]

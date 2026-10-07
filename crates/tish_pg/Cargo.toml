@@ -3,7 +3,7 @@ name = "tishlang_pg"
 version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL driver for the Tish native runtime — tokio-postgres + deadpool"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [lib]

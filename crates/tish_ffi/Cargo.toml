@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Stable C ABI for tish native extensions — opaque value handles + extern \"C\" accessors so a cdylib (native) or wasm host-import module can interoperate with any tish backend without sharing tish_core's Rust types. Workstream B (full-backend-parity-plan.md)."
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [features]

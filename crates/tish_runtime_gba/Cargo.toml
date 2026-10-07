@@ -6,10 +6,7 @@ description = "no_std runtime facade for Tish compiled output on the Game Boy Ad
 # Spelled out, NOT `{ workspace = true }`: this crate is in the workspace `exclude` list, so it has
 # no workspace root to inherit from. Without these, `cargo publish` refuses the crate outright,
 # which is why it is the one tishlang_* crate that never shipped.
-#
-# The LICENSE is a COPY, not the root one: cargo requires license-file to resolve inside the
-# package directory, and `../../LICENSE` is not packaged.
-license-file = "LICENSE"
+license = "MIT"
 repository = "https://github.com/tishlang/tish"
 
 # The GBA `Gba` emit mode declares the generated crate's dependency as

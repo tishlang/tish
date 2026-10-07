@@ -3,7 +3,7 @@ name = "tishlang_cargo_bindgen"
 version = "0.1.0"
 edition = "2021"
 description = "Generate Rust glue for Tish cargo: imports (bindgen-style, pre-commit friendly)"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 # proc-macro2 is enabled for its `span-locations` feature, not used by name (Span comes

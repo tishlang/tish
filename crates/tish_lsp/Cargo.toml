@@ -3,7 +3,7 @@ name = "tishlang_lsp"
 version = "0.1.1"
 edition = "2021"
 description = "Language Server Protocol implementation for Tish"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [[bin]]

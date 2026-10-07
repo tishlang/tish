@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Runtime for Cranelift-compiled Tish bytecode"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [features]
 default = []
