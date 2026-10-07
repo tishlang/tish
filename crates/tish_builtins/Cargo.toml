@@ -5,7 +5,7 @@ edition = "2021"
 description = "Shared builtin implementations for Tish (array, string, object, math)"
 
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 # std-only deps, optional so the `portable` build drops them (rand needs OS

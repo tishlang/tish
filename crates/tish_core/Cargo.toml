@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Shared Value type and utilities for Tish (used by interpreter and runtime)"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [features]
 # `std` is on by default, so every existing consumer builds exactly as before

@@ -3,7 +3,7 @@ name = "tishlang_wasm_runtime"
 version = "0.1.0"
 edition = "2021"
 description = "Tish VM compiled to WebAssembly (browser + Wasmtime/WASI)"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [lib]

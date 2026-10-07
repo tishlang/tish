@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Native code generation backend for Tish (Cranelift / direct compile)"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 tishlang_build_utils = { path = "../tish_build_utils", version = ">=0.1" }

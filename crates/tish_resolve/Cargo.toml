@@ -3,7 +3,7 @@ name = "tishlang_resolve"
 version = "0.1.1"
 edition = "2021"
 description = "Lexical name resolution for Tish (LSP, tooling)"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]

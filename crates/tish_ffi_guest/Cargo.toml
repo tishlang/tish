@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Module-side half of the tish FFI ABI v2: deep-converts between the host's opaque handles (through the TishHostApi table) and the module's own tishlang_core values, including functions in both directions. Links no host symbols."
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]

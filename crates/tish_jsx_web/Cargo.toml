@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Workspace placeholder; Lattish runtime is the lattish npm/git repo (not vendored here)"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]

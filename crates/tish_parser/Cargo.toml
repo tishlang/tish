@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Tish recursive descent parser"
 
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 [dependencies]
 tishlang_lexer = { path = "../tish_lexer", version = ">=0.1" }

@@ -3,7 +3,7 @@ name = "tishlang_fmt"
 version = "0.1.0"
 edition = "2021"
 description = "Opinionated formatter for Tish source (parse → pretty-print)"
-license-file = { workspace = true }
+license = { workspace = true }
 repository = { workspace = true }
 
 [[bin]]
