@@ -40,6 +40,13 @@ jobs:
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           find crates -name "Cargo.toml" -exec sed -i.bak "s/^version = .*/version = \"$VERSION\"/" {} \;
+          # Bound the dependencies between tishlang crates to this release: in the sources they are
+          # path deps with version = ">=0.1", which crates.io would publish as "any later version".
+          # A 3.x crate then resolved its siblings to 4.0.0 once that existed, linking two
+          # tishlang_core copies with incompatible Value types. "$VERSION" is a caret requirement
+          # (^$VERSION), so a crate only ever pairs with siblings from the same major line.
+          find crates -name "Cargo.toml" -exec sed -i.bak "s/version = \">=0\.1\"/version = \"$VERSION\"/g" {} \;
+          if grep -rn 'version = ">=0.1"' crates --include=Cargo.toml; then echo "::error::unbounded tishlang dependency left"; exit 1; fi
           find crates -name "Cargo.toml.bak" -delete
 
       - name: Publish crates (dependency order)
