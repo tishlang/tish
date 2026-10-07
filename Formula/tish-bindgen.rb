@@ -5,7 +5,7 @@ class TishBindgen < Formula
   desc "CLI to generate Rust glue for Tish cargo: imports (tishlang-cargo-bindgen)"
   homepage "https://github.com/tishlang/tish"
   version "3.15.3"
-  license "PIF"
+  license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?

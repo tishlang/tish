@@ -65,4 +65,4 @@ npx @tishlang/create-tish-app my-app
 
 ## License
 
-See the [Tish repository LICENSE](https://github.com/tishlang/tish/blob/main/LICENSE) (Pay It Forward).
+See the [Tish repository LICENSE](https://github.com/tishlang/tish/blob/main/LICENSE) (MIT).

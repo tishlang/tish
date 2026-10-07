@@ -9,7 +9,7 @@
   <a href="https://npmcharts.com/compare/@tishlang/tish"><img src="https://img.shields.io/npm/dm/@tishlang/tish.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="downloads" /></a>
   <a href="https://nodejs.org/en/about/previous-releases"><img src="https://img.shields.io/node/v/@tishlang/tish.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="node version"></a>
   <a href="https://crates.io/crates/tishlang"><img src="https://img.shields.io/crates/v/tishlang?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="crate version" /></a>
-  <a href="https://github.com/tishlang/tish/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-PIF-blue.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="license" /></a>
+  <a href="https://github.com/tishlang/tish/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square&colorA=1C1C1C&colorB=B688FF" alt="license" /></a>
 
 </p>
 
@@ -121,7 +121,7 @@ Native binaries are standalone (no Tish or Rust runtime required on the machine 
 
 ## 🤝 Contribution
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing, and code style. Tish is licensed under the [Pay It Forward License (PIF)](https://payitforwardlicense.com/).
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing, and code style. Tish is licensed under the [MIT License](LICENSE).
 
 ## 💪 Performance
 
@@ -135,4 +135,4 @@ Details: [docs/perf.md](docs/perf.md).
 
 ## 📝 License
 
-Tish is licensed under the [Pay It Forward License (PIF)](https://payitforwardlicense.com/). See [LICENSE](LICENSE).
+Tish is licensed under the [MIT License](LICENSE). See [LICENSE](LICENSE).

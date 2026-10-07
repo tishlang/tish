@@ -2,5 +2,5 @@
   "name": "@tishlang/tish",
   "version": "1.0.12",
   "private": true,
-  "license": "PIF"
+  "license": "MIT"
 }

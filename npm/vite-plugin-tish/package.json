@@ -2,7 +2,7 @@
   "name": "@tishlang/vite-plugin-tish",
   "version": "0.1.0",
   "description": "Vite plugin for Tish: in-graph .tish compilation with HMR and source maps for dev.",
-  "license": "PIF",
+  "license": "MIT",
   "type": "module",
   "main": "./index.js",
   "exports": {

@@ -1,6 +1,6 @@
 # Tish contribution guide
 
-Thank you for your interest in contributing to Tish. Before you start, please read these guidelines. Tish is licensed under the [Pay It Forward License (PIF)](https://payitforwardlicense.com/).
+Thank you for your interest in contributing to Tish. Before you start, please read these guidelines. Tish is licensed under the [MIT License](LICENSE).
 
 ---
 
