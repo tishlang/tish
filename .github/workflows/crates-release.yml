@@ -40,12 +40,34 @@ jobs:
           TAG="${{ github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           find crates -name "Cargo.toml" -exec sed -i.bak "s/^version = .*/version = \"$VERSION\"/" {} \;
-          # Bound the dependencies between tishlang crates to this release: in the sources they are
-          # path deps with version = ">=0.1", which crates.io would publish as "any later version".
-          # A 3.x crate then resolved its siblings to 4.0.0 once that existed, linking two
-          # tishlang_core copies with incompatible Value types. "$VERSION" is a caret requirement
-          # (^$VERSION), so a crate only ever pairs with siblings from the same major line.
-          find crates -name "Cargo.toml" -exec sed -i.bak "s/version = \">=0\.1\"/version = \"$VERSION\"/g" {} \;
+          # Dependencies between tishlang crates are path deps with version = ">=0.1" in the sources.
+          # Published as is, that means "any later version": a 3.x crate resolved its siblings to
+          # 4.0.0 once that existed and linked two tishlang_core copies (incompatible Value types).
+          # - [dependencies] / [build-dependencies]: bound to this release ("$VERSION" is ^$VERSION),
+          #   so a crate only pairs with siblings from the same major line.
+          # - [dev-dependencies]: drop the version. cargo strips path-only dev-deps when it packages a
+          #   crate; a versioned one must already be on crates.io, which fails for dev-deps published
+          #   later in the order and for cycles (tishlang_bytecode's tests use tishlang_vm, which
+          #   depends on tishlang_bytecode).
+          VERSION="$VERSION" python3 - <<'PY'
+          import os, pathlib, re
+          version = os.environ["VERSION"]
+          for f in pathlib.Path("crates").rglob("Cargo.toml"):
+              if "target" in f.parts:
+                  continue
+              out, section = [], ""
+              for line in f.read_text().splitlines(keepends=True):
+                  m = re.match(r"\s*\[([^\]]+)\]", line)
+                  if m:
+                      section = m.group(1).strip()
+                  if 'version = ">=0.1"' in line:
+                      if section.endswith("dev-dependencies"):
+                          line = re.sub(r',\s*version = ">=0\.1"|version = ">=0\.1",\s*', "", line)
+                      else:
+                          line = line.replace('version = ">=0.1"', 'version = "%s"' % version)
+                  out.append(line)
+              f.write_text("".join(out))
+          PY
           if grep -rn 'version = ">=0.1"' crates --include=Cargo.toml; then echo "::error::unbounded tishlang dependency left"; exit 1; fi
           find crates -name "Cargo.toml.bak" -delete
 
