@@ -72,4 +72,4 @@ changed module node(s) to Vite for per-module invalidation instead of a full rel
 
 ## License
 
-[PIF](https://payitforwardlicense.com/)
+[MIT](https://opensource.org/license/mit)

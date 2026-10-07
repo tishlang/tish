@@ -10,7 +10,7 @@
   ],
   "metadata": {
     "version": "0.1.0",
-    "license": "PIF",
+    "license": "MIT",
     "description": "Tree-sitter grammar for Tish",
     "links": {
       "repository": "https://github.com/tishlang/tish"
