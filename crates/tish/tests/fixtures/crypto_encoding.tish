@@ -1,0 +1,10 @@
+import { sha256, sha256Hex, randomBytes } from "tish:crypto"
+import { base64Encode, base64Decode, base64UrlEncode, base64UrlDecode, utf8Encode, utf8Decode } from "tish:encoding"
+
+// FIPS 180-2 vector, and the PKCE S256 shape (base64url of the raw digest, no padding).
+console.log(sha256Hex("abc"))
+console.log(base64UrlEncode(sha256("abc")))
+let r = randomBytes(32)
+console.log("random=" + String(r.length))
+console.log(utf8Decode(base64Decode(base64Encode(utf8Encode("héllo ✓")))))
+console.log(utf8Decode(base64UrlDecode(base64UrlEncode(utf8Encode("a?b>c")))))
