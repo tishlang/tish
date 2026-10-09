@@ -350,14 +350,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The key is the target only, NOT the version: with the version in it every release got a
+      # brand-new key, restored nothing, and compiled every dependency cold. No `cargo clean`
+      # either: the version and the capability features are both part of Cargo's fingerprint
+      # (the package id — name + version — and the enabled feature set feed the `-C metadata`
+      # hash), so a crate whose Cargo.toml version was bumped above is rebuilt, with everything
+      # that depends on it, while untouched crates.io dependencies come straight from the cache.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}-${{ needs.version.outputs.version }}
+          key: ${{ matrix.target }}
           cache-workspace-crates: "true"
-
-      - name: Clean tishlang + VM to force rebuild (version + capability cfgs are compile-time)
-        run: cargo clean -p tishlang -p tishlang_vm
 
       - name: Build (native / rustup target)
         if: ${{ !matrix.use_cross }}
