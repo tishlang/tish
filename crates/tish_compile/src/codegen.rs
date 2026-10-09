@@ -1132,17 +1132,17 @@ pub(crate) struct Codegen {
     /// #682: top-level function names whose boxed closure lives in a module static
     /// (`__TISH_GF_<name>`) rather than a `run()` local. Reads resolve to the static, so nothing
     /// captures them.
-    module_fn_statics: std::collections::HashSet<String>,
+    module_fn_statics: std::collections::BTreeSet<String>,
     /// #682: module-level DATA bindings whose `VmRef` cell is held by a module static
     /// (`__TISH_GV_<name>`) instead of being threaded into every closure as a `_cell` clone.
-    module_var_statics: std::collections::HashSet<String>,
+    module_var_statics: std::collections::BTreeSet<String>,
     /// #682: `(rust type, default value)` for each promoted binding's cell, recorded when its
     /// `let` is emitted. The accessor `fn` naming both is emitted after `run()`, so the type never
     /// has to be predicted ahead of inference.
     module_var_static_types: std::collections::HashMap<String, (String, String)>,
     /// #176 (default-on via `native_opts_enabled`): top-level `let` bindings lowered to `thread_local Cell<f64>`
     /// (`G_NAME`) when every use is a numeric read or a whole-binding numeric assign (fasta `seed`).
-    native_numeric_globals: std::collections::HashMap<String, f64>,
+    native_numeric_globals: std::collections::BTreeMap<String, f64>,
     /// Top-level `let name = [f64 literals…]` never reassigned — emitted as `const G_name: [f64; N]`
     /// for direct indexing from native fns (fasta `codes`/`probs`).
     module_const_f64_arrays: std::collections::HashMap<String, Vec<f64>>,
@@ -1463,10 +1463,10 @@ impl Codegen {
             refcell_wrapped_vars: std::collections::HashSet::new(),
             predeclared_cell_bindings: std::collections::HashSet::new(),
             module_statics_on: false,
-            module_fn_statics: std::collections::HashSet::new(),
-            module_var_statics: std::collections::HashSet::new(),
+            module_fn_statics: std::collections::BTreeSet::new(),
+            module_var_statics: std::collections::BTreeSet::new(),
             module_var_static_types: std::collections::HashMap::new(),
-            native_numeric_globals: std::collections::HashMap::new(),
+            native_numeric_globals: std::collections::BTreeMap::new(),
             module_const_f64_arrays: std::collections::HashMap::new(),
             module_const_int_statics: std::collections::HashSet::new(),
             arrays_passed_to_calls: std::collections::HashSet::new(),
@@ -3292,7 +3292,9 @@ impl Codegen {
             // emitter already produces (`G.with(|c| c.get())`) is unchanged.
             let gba = self.emit_mode == crate::NativeEmitMode::Gba;
             self.native_numeric_globals =
-                Self::collect_native_numeric_globals(&program.statements);
+                Self::collect_native_numeric_globals(&program.statements)
+                    .into_iter()
+                    .collect();
             if !self.native_numeric_globals.is_empty() {
                 if gba {
                     self.emit_native_numeric_global_singlecore()?;
@@ -4040,7 +4042,9 @@ impl Codegen {
         // order-independent, and this is the first point where the set is known).
         if self.module_statics_on {
             self.module_var_statics =
-                self.collect_module_var_statics(module_stmts, &self.refcell_wrapped_vars);
+                self.collect_module_var_statics(module_stmts, &self.refcell_wrapped_vars)
+                    .into_iter()
+                    .collect();
             for name in self.module_var_statics.clone() {
                 // The handle is a `VmRef` local exactly as before, so every read/write site is
                 // unchanged — it just comes out of the static instead of down a capture chain.
