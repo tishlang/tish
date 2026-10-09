@@ -57,7 +57,7 @@ fn nested_release_profile_toml() -> &'static str {
     if std::env::var("TISH_FAST_NATIVE_BUILD").as_deref() == Ok("1") {
         r#"[profile.release]
 opt-level = 1
-lto = false
+lto = "off"
 codegen-units = 16
 incremental = true
 strip = false
@@ -181,7 +181,13 @@ pub fn build_via_cargo_with_config(
         .and_then(|s| s.to_str())
         .unwrap_or("tish_out");
     let cargo_name = tishlang_build_utils::cargo_target_name(out_stem);
-    let build_dir = tishlang_build_utils::create_build_dir("tish_build", out_stem)?;
+    // With a persistent target dir the generated crate keeps one directory per output, so cargo's
+    // incremental cache (keyed by the package path) is reused; see `stable_build_dir`.
+    let stable = shared_native_target_dir();
+    let (build_dir, _build_lock) = match &stable {
+        Some(t) => stable_build_dir(t, out_stem, output_path)?,
+        None => (tishlang_build_utils::create_build_dir("tish_build", out_stem)?, None),
+    };
 
     let runtime_path = tishlang_build_utils::find_runtime_path_for_project(project_root)?;
 
@@ -302,13 +308,13 @@ edition = "2021"
         }
     );
 
-    fs::write(build_dir.join("Cargo.toml"), cargo_toml)
+    write_if_changed(&build_dir.join("Cargo.toml"), &cargo_toml)
         .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
     if let Some(gen) = generated_native_rs {
-        fs::write(build_dir.join("src/generated_native.rs"), gen)
+        write_if_changed(&build_dir.join("src/generated_native.rs"), gen)
             .map_err(|e| format!("Cannot write generated_native.rs: {}", e))?;
     }
-    fs::write(build_dir.join("src").join(src_file), rust_main)
+    write_if_changed(&build_dir.join("src").join(src_file), &rust_main)
         .map_err(|e| format!("Cannot write {}: {}", src_file, e))?;
 
     let workspace_target = Path::new(&runtime_path)
@@ -353,8 +359,50 @@ edition = "2021"
     };
     tishlang_build_utils::copy_binary_to_output(&artifact, &target)?;
 
-    cleanup_build_dir(&build_dir);
+    if stable.is_none() {
+        cleanup_build_dir(&build_dir);
+    }
     Ok(())
+}
+
+/// The generated crate's directory under a persistent `TISH_NATIVE_TARGET_DIR`:
+/// `<target>/tish-src/<stem>-<hash of the output path>`, the same on every build of that output.
+///
+/// Cargo keys a package's incremental cache by its path, so the per-process temp dir made every
+/// build compile the generated `main.rs` from scratch: minutes for a large app, against seconds
+/// for an incremental rebuild. Two builds of the same output take turns on the returned lock
+/// (held until it is dropped); different outputs get different directories.
+fn stable_build_dir(
+    target: &Path,
+    out_stem: &str,
+    output_path: &Path,
+) -> Result<(PathBuf, Option<fs::File>), String> {
+    use std::hash::{Hash, Hasher};
+    let abs = std::path::absolute(output_path).unwrap_or_else(|_| output_path.to_path_buf());
+    let mut h = std::hash::DefaultHasher::new();
+    abs.hash(&mut h);
+    let dir = target
+        .join("tish-src")
+        .join(format!("{out_stem}-{:016x}", h.finish()));
+    fs::create_dir_all(dir.join("src")).map_err(|e| format!("Cannot create build dir: {}", e))?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))
+        .map_err(|e| format!("Cannot open the build dir lock: {}", e))?;
+    lock.lock()
+        .map_err(|e| format!("Cannot lock the build dir: {}", e))?;
+    Ok((dir, Some(lock)))
+}
+
+/// Write `contents` unless the file already holds exactly that, so an unchanged file keeps its
+/// mtime and cargo's fingerprint.
+fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
+    if fs::read(path).is_ok_and(|old| old == contents.as_bytes()) {
+        return Ok(());
+    }
+    fs::write(path, contents)
 }
 
 /// The built `cdylib` for `cargo_name` under `dir` (`lib<name>.dylib` / `lib<name>.so` / `<name>.dll`).
@@ -427,7 +475,7 @@ opt-level = 1
 
 [profile.release]
 opt-level = 1
-lto = false
+lto = "off"
 codegen-units = 16
 incremental = true
 debug = {debug}
@@ -1298,7 +1346,7 @@ mod tests {
         assert!(thin.contains("lto = \"thin\"") && thin.contains("codegen-units = 8"));
         std::env::set_var("TISH_FAST_NATIVE_BUILD", "1");
         assert!(
-            nested_release_profile_toml().contains("lto = false"),
+            nested_release_profile_toml().contains("lto = \"off\""),
             "fast wins over thin"
         );
         std::env::remove_var("TISH_FAST_NATIVE_BUILD");
@@ -1447,7 +1495,7 @@ mod tests {
         std::env::set_var("TISH_FAST_NATIVE_BUILD", "1");
         let fast = super::gba_cargo_profiles_toml();
         assert!(
-            fast.contains("lto = false") && fast.contains("opt-level = 1"),
+            fast.contains("lto = \"off\"") && fast.contains("opt-level = 1"),
             "TISH_FAST_NATIVE_BUILD=1 is the iteration profile — no LTO, opt-level 1 (#581):\n{fast}"
         );
         std::env::remove_var("TISH_FAST_NATIVE_BUILD");
