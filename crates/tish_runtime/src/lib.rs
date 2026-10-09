@@ -1012,7 +1012,6 @@ pub fn process_cwd(_args: &[Value]) -> Value {
     Value::String(cwd.into())
 }
 
-#[cfg(feature = "process")]
 /// Windows: a child spawned from a GUI-subsystem parent (a desktop app) gets its own console
 /// window unless created with CREATE_NO_WINDOW — a packaged app spawning git / node / shell
 /// helpers at boot flashed a terminal window per child and stole focus. No-op elsewhere.
@@ -1027,8 +1026,25 @@ pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::
     cmd
 }
 
+/// `cmd` through the platform shell: `cmd /C` on Windows, `sh -c` elsewhere.
+fn shell_command(cmd: &str) -> std::process::Command {
+    #[cfg(windows)]
+    let mut c = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(cmd);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut c = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(cmd);
+        c
+    };
+    no_console_window(&mut c);
+    c
+}
+
 pub fn process_exec(args: &[Value]) -> Value {
-    use std::process::Command;
     let cmd = args
         .first()
         .map(|v| v.to_display_string())
@@ -1036,7 +1052,7 @@ pub fn process_exec(args: &[Value]) -> Value {
     if cmd.is_empty() {
         return Value::Number(0.0);
     }
-    match no_console_window(Command::new("sh").arg("-c").arg(&cmd)).status() {
+    match shell_command(&cmd).status() {
         Ok(status) => Value::Number(status.code().unwrap_or(1) as f64),
         Err(_) => Value::Number(1.0),
     }
@@ -1099,7 +1115,6 @@ fn process_capture_result(out: std::io::Result<std::process::Output>) -> Value {
 /// form interprets metacharacters.
 #[cfg(feature = "process")]
 pub fn process_exec_capture(args: &[Value]) -> Value {
-    use std::process::Command;
     let cmd = args
         .first()
         .map(|v| v.to_display_string())
@@ -1107,7 +1122,7 @@ pub fn process_exec_capture(args: &[Value]) -> Value {
     if cmd.is_empty() {
         return process_capture_obj(0, String::new(), String::new());
     }
-    process_capture_result(no_console_window(Command::new("sh").arg("-c").arg(&cmd)).output())
+    process_capture_result(shell_command(&cmd).output())
 }
 
 /// `process.execFileCapture(program, [args])` — run a program directly, WITHOUT a shell, capturing
