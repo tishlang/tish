@@ -53,6 +53,24 @@ mod tests {
     }
 
     /// The depth guard must not reject ordinary, modestly-nested code.
+    /// JSX attribute names may contain `-` (`aria-hidden`, `data-id`, `stroke-width`), and a
+    /// segment may be a keyword (`data-type`). Only touching tokens join: `{n - 1}` in a value
+    /// stays subtraction, and a spaced `a - b` is never read as one name.
+    #[test]
+    fn jsx_hyphenated_attribute_names() {
+        let src = r#"let e = <svg aria-hidden="true" stroke-width={2} data-type={t} data-x-y={n - 1} disabled />"#;
+        let dbg = format!("{:?}", parse(src).expect("hyphenated JSX attrs parse"));
+        for name in ["aria-hidden", "stroke-width", "data-type", "data-x-y", "disabled"] {
+            assert!(dbg.contains(&format!("{:?}", name)), "missing attr {name}: {dbg}");
+        }
+        assert!(dbg.contains("Binary"), "value `n - 1` must stay a subtraction: {dbg}");
+        let spaced = parse("let e = <a b - c />").map(|p| format!("{:?}", p));
+        assert!(
+            !spaced.unwrap_or_default().contains("\"b-c\""),
+            "spaced `b - c` must not become one attr name"
+        );
+    }
+
     #[test]
     fn normal_nesting_still_parses() {
         assert!(parse("let x = ((((1 + 2))))").is_ok());

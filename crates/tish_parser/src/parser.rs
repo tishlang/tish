@@ -2895,7 +2895,25 @@ impl<'a> Parser<'a> {
                 // `type` is `TokenKind::Type` but valid as a JSX attr name; see docs/js-emit-philosophy.md.
                 Some(TokenKind::Ident) | Some(TokenKind::Type) => {
                     let name_tok = self.advance().unwrap();
-                    let name = name_tok.literal.clone().ok_or("Expected attr name")?;
+                    let mut name = name_tok.literal.clone().ok_or("Expected attr name")?;
+                    // Hyphenated names (`aria-hidden`, `data-id`, `stroke-width`) lex as
+                    // word `-` word; join the parts while they touch with no whitespace.
+                    let mut end = name_tok.span.end;
+                    while let (Some(dash), Some(part)) =
+                        (self.tokens.get(self.pos), self.tokens.get(self.pos + 1))
+                    {
+                        let word = part.literal.as_deref().filter(|w| {
+                            w.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        });
+                        let touching = dash.span.start == end && part.span.start == dash.span.end;
+                        let Some(word) = word.filter(|_| dash.kind == TokenKind::Minus && touching)
+                        else {
+                            break;
+                        };
+                        name = format!("{}-{}", name, word).into();
+                        end = part.span.end;
+                        self.pos += 2;
+                    }
                     if matches!(self.peek_kind(), Some(TokenKind::Assign)) {
                         self.advance(); // =
                         let value = if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
