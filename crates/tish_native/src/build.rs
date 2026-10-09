@@ -292,6 +292,10 @@ name = "tish_output"
 version = "0.1.0"
 edition = "2021"
 
+# Standalone: the build dir can sit inside a Cargo workspace (TISH_NATIVE_TARGET_DIR under a
+# repo's target/), which must not try to absorb this generated crate.
+[workspace]
+
 {}{}
 [dependencies]
 {}
