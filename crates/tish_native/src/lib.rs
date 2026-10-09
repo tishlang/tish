@@ -107,11 +107,12 @@ pub fn compile_to_native_with_config(
                     ios_runtime_features(f)
                 }
             };
-            // A desktop triple (one slice of a universal macOS build) is not a restricted target.
+            // Only GBA and iOS are restricted. A desktop triple (a slice of a universal macOS
+            // build, Windows or Linux) keeps every capability.
             let capped = build_config
                 .cargo_target
                 .as_deref()
-                .filter(|t| is_gba || !t.ends_with("-apple-darwin"));
+                .filter(|t| is_gba || t.contains("-apple-ios"));
             let cross_cap = capped.map(|_| {
                 cap(features)
                     .into_iter()
