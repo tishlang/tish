@@ -18,6 +18,9 @@ tty = ["tishlang_vm/tty"]
 regex = ["tishlang_vm/regex"]
 # tish:ffi loadModule; builds with every capability (`full`) pass it through like the others.
 ffi = ["tishlang_vm/ffi"]
+# tish:crypto / tish:encoding: the cranelift build forwards every capability the compiler was built with.
+crypto = ["tishlang_vm/crypto"]
+encoding = ["tishlang_vm/encoding"]
 
 [lib]
 crate-type = ["staticlib", "rlib"]

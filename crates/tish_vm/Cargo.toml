@@ -34,6 +34,10 @@ promise = ["dep:tishlang_runtime", "tishlang_runtime/promise", "send-values"]
 ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
 # `tish:ffi` loadModule: runtime loading of tish FFI cdylibs.
 ffi = ["dep:tishlang_runtime", "tishlang_runtime/ffi"]
+# `tish:crypto` (sha256, sha256Hex, randomBytes) and `tish:encoding` (base64/base64url/utf8): the
+# same runtime functions the native backend links, so `tish run` / `tish test` match `tish build`.
+crypto = ["dep:tishlang_runtime", "tishlang_runtime/crypto"]
+encoding = ["dep:tishlang_runtime", "tishlang_runtime/encoding"]
 
 [dependencies]
 tishlang_ast = { path = "../tish_ast", version = ">=0.1" }

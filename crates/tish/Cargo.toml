@@ -25,7 +25,7 @@ path = "src/main.rs"
 default = ["full", "fast-alloc"]
 # Alias: same dependency edges as `default` (kept for `--features full` in CI and docs).
 # Includes `pg` so `tish run` can resolve `import … from '@tishlang/pg'` (`cargo:tish_pg`) on the bytecode VM.
-full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "ffi", "pg", "test-runner"]
+full = ["http", "fs", "process", "regex", "ws", "timers", "tty", "ffi", "crypto", "encoding", "pg", "test-runner"]
 # Fast allocator (mimalloc) as the process `#[global_allocator]`. tish's object/array/string workloads
 # are allocation-bound (a sampling profile of object-heavy code spends ~14%+ in system malloc/free);
 # mimalloc is markedly faster for the many-small-allocations pattern — the same reason JSC ships bmalloc.
@@ -45,6 +45,9 @@ ws      = ["tishlang_eval/ws",      "tishlang_runtime/ws",      "tishlang_compil
 tty     = ["tishlang_eval/tty",     "tishlang_runtime/tty",     "tishlang_compile/tty",     "tishlang_vm/tty"]
 # `tish:ffi` loadModule (runtime loading of `--crate-type cdylib` modules); static `ffi:` imports need no feature.
 ffi     = ["tishlang_runtime/ffi",  "tishlang_vm/ffi"]
+# `tish:crypto` / `tish:encoding` on the bytecode VM (`tish run`, `tish test`); native builds already had them.
+crypto   = ["tishlang_runtime/crypto",   "tishlang_vm/crypto"]
+encoding = ["tishlang_runtime/encoding", "tishlang_vm/encoding"]
 # GPU compute — Apple Silicon only
 [dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }

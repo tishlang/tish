@@ -136,7 +136,9 @@ fn value_object_from_map(m: ObjectMap) -> Value {
     feature = "process",
     feature = "ws",
     feature = "tty",
-    feature = "ffi"
+    feature = "ffi",
+    feature = "crypto",
+    feature = "encoding"
 ))]
 #[inline]
 fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
@@ -165,6 +167,10 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
     s.insert("tty".to_string());
     #[cfg(feature = "ffi")]
     s.insert("ffi".to_string());
+    #[cfg(feature = "crypto")]
+    s.insert("crypto".to_string());
+    #[cfg(feature = "encoding")]
+    s.insert("encoding".to_string());
     s
 }
 
@@ -178,7 +184,9 @@ pub fn all_compiled_capabilities() -> HashSet<String> {
         feature = "process",
         feature = "ws",
         feature = "tty",
-        feature = "ffi"
+        feature = "ffi",
+        feature = "crypto",
+        feature = "encoding"
     )),
     allow(unused_variables)
 )]
@@ -215,6 +223,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "mkdtemp" | "mkdtempSync" => Some(Value::native(|a: &[Value]| fx::mkdtemp(a))),
             "cp" | "cpSync" => Some(Value::native(|a: &[Value]| fx::cp(a))),
             "access" | "accessSync" => Some(Value::native(|a: &[Value]| fx::access(a))),
+            "chmod" | "chmodSync" => Some(Value::native(|a: &[Value]| fx::chmod(a))),
             "constants" => Some(fx::constants()),
             _ => None,
         };
@@ -242,6 +251,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "mkdtemp" => Some(Value::native(|a: &[Value]| fx::mkdtemp_promise(a))),
             "cp" => Some(Value::native(|a: &[Value]| fx::cp_promise(a))),
             "access" => Some(Value::native(|a: &[Value]| fx::access_promise(a))),
+            "chmod" => Some(Value::native(|a: &[Value]| fx::chmod_promise(a))),
             "exists" => Some(Value::native(|a: &[Value]| fx::exists_promise(a))),
             "constants" => Some(fx::constants()),
             _ => None,
@@ -466,6 +476,28 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "loadModule" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::ffi_load_module(args)
             })),
+            _ => None,
+        };
+    }
+    // Same runtime functions the native backend links for these modules (tish_compile codegen).
+    #[cfg(feature = "encoding")]
+    if spec == "tish:encoding" && cap_allows(enabled, "encoding") {
+        return match export_name {
+            "base64Encode" => Some(Value::native(|a: &[Value]| tishlang_runtime::base64_encode(a))),
+            "base64Decode" => Some(Value::native(|a: &[Value]| tishlang_runtime::base64_decode(a))),
+            "base64UrlEncode" => Some(Value::native(|a: &[Value]| tishlang_runtime::base64_url_encode(a))),
+            "base64UrlDecode" => Some(Value::native(|a: &[Value]| tishlang_runtime::base64_url_decode(a))),
+            "utf8Encode" => Some(Value::native(|a: &[Value]| tishlang_runtime::utf8_encode(a))),
+            "utf8Decode" => Some(Value::native(|a: &[Value]| tishlang_runtime::utf8_decode(a))),
+            _ => None,
+        };
+    }
+    #[cfg(feature = "crypto")]
+    if spec == "tish:crypto" && cap_allows(enabled, "crypto") {
+        return match export_name {
+            "sha256" => Some(Value::native(|a: &[Value]| tishlang_runtime::sha256(a))),
+            "sha256Hex" => Some(Value::native(|a: &[Value]| tishlang_runtime::sha256_hex(a))),
+            "randomBytes" => Some(Value::native(|a: &[Value]| tishlang_runtime::random_bytes(a))),
             _ => None,
         };
     }
