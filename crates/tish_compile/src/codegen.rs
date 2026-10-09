@@ -7833,6 +7833,17 @@ impl Codegen {
                     .flat_map(|p| p.bound_names())
                     .map(|n| n.to_string())
                     .collect();
+                // #741: a parameter literally named `args` shadows this closure's own
+                // `args: &[Value]` slice, so every parameter bound AFTER it would read
+                // `.get(n)` off a Value (E0599). Bind the slice to a name in the compiler's
+                // namespace first and read the whole prologue through that. Emitted only when
+                // the collision exists, so ordinary codegen is byte-identical.
+                let args_src = if current_param_names.iter().any(|n| n == "args") {
+                    self.writeln("let __tish_args = args;");
+                    "__tish_args"
+                } else {
+                    "args"
+                };
                 let formal_span = *span;
                 // M1 (keystone; default-on via native_opts_enabled): a typed scalar param
                 // normally arrives boxed (`args.get(i).cloned()`), which poisons native math in
@@ -7876,13 +7887,14 @@ impl Codegen {
                                 // is all-numbers by inference, so the `_ => NaN` fallback (JS
                                 // `arr[oob]`→NaN) is unreachable for sound inputs but never panics.
                                 self.writeln(&format!(
-                                    "let mut {}: Vec<f64> = match args.get({}) {{ \
+                                    "let mut {}: Vec<f64> = match {}.get({}) {{ \
                                        Some(Value::NumberArray(a)) => match &*a.borrow() {{ \
                                            tishlang_runtime::NumArrayBacking::Packed(p) => p.clone(), \
                                            tishlang_runtime::NumArrayBacking::Boxed(b) => b.iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect() }}, \
                                        Some(Value::Array(arr)) => arr.borrow().iter().map(|v| match v {{ Value::Number(n) => *n, _ => f64::NAN }}).collect(), \
                                        _ => Vec::new() }};",
                                     Self::escape_ident(tp.name.as_ref()),
+                                    args_src,
                                     i,
                                 ));
                                 native_params.push((tp.name.to_string(), vt));
@@ -7907,8 +7919,8 @@ impl Codegen {
                             };
                             if let Some(nt) = native_ty {
                                 let coercion = nt.from_value_expr(&format!(
-                                    "args.get({}).cloned().unwrap_or(Value::Null)",
-                                    i
+                                    "{}.get({}).cloned().unwrap_or(Value::Null)",
+                                    args_src, i
                                 ));
                                 self.writeln(&format!(
                                     "{} {} = {};",
@@ -7925,17 +7937,19 @@ impl Codegen {
                                 // reference them, e.g. `(a, b = a + 1)`.
                                 let default_str = self.emit_expr(default_expr)?;
                                 self.writeln(&format!(
-                                    "{} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};",
+                                    "{} {} = match {}.get({}) {{ Some(v) => v.clone(), None => {} }};",
                                     Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                                     Self::escape_ident(tp.name.as_ref()),
+                                    args_src,
                                     i,
                                     default_str
                                 ));
                             } else {
                                 self.writeln(&format!(
-                                    "{} {} = args.get({}).cloned().unwrap_or(Value::Null);",
+                                    "{} {} = {}.get({}).cloned().unwrap_or(Value::Null);",
                                     Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                                     Self::escape_ident(tp.name.as_ref()),
+                                    args_src,
                                     i
                                 ));
                             }
@@ -7943,8 +7957,8 @@ impl Codegen {
                         FunParam::Destructure { pattern, .. } => {
                             let tmp = format!("_formal_{}", i);
                             self.writeln(&format!(
-                                "let {} = args.get({}).cloned().unwrap_or(Value::Null);",
-                                tmp, i
+                                "let {} = {}.get({}).cloned().unwrap_or(Value::Null);",
+                                tmp, args_src, i
                             ));
                             self.emit_destruct_bindings(pattern, &tmp, "let mut", formal_span)?;
                         }
@@ -7965,16 +7979,18 @@ impl Codegen {
                 if let Some(rest) = rest_param {
                     if let Some(RustType::Vec(elem)) = &rest_native {
                         self.writeln(&format!(
-                            "let {}: Vec<{}> = args[{}..].iter().map(|v| {}).collect();",
+                            "let {}: Vec<{}> = {}[{}..].iter().map(|v| {}).collect();",
                             Self::escape_ident(rest.name.as_ref()),
                             elem.to_rust_type_str(),
+                            args_src,
                             params.len(),
                             elem.from_value_expr("v")
                         ));
                     } else {
                         self.writeln(&format!(
-                            "let {} = Value::Array(VmRef::new(args[{}..].to_vec()));",
+                            "let {} = Value::Array(VmRef::new({}[{}..].to_vec()));",
                             Self::escape_ident(rest.name.as_ref()),
+                            args_src,
                             params.len()
                         ));
                     }
@@ -12922,6 +12938,15 @@ impl Codegen {
             .flat_map(|p| p.bound_names())
             .map(|n| n.to_string())
             .collect();
+        // #741, closure form: same collision as the top-level lowering — a parameter named
+        // `args` shadows this closure's `args: &[Value]`, so read the prologue through an
+        // alias when one does.
+        let args_src = if current_param_names.iter().any(|n| n == "args") {
+            code.push_str("        let __tish_args = args;\n");
+            "__tish_args"
+        } else {
+            "args"
+        };
         for (i, p) in params.iter().enumerate() {
             match p {
                 FunParam::Simple(tp) => {
@@ -12934,17 +12959,19 @@ impl Codegen {
                         let prelude = std::mem::replace(&mut self.output, saved);
                         code.push_str(&prelude);
                         code.push_str(&format!(
-                            "        {} {} = match args.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
+                            "        {} {} = match {}.get({}) {{ Some(v) => v.clone(), None => {} }};\n",
                             Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                             Self::escape_ident(tp.name.as_ref()),
+                            args_src,
                             i,
                             default_str
                         ));
                     } else {
                         code.push_str(&format!(
-                            "        {} {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
+                            "        {} {} = {}.get({}).cloned().unwrap_or(Value::Null);\n",
                             Self::mut_kw_for(tp.name.as_ref(), "let mut"),
                             Self::escape_ident(tp.name.as_ref()),
+                            args_src,
                             i
                         ));
                     }
@@ -12952,8 +12979,8 @@ impl Codegen {
                 FunParam::Destructure { pattern, .. } => {
                     let tmp = format!("_formal_{}", i);
                     code.push_str(&format!(
-                        "        let {} = args.get({}).cloned().unwrap_or(Value::Null);\n",
-                        tmp, i
+                        "        let {} = {}.get({}).cloned().unwrap_or(Value::Null);\n",
+                        tmp, args_src, i
                     ));
                     let saved = std::mem::take(&mut self.output);
                     let saved_indent = self.indent;
