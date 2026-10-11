@@ -4,23 +4,23 @@
 class Tish < Formula
   desc "Tish - minimal TS/JS-compatible language. Run, REPL, compile to native."
   homepage "https://github.com/tishlang/tish"
-  version "4.1.4"
+  version "4.1.5"
   license "MIT"
 
   depends_on "tish-bindgen"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v4.1.4/tish-darwin-arm64"
-      sha256 "7624dd46148e06d2b7a9d388e0d854c80d7719c63c90175cba3f5f1933982a3b"
+      url "https://github.com/tishlang/tish/releases/download/v4.1.5/tish-darwin-arm64"
+      sha256 "4ee5dd81d1ab86407e6bbc9442ddc7fc48c028bbb12c3b9e0eaf619266218ca2"
 
       def install
         bin.install "tish-darwin-arm64" => "tish"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v4.1.4/tish-darwin-x64"
-      sha256 "0daf3b556735441c6680c875cd06b0e457fc5ad99ce677b04e87c46fe68a9786"
+      url "https://github.com/tishlang/tish/releases/download/v4.1.5/tish-darwin-x64"
+      sha256 "89f950dad0cbd3ec16d959c2e74b0521deb00faafc6faa0d975727146c8346af"
 
       def install
         bin.install "tish-darwin-x64" => "tish"
@@ -30,16 +30,16 @@ class Tish < Formula
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tishlang/tish/releases/download/v4.1.4/tish-linux-arm64"
-      sha256 "d5f325ceca7dc80a698db7d86c485cce93289a058ddb558a0185b67a3b4f0dfd"
+      url "https://github.com/tishlang/tish/releases/download/v4.1.5/tish-linux-arm64"
+      sha256 "0976c168cc6b5216a0122139606b4bb4b43b78b9b0f85d92ffa374f1b0bd4037"
 
       def install
         bin.install "tish-linux-arm64" => "tish"
       end
     end
     if Hardware::CPU.intel?
-      url "https://github.com/tishlang/tish/releases/download/v4.1.4/tish-linux-x64"
-      sha256 "9cdd96bb2d6cec70505f83dba4840bdf4cbbbd799436132fabf5d61671c5722a"
+      url "https://github.com/tishlang/tish/releases/download/v4.1.5/tish-linux-x64"
+      sha256 "d507af1170e115a9a878defb33c45ee022558e6b0ffc369000a3db288a593e92"
 
       def install
         bin.install "tish-linux-x64" => "tish"
