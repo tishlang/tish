@@ -990,7 +990,11 @@ impl<'a> Lexer<'a> {
                 self.at_line_start = true;
                 return self.next_token();
             }
-            _ => return Err(format!("Unexpected character: {:?}", c)),
+            // The same position suffix the parser's errors carry, so tools can point at it (#763).
+            _ => {
+                let end = self.span_start();
+                return Err(format!("Unexpected character: {:?} at Span {{ start: {:?}, end: {:?} }}", c, start, end));
+            }
         };
 
         let end = self.span_start();
