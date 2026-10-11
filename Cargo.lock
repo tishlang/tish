@@ -3647,6 +3647,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "tishlang_ast",
+ "tishlang_lexer",
  "tishlang_parser",
 ]
 

@@ -249,7 +249,11 @@ impl Printer {
     fn object_prop(&mut self, pr: &ObjectProp) {
         match pr {
             ObjectProp::KeyValue(k, v, _) => {
-                self.buf.push_str(k.as_ref());
+                if is_bare_key(k.as_ref()) {
+                    self.buf.push_str(k.as_ref());
+                } else {
+                    self.string_lit(k.as_ref());
+                }
                 self.buf.push_str(": ");
                 self.expr(v);
             }
@@ -1590,6 +1594,19 @@ impl Printer {
     }
 }
 
+/// Whether an object key can be written without quotes: only when it lexes as a token the parser takes
+/// as a bare key (an identifier, or the contextual keywords `type` and `declare`). Anything else —
+/// `'Content-Type'`, `'Asia/Tokyo'`, `'π'`, `'1'`, a keyword like `'default'` — keeps its quotes, or
+/// the formatted file would no longer parse (#762).
+fn is_bare_key(key: &str) -> bool {
+    use tishlang_lexer::TokenKind;
+    let mut chars = key.chars();
+    let starts = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    starts
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && matches!(TokenKind::keyword_or_ident(key), TokenKind::Ident | TokenKind::Type | TokenKind::Declare)
+}
+
 fn escape_template(s: &str) -> String {
     // In a template literal only backslash, backtick, and a `$` that begins an interpolation (`${`)
     // need escaping. A bare `$` is literal, so escaping every `$` just adds spurious backslashes.
@@ -1975,6 +1992,22 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tishlang/tish#762 — keys that aren't identifiers lost their quotes, so the output no longer
+    /// parsed. They keep them (and the output is a fixed point); plain identifier keys stay bare.
+    #[test]
+    fn object_keys_that_need_quotes_keep_them() {
+        let src = "let h = { 'Content-Type': 'json', 'Asia/Tokyo': 1, 'π': 2, '1': 3, 'default': 4, 'a b': 5, '': 6, plain: 7, type: 8, _x1: 9 }\n";
+        let out = format_source(src).unwrap();
+        tishlang_parser::parse(&out).unwrap_or_else(|e| panic!("formatted output does not parse: {e}\n{out}"));
+        for quoted in ["\"Content-Type\":", "\"Asia/Tokyo\":", "\"π\":", "\"1\":", "\"default\":", "\"a b\":", "\"\":"] {
+            assert!(out.contains(quoted), "expected {quoted} in {out}");
+        }
+        for bare in ["plain:", "type:", "_x1:"] {
+            assert!(out.contains(bare) && !out.contains(&format!("\"{}\"", &bare[..bare.len() - 1])), "expected bare {bare} in {out}");
+        }
+        assert_eq!(format_source(&out).unwrap(), out, "formatting twice changes it");
+    }
 
     #[test]
     fn round_trip_simple() {
