@@ -95,12 +95,13 @@ fn run(paths: &[String], format: OutputFormat, deny_warnings: bool) -> Result<()
                 }
             }
             Err(e) => {
+                let (line, col, message) = parse_error_position(&e);
                 issues.push(Issue {
                     path: f.clone(),
-                    line: 1,
-                    col: 1,
+                    line,
+                    col,
                     code: "tish-parse-error".into(),
-                    message: e,
+                    message,
                     level: "error",
                 });
             }
@@ -201,4 +202,39 @@ fn print_sarif(issues: &[Issue]) -> Result<(), String> {
         serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?
     );
     Ok(())
+}
+
+/// A parse error's line and column, from the `at Span { start: (line, col), … }` the parser and lexer
+/// append, and the message without it. 1:1 when there is none (#763).
+fn parse_error_position(e: &str) -> (u32, u32, String) {
+    if let Some(at) = e.rfind(" at Span { start: (") {
+        let rest = &e[at + " at Span { start: (".len()..];
+        if let Some((line, col)) = rest.split_once(')').and_then(|(pos, _)| pos.split_once(", ")) {
+            if let (Ok(line), Ok(col)) = (line.trim().parse::<u32>(), col.trim().parse::<u32>()) {
+                return (line.max(1), col.max(1), e[..at].to_string());
+            }
+        }
+    }
+    (1, 1, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_error_position;
+
+    #[test]
+    fn parse_errors_point_at_their_position() {
+        let (l, c, m) = parse_error_position("Expected Comma, got Minus at Span { start: (156, 20), end: (156, 21) }");
+        assert_eq!((l, c, m.as_str()), (156, 20, "Expected Comma, got Minus"));
+        let (l, c, m) = parse_error_position("Expected object key (ident or string), got Number");
+        assert_eq!((l, c, m.as_str()), (1, 1, "Expected object key (ident or string), got Number"));
+    }
+
+    #[test]
+    fn lexer_errors_carry_a_position() {
+        let e = tishlang_parser::parse("let x = 1\nlet y = §\n").unwrap_err();
+        let (l, c, m) = parse_error_position(&e);
+        assert_eq!((l, m.as_str()), (2, "Unexpected character: '§'"), "{e}");
+        assert!(c > 1, "{e}");
+    }
 }
