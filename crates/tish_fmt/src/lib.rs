@@ -1527,7 +1527,7 @@ impl Printer {
                             match value {
                                 JsxAttrValue::String(s) => {
                                     self.buf.push('=');
-                                    self.string_lit(s.as_ref());
+                                    self.jsx_attr_lit(s.as_ref());
                                 }
                                 JsxAttrValue::Expr(e) => {
                                     self.buf.push_str("={");
@@ -1577,12 +1577,28 @@ impl Printer {
         }
     }
 
+    /// A string literal in Tish style: single quotes, or double when the text has a `'` and no `"`,
+    /// so it needs no escape (#766).
     fn string_lit(&mut self, s: &str) {
-        self.buf.push('"');
+        let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+        self.quoted(s, quote);
+    }
+
+    /// A JSX attribute value: double quotes, as JSX is written (single when the text has a `"`).
+    fn jsx_attr_lit(&mut self, s: &str) {
+        let quote = if s.contains('"') && !s.contains('\'') { '\'' } else { '"' };
+        self.quoted(s, quote);
+    }
+
+    fn quoted(&mut self, s: &str, quote: char) {
+        self.buf.push(quote);
         for c in s.chars() {
             match c {
                 '\\' => self.buf.push_str("\\\\"),
-                '"' => self.buf.push_str("\\\""),
+                c if c == quote => {
+                    self.buf.push('\\');
+                    self.buf.push(c);
+                }
                 '\n' => self.buf.push_str("\\n"),
                 '\r' => self.buf.push_str("\\r"),
                 '\t' => self.buf.push_str("\\t"),
@@ -1590,7 +1606,7 @@ impl Printer {
                 c => self.buf.push(c),
             }
         }
-        self.buf.push('"');
+        self.buf.push(quote);
     }
 }
 
@@ -2000,12 +2016,28 @@ mod tests {
         let src = "let h = { 'Content-Type': 'json', 'Asia/Tokyo': 1, 'π': 2, '1': 3, 'default': 4, 'a b': 5, '': 6, plain: 7, type: 8, _x1: 9 }\n";
         let out = format_source(src).unwrap();
         tishlang_parser::parse(&out).unwrap_or_else(|e| panic!("formatted output does not parse: {e}\n{out}"));
-        for quoted in ["\"Content-Type\":", "\"Asia/Tokyo\":", "\"π\":", "\"1\":", "\"default\":", "\"a b\":", "\"\":"] {
+        for quoted in ["'Content-Type':", "'Asia/Tokyo':", "'π':", "'1':", "'default':", "'a b':", "'':"] {
             assert!(out.contains(quoted), "expected {quoted} in {out}");
         }
         for bare in ["plain:", "type:", "_x1:"] {
-            assert!(out.contains(bare) && !out.contains(&format!("\"{}\"", &bare[..bare.len() - 1])), "expected bare {bare} in {out}");
+            assert!(out.contains(bare) && !out.contains(&format!("'{}'", &bare[..bare.len() - 1])), "expected bare {bare} in {out}");
         }
+        assert_eq!(format_source(&out).unwrap(), out, "formatting twice changes it");
+    }
+
+    /// tishlang/tish#766 — Tish style: single-quoted strings (double only to spare escaping a `'`),
+    /// double-quoted JSX attribute values.
+    #[test]
+    fn strings_single_quoted_jsx_attributes_double() {
+        let src = "/** @jsxImportSource lattish */\nimport { env } from \"tish:process\"\nlet a = \"plain\"\nlet b = \"it's\"\nlet c = 'say \\\"hi\\\" it\\'s'\nexport fn V() {\n  return <text textAlign='right' title=\"a 'b'\">x</text>\n}\n";
+        let out = format_source(src).unwrap();
+        tishlang_parser::parse(&out).unwrap_or_else(|e| panic!("formatted output does not parse: {e}\n{out}"));
+        assert!(out.contains("from 'tish:process'"), "{out}");
+        assert!(out.contains("let a = 'plain'"), "{out}");
+        assert!(out.contains("let b = \"it's\""), "{out}");
+        assert!(out.contains("let c = 'say \"hi\" it\\'s'"), "{out}");
+        assert!(out.contains("textAlign=\"right\""), "{out}");
+        assert!(out.contains("title=\"a 'b'\""), "{out}");
         assert_eq!(format_source(&out).unwrap(), out, "formatting twice changes it");
     }
 
@@ -2224,7 +2256,7 @@ fn f() {
     fn double_slash_in_string_is_not_a_comment() {
         let src = "let url = \"http://example.com\"\n";
         let out = format_source(src).unwrap();
-        assert_eq!(out, "let url = \"http://example.com\"\n", "{out:?}");
+        assert_eq!(out, "let url = 'http://example.com'\n", "{out:?}");
     }
 
     #[test]
@@ -2486,7 +2518,7 @@ let x = add(1, 2)
         let src = "fn f(o, k) {\ndelete o.a\ndelete o[\"b\"]\nlet x = delete o[k]\nreturn x\n}\n";
         let out = format_source(src).unwrap();
         assert!(out.contains("delete o.a"), "{out}");
-        assert!(out.contains("delete o[\"b\"]"), "{out}");
+        assert!(out.contains("delete o['b']"), "{out}");
         assert!(out.contains("delete o[k]"), "{out}");
         tishlang_parser::parse(&out).unwrap();
         assert_eq!(format_source(&out).unwrap(), out, "not idempotent:\n{out}");
