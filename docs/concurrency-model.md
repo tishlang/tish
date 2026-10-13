@@ -255,6 +255,24 @@ Node's event-loop semantics.
 - **Parallel HTTP is a strength.** `fetchAll` + the prefork/thread model give real multi-core scaling
   that a single-threaded event loop cannot — this is the deliberate trade.
 
+## Bounded waits: `delay(ms)`
+
+`delay(ms)` from `tish:timers` is a promise that settles with `null` once `ms` milliseconds have passed
+since it was made (`crates/tish_runtime/src/promise.rs`, `DelayPromise`). Its deadline is fixed when it
+is made, and the wait happens where something blocks on it, like every Tish promise. Race it against work
+for a wait with a limit — the work keeps running on its thread when the wait gives up:
+
+```tish
+import { delay } from "tish:timers"
+
+let job = Promise.spawn(fn() { return build() })
+let answer = await Promise.race([job, delay(5000)])   // null if the job took longer than 5 s
+```
+
+A cap on how much runs at once needs no shared counter: start up to N `Promise.spawn` jobs, `race` them,
+and start the next when one settles (`crates/tish/tests/fixtures/timers_delay.tish`). `delay` and
+`Promise.spawn` also build for `--target js` with the same results (docs/js-target.md).
+
 ## `fetch` is eager → `Promise.all` IS concurrent (despite blocking `await`)
 
 A subtlety the "blocking await" headline hides: `fetch(url)` (`http_fetch.rs:399`) calls `rt.spawn(...)`

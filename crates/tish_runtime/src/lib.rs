@@ -1830,7 +1830,7 @@ pub use net::{
 pub mod encoding;
 #[cfg(feature = "encoding")]
 pub use encoding::{
-    base64_decode, base64_encode, base64_url_decode, base64_url_encode, utf8_decode, utf8_encode,
+    base64_decode, base64_encode, base64_url_decode, base64_url_encode, utf8_complete, utf8_decode, utf8_encode,
 };
 
 #[cfg(feature = "crypto")]
@@ -1942,7 +1942,7 @@ pub use timers::{
 #[cfg(any(feature = "http", feature = "promise"))]
 pub use promise::{
     await_promise, await_promise_throw, promise_instance_catch, promise_instance_then,
-    promise_object, promise_spawn as promise_spawn_value,
+    promise_object, promise_spawn as promise_spawn_value, timer_delay,
 };
 
 #[cfg(feature = "http")]

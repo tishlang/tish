@@ -559,6 +559,40 @@ pub fn promise_spawn(args: &[Value]) -> Value {
     }
 }
 
+/// `delay(ms)` (`tish:timers`): a promise that settles with `null` once `ms` milliseconds have passed
+/// since the call. Its deadline is fixed when it is made, and the wait happens where something blocks
+/// on it — an `await`, or a combinator. Race it against work for a bounded wait:
+///
+/// ```tish
+/// let answer = await Promise.race([job, delay(5000)])   // null when the job took longer
+/// ```
+struct DelayPromise {
+    deadline: std::time::Instant,
+}
+
+impl TishPromise for DelayPromise {
+    fn block_until_settled(&self) -> std::result::Result<Value, Value> {
+        let now = std::time::Instant::now();
+        if self.deadline > now {
+            std::thread::sleep(self.deadline - now);
+        }
+        Ok(Value::Null)
+    }
+
+    fn try_settle(&self) -> Option<std::result::Result<Value, Value>> {
+        (std::time::Instant::now() >= self.deadline).then_some(Ok(Value::Null))
+    }
+}
+
+pub fn timer_delay(args: &[Value]) -> Value {
+    let ms = match args.first() {
+        Some(Value::Number(n)) if n.is_finite() && *n > 0.0 => *n,
+        _ => 0.0,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(ms / 1000.0);
+    Value::Promise(Arc::new(DelayPromise { deadline }))
+}
+
 /// Build the global `Promise` object: `__call` (constructor) + static methods.
 pub fn promise_object() -> Value {
     let mut map: ObjectMap = ObjectMap::default();

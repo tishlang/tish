@@ -1,0 +1,21 @@
+import { base64Encode, base64Decode, base64UrlEncode, base64UrlDecode, utf8Encode, utf8Decode, utf8Complete } from "tish:encoding"
+
+console.log(utf8Decode(base64Decode(base64Encode(utf8Encode("héllo ✓")))))
+console.log(utf8Decode(base64UrlDecode(base64UrlEncode(utf8Encode("a?b>c")))))
+console.log(base64Encode("hello world") + " " + base64UrlEncode("hi?"))
+console.log(String(base64Decode("not base64!")))
+
+// Streamed bytes arrive in chunks that can cut a character in half: decode only the complete
+// prefix and carry the rest into the next chunk.
+let streamed = utf8Encode("café ✓ 🙂 done")
+let pending = []
+let text = ""
+let at = 0
+while (at < streamed.length) {
+  let buf = pending.concat(streamed.slice(at, at + 3))
+  let n = utf8Complete(buf)
+  text = text + utf8Decode(buf.slice(0, n))
+  pending = buf.slice(n)
+  at = at + 3
+}
+console.log(text + utf8Decode(pending))

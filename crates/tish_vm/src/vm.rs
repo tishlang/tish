@@ -334,6 +334,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "clearInterval" => Some(Value::native(|args: &[Value]| {
                 tishlang_runtime::timer_clear_interval(args)
             })),
+            "delay" => Some(Value::native(|args: &[Value]| tishlang_runtime::timer_delay(args))),
             _ => None,
         };
     }
@@ -489,6 +490,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
             "base64UrlDecode" => Some(Value::native(|a: &[Value]| tishlang_runtime::base64_url_decode(a))),
             "utf8Encode" => Some(Value::native(|a: &[Value]| tishlang_runtime::utf8_encode(a))),
             "utf8Decode" => Some(Value::native(|a: &[Value]| tishlang_runtime::utf8_decode(a))),
+            "utf8Complete" => Some(Value::native(|a: &[Value]| tishlang_runtime::utf8_complete(a))),
             _ => None,
         };
     }

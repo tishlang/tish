@@ -85,6 +85,40 @@ pub fn utf8_decode(args: &[Value]) -> Value {
     }
 }
 
+/// `utf8Complete(byteArray) -> number` — how many leading bytes end on a whole character. A streamed
+/// chunk (`reader.read()`) can stop inside a multi-byte sequence, and decoding it then corrupts that
+/// character; decode `bytes.slice(0, n)` and carry the rest into the next chunk instead. Bytes that can
+/// never become a valid character count as complete (they decode to the replacement character rather
+/// than being held back forever).
+pub fn utf8_complete(args: &[Value]) -> Value {
+    match arg_bytes(args) {
+        Some(b) => Value::Number(utf8_complete_len(&b) as f64),
+        None => Value::Null,
+    }
+}
+
+fn utf8_complete_len(b: &[u8]) -> usize {
+    let n = b.len();
+    // A UTF-8 character is at most 4 bytes, so only the last 3 can belong to an unfinished one.
+    let mut i = n;
+    while i > n.saturating_sub(3) {
+        i -= 1;
+        let c = b[i];
+        if c & 0xC0 == 0x80 {
+            continue; // continuation byte: keep looking for the lead byte
+        }
+        let len = match c {
+            0x00..=0x7F => 1,
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => 1, // never valid as a lead byte: complete as it is
+        };
+        return if n - i < len { i } else { n };
+    }
+    n
+}
+
 /// `utf8Encode(string) -> number[]` — the string's UTF-8 bytes as a byte array. (A byte-array
 /// argument is passed through, so `utf8Encode(utf8Decode(x))` is a no-op round trip.)
 pub fn utf8_encode(args: &[Value]) -> Value {
@@ -106,6 +140,27 @@ mod tests {
             .map(|x| if let Value::Number(n) = x { *n as u8 } else { 0 })
             .collect();
         out
+    }
+
+    fn complete(bytes: &[u8]) -> usize {
+        let v = Value::Array(VmRef::new(bytes.iter().map(|b| Value::Number(*b as f64)).collect()));
+        let Value::Number(n) = utf8_complete(&[v]) else { panic!("not a number") };
+        n as usize
+    }
+
+    #[test]
+    fn utf8_complete_holds_back_an_unfinished_character() {
+        let text = "café ✓ 🙂".as_bytes();
+        assert_eq!(complete(text), text.len());
+        // Cut inside "é" (2 bytes), "✓" (3) and "🙂" (4): the lead byte and what follows wait.
+        assert_eq!(complete(&text[..4]), 3);
+        let check = 6; // "✓" is bytes 6..9
+        assert_eq!(complete(&text[..check + 2]), check);
+        assert_eq!(complete(&text[..text.len() - 1]), text.len() - 4);
+        assert_eq!(complete(&[]), 0);
+        // Stray continuation bytes and invalid lead bytes never wait.
+        assert_eq!(complete(&[0x61, 0x80, 0x80, 0x80]), 4);
+        assert_eq!(complete(&[0x61, 0xFF]), 2);
     }
 
     #[test]

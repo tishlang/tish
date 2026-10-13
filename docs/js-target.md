@@ -58,6 +58,30 @@ import { activate as activateB } from "./b.tish"
 
 Relative import specifiers keep their shape with `.tish` rewritten to `.js` (`./dep.tish` becomes `./dep.js`), since the output tree mirrors the source tree.
 
+### TypeScript declarations (`--types`)
+
+```bash
+tish build src/lib.tish -o dist --target js --format esm --types
+```
+
+writes a `.d.ts` beside each `.js`, so a TypeScript project imports the output with types. The declarations come from the Tish annotations and describe the JS the module compiles to:
+
+| Tish | TypeScript |
+|---|---|
+| `T?` | `T \| null` |
+| `i32`, `f64`, … (sized numbers) | `number` |
+| `bool` | `boolean` |
+| no annotation | `any` |
+| a function whose body awaits (it is `async` in JS) | returns `Promise<R>` |
+| a parameter with a default | optional (`p?: T`) |
+| `type` / `interface` | `type` (exported when the Tish one is) |
+
+Imports of other `.tish` modules become imports of their `.js` (whose `.d.ts` sits beside it); imports of built-in modules (`tish:*`) are left out. A library published to npm points its `types` at them:
+
+```json
+{ "exports": { ".": { "tish": "./src/lib.tish", "types": "./dist/lib.d.ts", "import": "./dist/lib.js" } } }
+```
+
 ### Vite production recipe
 
 Compile Tish to ESM, then let Vite own minification and tree-shaking:
@@ -98,6 +122,27 @@ Dev source maps require no optimization (mappings follow unmerged statement orde
 
 For `--target bytecode` apps (the wasm VM owns all engine state) per-module HMR does not apply — set `mode: "full-reload"` on the plugin as the documented fallback.
 
+## Code that also builds natively
+
+The same Tish source can build for `--target native` and `--target js`. A few things lower differently because JS has no threads and no blocking `await`; the meaning stays the same.
+
+- **`await` in any function.** Tish allows `await` in any function (it blocks the thread); JS only in an `async` one. A function whose own body awaits is emitted `async` whether or not the source says `async fn` — so callers that need its value `await` it, which is also correct natively (awaiting a plain value returns it).
+- **`Promise.spawn(f)`** runs `f` on its own OS thread natively. In JS it runs `f` after the current work and settles with its result: the caller gets a promise straight away, as natively.
+- **Portable built-in modules.** `tish:timers` (`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `delay`) and `tish:encoding` (`utf8Encode`, `utf8Decode`, `utf8Complete`, `base64Encode`, `base64Decode`, `base64UrlEncode`, `base64UrlDecode`) are lowered to JS with the same results, in both `bundle` and `esm` formats. The rest of `tish:*` has no JS lowering.
+
+A bounded wait and a streaming decode written once, for both targets:
+
+```tish
+import { delay } from "tish:timers"
+import { utf8Complete, utf8Decode } from "tish:encoding"
+
+let answer = await Promise.race([Promise.spawn(fn() { return work() }), delay(5000)])   // null after 5 s
+
+let n = utf8Complete(bytes)              // the bytes that end on a whole character
+let text = utf8Decode(bytes.slice(0, n))
+let rest = bytes.slice(n)                // the start of a character split across chunks
+```
+
 ## JSX runtime auto-import
 
 JSX lowers to `h(tag, props, children)` and fragments (`<>…</>`) to `h(Fragment, …)`. You do **not** need to import `h` / `Fragment` by hand:
@@ -125,7 +170,7 @@ The classic factory shape (`h` + `Fragment`) is used; the modern `jsx`/`jsxs`/`j
 ### Limitations (current)
 
 - `-o` is treated as a **directory** in ESM mode.
-- **Native imports** (`tish:*`, `cargo:*`, `ffi:*`, and the built-in `fs`/`http`/`process`/`ws`) are rejected — they require `--target native`.
+- **Native imports** (`tish:*` other than the portable `tish:timers` and `tish:encoding`, `cargo:*`, `ffi:*`, and the built-in `fs`/`http`/`process`/`ws`) are rejected — they require `--target native`.
 - When the graph spans modules outside the entry's package, the output tree is rooted at their nearest common ancestor, so the entry is emitted in a subtree (the `Entry: …` line reports its path) and the tree may include `node_modules/` / sibling-package directories.
 - `--source-map` is **bundle-only** for disk `build` output; per-file source maps for production `--format esm` are a follow-up. (Dev source maps **are** available per module via `compile-module --source-map` / the Vite plugin.)
 - `.jsx` / `.js` single-file inputs are bundle-only.
