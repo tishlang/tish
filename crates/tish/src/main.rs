@@ -257,6 +257,7 @@ fn main() {
                 &a.crate_type,
                 &a.format,
                 &a.jsx_import_source,
+                a.types,
             )
         }
         Some(Commands::CompileModule(a)) => {
@@ -696,6 +697,7 @@ fn compile_to_js(
     source_map: bool,
     format: &str,
     jsx_import_source: &str,
+    types: bool,
 ) -> Result<(), String> {
     if format != "bundle" && format != "esm" {
         return Err(format!(
@@ -733,7 +735,11 @@ fn compile_to_js(
             source_map,
             project_root,
             jsx_import_source,
+            types,
         );
+    }
+    if types {
+        return Err("tish build --types needs --format esm (declarations are written per module).".into());
     }
     let out_path = Path::new(output_path);
     let out_path = if out_path.extension().is_none()
@@ -816,6 +822,7 @@ fn compile_to_js_esm(
     source_map: bool,
     project_root: Option<&Path>,
     jsx_import_source: &str,
+    types: bool,
 ) -> Result<(), String> {
     if source_map {
         return Err(
@@ -855,6 +862,11 @@ fn compile_to_js_esm(
         }
         fs::write(&out, &module.js)
             .map_err(|e| format!("Cannot write {}: {}", out.display(), e))?;
+        if types {
+            let dts = out.with_extension("d.ts");
+            fs::write(&dts, &module.dts)
+                .map_err(|e| format!("Cannot write {}: {}", dts.display(), e))?;
+        }
     }
     println!("Built {} module(s) to {}", modules.len(), out_dir.display());
     // The entry may sit in a subtree (the output is rooted at the directory common to every module,
@@ -954,6 +966,7 @@ fn build_file(
     crate_type: &str,
     format: &str,
     jsx_import_source: &str,
+    types: bool,
 ) -> Result<(), String> {
     let optimize = !no_optimize;
     let input_path = Path::new(input_path)
@@ -970,7 +983,11 @@ fn build_file(
             source_map,
             format,
             jsx_import_source,
+            types,
         );
+    }
+    if types {
+        return Err("tish build --types needs --target js --format esm.".into());
     }
 
     // `wasm-gpu` (#277): same pipeline as `wasm` but builds the `--features gpu` WebGPU runtime and

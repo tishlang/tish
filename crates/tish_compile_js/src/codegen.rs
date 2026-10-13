@@ -408,7 +408,9 @@ impl Codegen {
                 body,
                 ..
             } => {
-                let async_prefix = if *async_ { "async " } else { "" };
+                // Tish allows `await` in any function (it blocks); JS only in an `async` one.
+                let is_async = *async_ || tishlang_ast::stmt_awaits(body, false);
+                let async_prefix = if is_async { "async " } else { "" };
                 let escaped = Self::escape_ident(name.as_ref());
                 let params_str = self.emit_params(params, rest_param.as_ref())?;
                 self.writeln(&format!(
@@ -416,11 +418,11 @@ impl Codegen {
                     async_prefix, escaped, params_str
                 ));
                 self.indent += 1;
-                if *async_ {
+                if is_async {
                     self.in_async = true;
                 }
                 self.emit_statement(body)?;
-                if *async_ {
+                if is_async {
                     self.in_async = false;
                 }
                 self.indent -= 1;
@@ -716,6 +718,18 @@ impl Codegen {
                 prop,
                 optional,
                 ..
+            } if is_promise_spawn(object, prop) => {
+                let _ = optional;
+                // `Promise.spawn(f)` runs `f` on its own OS thread natively. JS has no threads to give
+                // it, so it runs `f` after the current work and settles with its result: the caller
+                // gets a promise straight away and `f` still runs apart from it.
+                PROMISE_SPAWN_JS.to_string()
+            }
+            Expr::Member {
+                object,
+                prop,
+                optional,
+                ..
             } => {
                 let obj = self.emit_expr(object)?;
                 // `255.toString()` is a JS syntax error — the lexer reads `255.` as a float and
@@ -928,7 +942,12 @@ impl Codegen {
                         block
                     }
                 };
-                let prefix = if *async_ { "async " } else { "" }; // #428
+                // #428, and Tish allows `await` in any function (it blocks); JS only in an `async` one.
+                let awaits = match body {
+                    ArrowBody::Expr(e) => tishlang_ast::expr_awaits(e, false),
+                    ArrowBody::Block(s) => tishlang_ast::stmt_awaits(s, false),
+                };
+                let prefix = if *async_ || awaits { "async " } else { "" };
                 if matches!(body, ArrowBody::Expr(_)) {
                     format!("{}({}) => ({})", prefix, ps, body_str)
                 } else {
@@ -962,6 +981,11 @@ impl Codegen {
                 })
                 .map_err(|m| CompileError { message: m })?
             }
+            Expr::NativeModuleLoad { spec, export_name, .. }
+                if portable_builtin_js(spec, export_name).is_some() =>
+            {
+                portable_builtin_js(spec, export_name).unwrap().to_string()
+            }
             Expr::NativeModuleLoad { spec, .. } => {
                 return Err(CompileError {
                     message: format!(
@@ -980,6 +1004,38 @@ impl Codegen {
         }
     }
 
+    /// A portable built-in module (`tish:timers`, `tish:encoding`) has no file to import in JS: each
+    /// imported name is bound to its JS lowering instead.
+    fn emit_portable_builtin_import(
+        &mut self,
+        specifiers: &[ImportSpecifier],
+        from: &str,
+    ) -> Result<(), CompileError> {
+        let unknown = |name: &str| CompileError {
+            message: format!("'{}' does not export '{}' for --target js.", from, name),
+        };
+        for s in specifiers {
+            match s {
+                ImportSpecifier::Named { name, alias, .. } => {
+                    let js = portable_builtin_js(from, name).ok_or_else(|| unknown(name))?;
+                    let local = alias.as_ref().unwrap_or(name);
+                    self.writeln(&format!("const {} = {};", Self::escape_ident(local.as_ref()), js));
+                }
+                ImportSpecifier::Namespace { name, .. } => {
+                    let fields: Vec<String> = portable_builtin_exports(from)
+                        .iter()
+                        .map(|e| format!("{}: {}", e, portable_builtin_js(from, e).unwrap()))
+                        .collect();
+                    self.writeln(&format!("const {} = {{ {} }};", Self::escape_ident(name.as_ref()), fields.join(", ")));
+                }
+                ImportSpecifier::Default { .. } => {
+                    return Err(CompileError { message: format!("'{}' has no default export.", from) });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Emit a real ES `import` statement (ESM mode), rewriting the `.tish` specifier to its sibling
     /// `.js` output path. Named and namespace specifiers can't share one statement, so a module that
     /// imports both is split across two lines.
@@ -988,6 +1044,9 @@ impl Codegen {
         specifiers: &[ImportSpecifier],
         from: &str,
     ) -> Result<(), CompileError> {
+        if is_portable_builtin(from) {
+            return self.emit_portable_builtin_import(specifiers, from);
+        }
         let spec = rewrite_import_to_js(
             from,
             &self.module_path,
@@ -1110,6 +1169,72 @@ impl Codegen {
         Ok(())
     }
 }
+
+/// `Promise.spawn` lowered for JS (see the `Expr::Member` arm).
+const PROMISE_SPAWN_JS: &str = "((f) => Promise.resolve().then(() => f()))";
+
+fn is_promise_spawn(object: &Expr, prop: &MemberProp) -> bool {
+    matches!(object, Expr::Ident { name, .. } if name.as_ref() == "Promise")
+        && matches!(prop, MemberProp::Name { name, .. } if name.as_ref() == "spawn")
+}
+
+/// Built-in modules every JS host can provide, so code that imports them builds for `--target js` as
+/// well as native: each export lowers to a JS expression with the same meaning. The rest of `tish:*`
+/// (fs, net, process, …) has no JS lowering and stays refused. Bytes are arrays of numbers 0-255, as
+/// in the runtime (`tish_runtime::encoding`).
+fn portable_builtin_js(spec: &str, export: &str) -> Option<&'static str> {
+    Some(match (spec, export) {
+        ("tish:timers", "setTimeout") => "setTimeout",
+        ("tish:timers", "clearTimeout") => "clearTimeout",
+        ("tish:timers", "setInterval") => "setInterval",
+        ("tish:timers", "clearInterval") => "clearInterval",
+        ("tish:timers", "delay") => {
+            "((ms) => new Promise((settle) => setTimeout(() => settle(null), Math.max(0, Number(ms) || 0))))"
+        }
+        ("tish:encoding", "utf8Encode") => {
+            "((s) => typeof s === \"string\" ? Array.from(new TextEncoder().encode(s)) : Array.isArray(s) ? s : null)"
+        }
+        ("tish:encoding", "utf8Decode") => {
+            "((b) => typeof b === \"string\" ? b : Array.isArray(b) ? new TextDecoder().decode(Uint8Array.from(b)) : null)"
+        }
+        ("tish:encoding", "utf8Complete") => UTF8_COMPLETE_JS,
+        ("tish:encoding", "base64Encode") => BASE64_ENCODE_JS,
+        ("tish:encoding", "base64Decode") => BASE64_DECODE_JS,
+        ("tish:encoding", "base64UrlEncode") => BASE64_URL_ENCODE_JS,
+        ("tish:encoding", "base64UrlDecode") => BASE64_URL_DECODE_JS,
+        _ => return None,
+    })
+}
+
+fn portable_builtin_exports(spec: &str) -> &'static [&'static str] {
+    match spec {
+        "tish:timers" => &["setTimeout", "clearTimeout", "setInterval", "clearInterval", "delay"],
+        "tish:encoding" => &[
+            "utf8Encode", "utf8Decode", "utf8Complete",
+            "base64Encode", "base64Decode", "base64UrlEncode", "base64UrlDecode",
+        ],
+        _ => &[],
+    }
+}
+
+fn is_portable_builtin(spec: &str) -> bool {
+    !portable_builtin_exports(spec).is_empty()
+}
+
+/// Same rule as `tish_runtime::encoding::utf8_complete`.
+const UTF8_COMPLETE_JS: &str = "((b) => { if (!Array.isArray(b)) return null; const n = b.length; \
+for (let i = n - 1; i >= Math.max(0, n - 3); i--) { const c = b[i]; if ((c & 0xC0) === 0x80) continue; \
+const len = c <= 0x7F ? 1 : c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 1; \
+return n - i < len ? i : n; } return n; })";
+
+/// Bytes or a string (as UTF-8) to base64, standard alphabet, padded.
+const BASE64_ENCODE_JS: &str = "((v) => { const b = typeof v === \"string\" ? new TextEncoder().encode(v) : Array.isArray(v) ? Uint8Array.from(v) : null; \
+if (b === null) return null; let s = \"\"; for (const x of b) s += String.fromCharCode(x); return btoa(s); })";
+const BASE64_DECODE_JS: &str = "((s) => { if (typeof s !== \"string\") return null; try { return Array.from(atob(s), (c) => c.charCodeAt(0)); } catch { return null; } })";
+const BASE64_URL_ENCODE_JS: &str = "((v) => { const b = typeof v === \"string\" ? new TextEncoder().encode(v) : Array.isArray(v) ? Uint8Array.from(v) : null; \
+if (b === null) return null; let s = \"\"; for (const x of b) s += String.fromCharCode(x); return btoa(s).replace(/\\+/g, \"-\").replace(/\\//g, \"_\").replace(/=+$/, \"\"); })";
+const BASE64_URL_DECODE_JS: &str = "((s) => { if (typeof s !== \"string\" || /[+/=]/.test(s)) return null; \
+try { const t = s.replace(/-/g, \"+\").replace(/_/g, \"/\"); return Array.from(atob(t + \"=\".repeat((4 - t.length % 4) % 4)), (c) => c.charCodeAt(0)); } catch { return null; } })";
 
 /// Rewrite a Tish import specifier to the ESM `.js` specifier that the emitted module tree uses.
 /// Relative specifiers keep their shape (the output tree mirrors the source tree) with `.tish`
@@ -1358,6 +1483,8 @@ pub fn compile_project_with_jsx(
 pub struct EmittedJsModule {
     pub relative_path: PathBuf,
     pub js: String,
+    /// TypeScript declarations for this module, from its Tish type annotations (`crate::dts`).
+    pub dts: String,
 }
 
 /// Compile a project to **ES modules** — one `.js` file per `.tish` module, with real `import` /
@@ -1416,9 +1543,16 @@ pub fn compile_project_esm(
             jsx_import_source.to_string(),
         );
         gen.emit_program(&program, None, None)?;
+        let dts = crate::dts::module_declarations(&module.program, &mut |from| {
+            if tishlang_compile::is_native_import(from) {
+                return Ok(None); // built-in bindings: no declaration file to point at
+            }
+            rewrite_import_to_js(from, mod_canon, &res_root_canon, ImportRewrite::Disk).map(Some)
+        })?;
         out.push(EmittedJsModule {
             relative_path: rel_js,
             js: gen.output,
+            dts,
         });
     }
     Ok(out)

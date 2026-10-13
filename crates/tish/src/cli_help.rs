@@ -582,6 +582,9 @@ pub(crate) struct BuildArgs {
         help_heading = "Options"
     )]
     pub jsx_import_source: String,
+    /// For `--target js --format esm`: also write a TypeScript declaration file (`.d.ts`) beside each module, from its Tish type annotations, so TypeScript projects can import the output with types.
+    #[arg(long = "types", help_heading = "Options")]
+    pub types: bool,
     /// Run the gradual type checker: `warn` prints `line:col` type diagnostics; `error` also fails the build on them. (Equivalent to setting `TISH_CHECK`.)
     #[arg(long, value_name = "MODE", help_heading = "Options")]
     pub check: Option<String>,

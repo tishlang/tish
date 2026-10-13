@@ -1,0 +1,33 @@
+import { delay } from "tish:timers"
+
+// A bounded wait: work raced against a delay. The delay settles with null.
+fn job(ms: number, value: string): any {
+  return Promise.spawn(fn() {
+    await delay(ms)
+    return value
+  })
+}
+console.log("in time: " + String(await Promise.race([job(50, "answer"), delay(2000)])))
+console.log("timed out: " + String(await Promise.race([job(2000, "late"), delay(50)])))
+
+// At most two at once, scheduled from one thread with race alone: no shared counter.
+let queue = [["a", 300], ["b", 100], ["c", 100], ["d", 50]]
+let active = []
+let order = []
+while (queue.length > 0 || active.length > 0) {
+  while (active.length < 2 && queue.length > 0) {
+    let next = queue.shift()
+    active.push({ id: next[0], p: job(next[1], next[0]) })
+  }
+  let done = await Promise.race(active.map(fn(a) { return a.p }))
+  order.push(done)
+  active = active.filter(fn(a) { return a.id !== done })
+}
+console.log("finished: " + order.join(","))
+
+// The deadline is fixed when the delay is made, not when it is awaited.
+let started = Date.now()
+let early = delay(200)
+await job(250, "x")
+await early
+console.log("deadline fixed: " + String(Date.now() - started < 400))

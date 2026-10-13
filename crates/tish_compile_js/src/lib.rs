@@ -2,6 +2,7 @@
 //! Uses shared resolve from tishlang_compile for unified pipeline.
 
 mod codegen;
+mod dts;
 mod error;
 
 #[cfg(test)]
