@@ -68,7 +68,7 @@ writes a `.d.ts` beside each `.js`, so a TypeScript project imports the output w
 
 | Tish | TypeScript |
 |---|---|
-| `T?` | `T \| null` |
+| `T?` | `T \| null`; a `T?` field or trailing parameter is also optional (`k?: T \| null`) |
 | `i32`, `f64`, … (sized numbers) | `number` |
 | `bool` | `boolean` |
 | no annotation | `any` |

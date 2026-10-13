@@ -130,17 +130,30 @@ fn function(
     returns: Option<&TypeAnnotation>,
     awaits: bool,
 ) -> String {
+    // A parameter with a default, or of a `T?` type, may be left out — but TypeScript only allows that for a
+    // parameter whose followers may all be left out too.
+    let may_omit: Vec<bool> = params
+        .iter()
+        .map(|p| match p {
+            FunParam::Simple(tp) => tp.default.is_some() || tp.type_ann.as_ref().is_some_and(is_nullable),
+            FunParam::Destructure { type_ann, default, .. } => {
+                default.is_some() || type_ann.as_ref().is_some_and(is_nullable)
+            }
+        })
+        .collect();
+    let optional_from = may_omit.iter().rposition(|m| !m).map_or(0, |i| i + 1);
     let mut parts: Vec<String> = params
         .iter()
         .enumerate()
-        .map(|(i, p)| match p {
-            FunParam::Simple(tp) => {
-                let optional = if tp.default.is_some() { "?" } else { "" };
-                format!("{}{}: {}", tp.name, optional, ts_type_or_any(tp.type_ann.as_ref()))
-            }
-            FunParam::Destructure { type_ann, default, .. } => {
-                let optional = if default.is_some() { "?" } else { "" };
-                format!("arg{}{}: {}", i, optional, ts_type_or_any(type_ann.as_ref()))
+        .map(|(i, p)| {
+            let optional = if i >= optional_from { "?" } else { "" };
+            match p {
+                FunParam::Simple(tp) => {
+                    format!("{}{}: {}", tp.name, optional, ts_type_or_any(tp.type_ann.as_ref()))
+                }
+                FunParam::Destructure { type_ann, .. } => {
+                    format!("arg{}{}: {}", i, optional, ts_type_or_any(type_ann.as_ref()))
+                }
             }
         })
         .collect();
@@ -174,9 +187,13 @@ fn ts_type(t: &TypeAnnotation) -> String {
             if fields.is_empty() {
                 return "{}".into();
             }
+            // A `T?` field may be absent, as in Tish: `k?: T | null`.
             let body: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{}: {}", property_name(k), ts_type(v)))
+                .map(|(k, v)| {
+                    let optional = if is_nullable(v) { "?" } else { "" };
+                    format!("{}{}: {}", property_name(k), optional, ts_type(v))
+                })
                 .collect();
             format!("{{ {} }}", body.join("; "))
         }
@@ -196,6 +213,11 @@ fn ts_type(t: &TypeAnnotation) -> String {
             TypeLiteral::Bool(b) => b.to_string(),
         },
     }
+}
+
+/// `T?` (`T | null`), or any union with `null` in it.
+fn is_nullable(t: &TypeAnnotation) -> bool {
+    matches!(t, TypeAnnotation::Union(items) if items.iter().any(|i| matches!(i, TypeAnnotation::Simple(n, _) if n.as_ref() == "null")))
 }
 
 /// A type that needs parentheses inside `T[]`, a union or an intersection.
@@ -225,7 +247,7 @@ mod tests {
         std::fs::write(
             dir.join("session.tish"),
             "export type Status = \"running\" | \"done\"\n\
-             export type Session = { id: string, summary: string?, rounds: i32, tags: string[] }\n\
+             export type Session = { id: string, summary: string?, rounds: i32, tags: (string | number)[], \"function\": { name: string }, onEnd: ((string) => void)? }\n\
              export fn newSession(id: string, label: string = \"x\"): Session { return { id: id, summary: null, rounds: 0, tags: [] } }\n",
         )
         .unwrap();
@@ -236,6 +258,8 @@ mod tests {
              type Private = { n: number }\n\
              export fn untyped(a, b) { return a }\n\
              export fn wait(s: Session, ms: number): bool { await delay(ms)\n return true }\n\
+             export fn opt(a: string, b: number?, c: string?): void {}\n\
+             export fn notLast(a: string?, b: number): void {}\n\
              export fn sum(...xs: number[]): number { return 0 }\n\
              export fn use(p: Private, f: (number) => string): void {}\n\
              export const LIMIT: number = 4\n\
@@ -249,7 +273,7 @@ mod tests {
         let session = dts("session.js");
         assert!(session.contains("export type Status = \"running\" | \"done\";"), "{session}");
         assert!(
-            session.contains("export type Session = { id: string; summary: string | null; rounds: number; tags: string[] };"),
+            session.contains("export type Session = { id: string; summary?: string | null; rounds: number; tags: (string | number)[]; function: { name: string }; onEnd?: ((arg0: string) => void) | null };"),
             "{session}"
         );
         assert!(session.contains("export declare function newSession(id: string, label?: string): Session;"), "{session}");
@@ -260,6 +284,8 @@ mod tests {
         assert!(main.contains("export declare function untyped(a: any, b: any): any;"), "{main}");
         assert!(main.contains("export declare function wait(s: Session, ms: number): Promise<boolean>;"), "{main}");
         assert!(main.contains("export declare function sum(...xs: number[]): number;"), "{main}");
+        assert!(main.contains("export declare function opt(a: string, b?: number | null, c?: string | null): void;"), "{main}");
+        assert!(main.contains("export declare function notLast(a: string | null, b: number): void;"), "{main}");
         assert!(main.contains("export declare function use(p: Private, f: (arg0: number) => string): void;"), "{main}");
         assert!(main.contains("export declare const LIMIT: number;"), "{main}");
         assert!(main.contains("export { newSession };"), "{main}");
