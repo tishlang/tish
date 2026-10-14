@@ -515,4 +515,28 @@ mod tests {
             ignored.statements
         );
     }
+
+    /// `(…)` in a type is a group unless `=>` follows: `(A | B)[]` is an array of a union,
+    /// `((T) => R)?` an optional function, `(T) => R` and `() => R` stay function types. Object
+    /// types accept quoted keys, for names that are keywords (`"function": …`).
+    #[test]
+    fn grouped_types_and_quoted_object_type_keys() {
+        use tishlang_ast::TypeAnnotation as T;
+        let alias = |src: &str| match parse(src).expect("parses").statements.into_iter().next() {
+            Some(Statement::TypeAlias { ty, .. }) => ty,
+            other => panic!("expected a type alias, got {other:?}"),
+        };
+        assert!(matches!(alias("type A = (string | number)[]"), T::Array(inner) if matches!(*inner, T::Union(_))));
+        match alias("type B = ((string) => void)?") {
+            T::Union(items) => assert!(matches!(items[0], T::Function { .. }), "{items:?}"),
+            other => panic!("expected an optional function, got {other:?}"),
+        }
+        assert!(matches!(alias("type C = (string) => void"), T::Function { .. }));
+        assert!(matches!(alias("type D = () => number"), T::Function { .. }));
+        assert!(matches!(alias("type E = (a, b) => number"), T::Function { .. }));
+        match alias("type F = { \"function\": { name: string }, id: string }") {
+            T::Object(fields) => assert_eq!(fields[0].0.as_ref(), "function"),
+            other => panic!("expected an object type, got {other:?}"),
+        }
+    }
 }

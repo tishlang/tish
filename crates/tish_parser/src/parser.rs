@@ -869,9 +869,15 @@ impl<'a> Parser<'a> {
                             self.advance();
                             Arc::from("for")
                         }
+                        // A quoted key, for names that are keywords or not identifiers
+                        // (`"function": { … }`, the shape of an OpenAI tool call).
+                        Some(TokenKind::String) => {
+                            let tok = self.advance().ok_or("Expected property name")?;
+                            Arc::from(tok.literal.as_deref().ok_or("Expected property name")?)
+                        }
                         _ => {
                             return Err(format!(
-                                "Expected Ident or `for` as object type property name, got {:?}",
+                                "Expected Ident, a string or `for` as object type property name, got {:?}",
                                 self.peek_kind()
                             ));
                         }
@@ -895,16 +901,22 @@ impl<'a> Parser<'a> {
                 Ok(TypeAnnotation::Object(props))
             }
             Some(TokenKind::LParen) => {
-                // Function type: (T1, T2) => R
+                // Function type `(T1, T2) => R`, or a grouped type `(T)` — `(A | B)[]`,
+                // `((T) => R)?` — when no `=>` follows a single, comma-free element.
                 self.advance(); // (
                 let mut params = Vec::new();
+                let mut comma = false;
                 while !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                     params.push(self.parse_type_annotation()?);
                     if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
                         self.expect(TokenKind::Comma)?;
+                        comma = true;
                     }
                 }
                 self.expect(TokenKind::RParen)?;
+                if params.len() == 1 && !comma && !matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
+                    return Ok(params.pop().unwrap());
+                }
                 self.expect(TokenKind::Arrow)?;
                 let returns = self.parse_type_annotation()?;
                 Ok(TypeAnnotation::Function {
