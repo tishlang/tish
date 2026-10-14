@@ -1,0 +1,17 @@
+// Code run by `Promise.spawn` (its own OS thread natively) sees the module it was written in: its
+// top-level functions, its object state and its numeric globals, read and written.
+let seed = 42
+let notes = []
+let jobs = {}
+fn double(x) { return x * 2 }
+fn work(n) { return double(n) + 1 }
+fn bump() { seed = seed + 1; return seed }
+fn record(id) {
+  jobs[id] = "done"
+  notes.push("job " + id)
+  return work(id)
+}
+
+console.log(String(await Promise.spawn(fn() { return work(5) })))
+console.log(String(await Promise.spawn(async fn() { return bump() })) + " " + String(seed))
+console.log(String(await Promise.spawn(fn() { return record(3) })) + " " + jobs[3] + " " + notes.join(","))
