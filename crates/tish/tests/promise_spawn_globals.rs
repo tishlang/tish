@@ -10,7 +10,7 @@ use std::process::Command;
 fn run_native(features: Option<&str>) -> String {
     let tish = PathBuf::from(env!("CARGO_BIN_EXE_tish"));
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/core/promise_spawn_module_globals.tish");
+        .join("tests/fixtures/promise_spawn_module_globals.tish");
     let mut args = vec!["run", "--backend", "native"];
     if let Some(f) = features {
         args.extend(["--feature", f]);
