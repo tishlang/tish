@@ -146,11 +146,12 @@ fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
 }
 
 /// Whether `Promise` is in scope for this run. Every capability whose runtime links the promise
-/// machinery puts it there — `http`, `ws`, `fs` (fs/promises) and plain `promise` — the same set
+/// machinery puts it there — `http`, `ws`, `fs` (fs/promises), `timers` (`delay`) and plain
+/// `promise` — the same set
 /// for which the native backend binds `Promise` and links `send-values` (`Promise.spawn`).
 #[allow(dead_code)]
 fn promise_allowed(enabled: &HashSet<String>) -> bool {
-    ["http", "ws", "fs", "promise"]
+    ["http", "ws", "fs", "promise", "timers"]
         .iter()
         .any(|c| cap_allows(enabled, c))
 }

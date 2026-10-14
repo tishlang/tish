@@ -56,6 +56,9 @@ http-hyper = [
 # `mkdtemp` needs a random suffix (predictable/timestamp names are a temp-dir security smell).
 fs = ["promise", "dep:rand"]
 process = []
+# The timer registry itself is always compiled; `timers` links the promise machinery so
+# `delay(ms)` (a Promise that settles after `ms`) exists wherever `tish:timers` does.
+timers = ["promise"]
 # Raw TCP sockets: DAP TCP transports, OAuth loopback listener, connect probes.
 net = []
 # Base64 encode/decode (tish:encoding) — bytes <-> string, for file-bytes-over-JSON (extension host

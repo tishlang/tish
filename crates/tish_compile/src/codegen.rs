@@ -17539,10 +17539,10 @@ impl Codegen {
     }
 
     /// Whether the runtime this program links has `send-values` on — i.e. whether `Promise.spawn`
-    /// is a real thread. Mirrors `tishlang_runtime`'s Cargo features: `http`, `ws`, `promise` and
-    /// `fs` (via `promise`) all enable it.
+    /// is a real thread, and whether `Promise` is in scope. Mirrors `tishlang_runtime`'s Cargo
+    /// features: `http`, `ws`, `promise`, and `fs` / `timers` (via `promise`) all enable it.
     fn links_send_values(&self) -> bool {
-        ["http", "ws", "fs", "promise"]
+        ["http", "ws", "fs", "promise", "timers"]
             .iter()
             .any(|f| self.has_feature(f))
     }

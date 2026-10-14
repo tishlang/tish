@@ -25,7 +25,7 @@ fs = ["dep:tishlang_runtime", "tishlang_runtime/fs", "promise"]
 process = ["dep:tishlang_runtime", "tishlang_runtime/process"]
 tty = ["dep:tishlang_runtime", "tishlang_runtime/tty"]
 # Timer globals + `tish:timers` LoadNativeExport (uses tishlang_runtime TLS timer registry).
-timers = ["dep:tishlang_runtime"]
+timers = ["dep:tishlang_runtime", "promise"]
 # Any HTTP build needs Send-safe values so handlers can be dispatched
 # across worker threads or processes. HTTP implies timers (fetch/Promise often pair with setTimeout).
 http = ["dep:tishlang_runtime", "tishlang_runtime/http", "send-values", "timers"]
