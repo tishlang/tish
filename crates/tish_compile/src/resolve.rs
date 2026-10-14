@@ -2090,6 +2090,10 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
 
     let mut statements = Vec::new();
     let mut statement_sources = Vec::new();
+    // `(local name, spec, export)` of every built-in import already bound in the merged program. Two
+    // modules that both `import { delay } from "tish:timers"` mean the same binding; declaring it
+    // twice is a redeclaration in JS (`const delay` twice in one script).
+    let mut native_bound: HashSet<(String, String, String)> = HashSet::new();
     for (idx, module) in modules.iter().enumerate() {
         let src_path = module.path.clone();
         let dir = module.path.parent().unwrap_or(Path::new("."));
@@ -2124,6 +2128,13 @@ pub fn merge_modules(mut modules: Vec<ResolvedModule>) -> Result<MergedProgram, 
                                     alias_span,
                                 } => {
                                     let bind = alias.as_deref().unwrap_or(name.as_ref());
+                                    if !native_bound.insert((
+                                        bind.to_string(),
+                                        canonical_spec.clone(),
+                                        name.to_string(),
+                                    )) {
+                                        continue;
+                                    }
                                     let decl_name_span = alias_span.as_ref().unwrap_or(name_span);
                                     let init = Expr::NativeModuleLoad {
                                         spec: Arc::from(canonical_spec.clone()),
