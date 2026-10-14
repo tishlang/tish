@@ -809,12 +809,24 @@ fn min_required_arity(params: &[FunParam]) -> usize {
     let mut min = 0;
     for (i, p) in params.iter().enumerate() {
         if let FunParam::Simple(tp) = p {
-            if tp.type_ann.is_some() && tp.default.is_none() {
+            // A `T?` (or `any`) parameter accepts null, which is what an omitted argument arrives as.
+            let accepts_null = tp.type_ann.as_ref().is_some_and(type_accepts_null);
+            if tp.type_ann.is_some() && tp.default.is_none() && !accepts_null {
                 min = i + 1;
             }
         }
     }
     min
+}
+
+/// Whether null is a value of `t`: `T?` (`T | null`), any union with `null` in it, `null` or `any`.
+fn type_accepts_null(t: &tishlang_ast::TypeAnnotation) -> bool {
+    use tishlang_ast::TypeAnnotation as T;
+    match t {
+        T::Simple(name, _) => matches!(name.as_ref(), "null" | "any"),
+        T::Union(items) => items.iter().any(type_accepts_null),
+        _ => false,
+    }
 }
 
 /// #641: report every call that supplies fewer arguments than a typed parameter requires. Runs

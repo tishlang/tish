@@ -217,6 +217,22 @@ pub fn find_workspace_root() -> Result<PathBuf, String> {
         }
     }
 
+    // Strategy 0a: the working directory is inside a Tish checkout — build against THAT one. Without this,
+    // 0b's sibling lookup below picked `…/<parent>/tish` for any checkout living next to it (a second clone,
+    // a branch checkout), so a native build compiled against another tree's runtime.
+    if let Ok(mut dir) = std::env::current_dir() {
+        for _ in 0..24 {
+            if is_tish_workspace_root(&dir) {
+                return dir.canonicalize().map_err(|e| {
+                    format!("Cannot canonicalize Tish workspace {}: {}", dir.display(), e)
+                });
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
     // Strategy 0b: monorepo layout `…/<parent>/tish-hub` (cwd) next to `…/<parent>/tish` (language repo).
     // Works without `TISHLANG_WORKSPACE` so older `tish` binaries still find the compiler tree.
     if let Ok(mut dir) = std::env::current_dir() {

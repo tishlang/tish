@@ -18,6 +18,12 @@ use tishlang_ast::{
 struct UsageAnalyzer {
     /// Count of remaining uses for each variable in the current scope
     use_counts: HashMap<String, usize>,
+    /// Names a nested function refers to. They are captured into a `<name>_cell` built from the variable
+    /// when the function is created, so moving the variable at its "last use" would leave nothing to
+    /// build the cell from — they are never moved.
+    captured: std::collections::HashSet<String>,
+    /// How many function bodies the analysis is inside.
+    fn_depth: usize,
 }
 
 impl UsageAnalyzer {
@@ -125,7 +131,9 @@ impl UsageAnalyzer {
                 }
             }
             Statement::FunDecl { body, .. } => {
+                self.fn_depth += 1;
                 self.analyze_statement(body);
+                self.fn_depth -= 1;
             }
             Statement::Break { .. } | Statement::Continue { .. } => {}
             Statement::Import { .. }
@@ -142,6 +150,9 @@ impl UsageAnalyzer {
         match expr {
             Expr::Ident { name, .. } => {
                 *self.use_counts.entry(name.to_string()).or_insert(0) += 1;
+                if self.fn_depth > 0 {
+                    self.captured.insert(name.to_string());
+                }
             }
             Expr::Literal { .. } => {}
             Expr::Binary { left, right, .. } => {
@@ -190,10 +201,14 @@ impl UsageAnalyzer {
                     }
                 }
             }
-            Expr::ArrowFunction { body, .. } => match body {
-                ArrowBody::Expr(e) => self.analyze_expr(e),
-                ArrowBody::Block(s) => self.analyze_statement(s),
-            },
+            Expr::ArrowFunction { body, .. } => {
+                self.fn_depth += 1;
+                match body {
+                    ArrowBody::Expr(e) => self.analyze_expr(e),
+                    ArrowBody::Block(s) => self.analyze_statement(s),
+                }
+                self.fn_depth -= 1;
+            }
             Expr::Assign { value, .. } => self.analyze_expr(value),
             Expr::Conditional {
                 cond,
@@ -277,6 +292,9 @@ impl UsageAnalyzer {
 
     /// Check if a variable use is its last use (use_count will be 1 after decrement)
     fn is_last_use(&mut self, name: &str) -> bool {
+        if self.captured.contains(name) {
+            return false;
+        }
         if let Some(count) = self.use_counts.get_mut(name) {
             if *count > 0 {
                 *count -= 1;
@@ -957,6 +975,16 @@ pub(crate) struct Codegen {
     /// Break targets for innermost breakable construct — loops AND switches (JS `break` exits the
     /// nearest loop OR switch; `continue` uses loop_stack). Loops push to both; switches push here only.
     break_stack: Vec<String>,
+    /// The enclosing `try` statements, innermost last: each one's control variable and how deep the loop and
+    /// break stacks were when it began. A `break` / `continue` aimed at a loop outside a `try` cannot jump
+    /// out of the try's completion closure, so it records itself in that variable and leaves the closure;
+    /// the jump is made after the try (and its `finally`) completes.
+    try_jumps: Vec<(String, usize, usize)>,
+    /// Numbers the `try` control variables.
+    try_jump_seq: usize,
+    /// Numbers the receiver bindings of builtin-named method calls (`__mr<n>`), so a call nested in another's
+    /// arguments keeps its own.
+    method_recv_seq: usize,
     /// How many enclosing `try`-body closures we're currently emitting inside (within the current
     /// function). A try body compiles to `(|| -> Result<Option<Value>, _> { … })()` — a *completion*
     /// closure: `Ok(None)`=normal, `Ok(Some(v))`=pending `return v`, `Err(Throw)`=pending throw. When
@@ -1308,6 +1336,9 @@ impl Codegen {
             user_fn_returns: std::collections::HashMap::new(),
             async_context_stack: Vec::new(),
             loop_stack: Vec::new(),
+            try_jumps: Vec::new(),
+            try_jump_seq: 0,
+            method_recv_seq: 0,
             break_stack: Vec::new(),
             try_closure_depth: 0,
             function_scope_stack: vec![Vec::new()], // Start with global scope
@@ -1780,7 +1811,7 @@ impl Codegen {
         self.write("        match __k {\n");
         for (k, ty) in fields {
             let access = format!("self.{}", crate::types::field_ident(k));
-            let v_expr = if matches!(ty, crate::types::RustType::Value) {
+            let v_expr = if ty.stored_as_value() {
                 format!("{}.clone()", access)
             } else {
                 ty.to_value_expr(&access)
@@ -1794,7 +1825,7 @@ impl Codegen {
         self.write("    fn tish_set(&mut self, __k: &str, __v: tishlang_runtime::Value) {\n");
         self.write("        match __k {\n");
         for (k, ty) in fields {
-            let coerced = if matches!(ty, crate::types::RustType::Value) {
+            let coerced = if ty.stored_as_value() {
                 "__v".to_string()
             } else {
                 ty.from_value_expr("__v")
@@ -2391,6 +2422,12 @@ impl Codegen {
         const NON_RAW_KEYWORDS: &[&str] = &["self", "Self", "super", "crate"];
         if NON_RAW_KEYWORDS.contains(&name) {
             return Cow::Owned(format!("__tish_kw_{}", name));
+        }
+        // Every generated function value takes its arguments as `args: &[Value]`, so a tish binding
+        // named `args` captured into one (`let args = …; let f = fn(k) { return args[k] }`) shadowed
+        // them and the closure read its parameters from the user's value. Renamed the same way.
+        if name == "args" {
+            return Cow::Owned("__tish_id_args".to_string());
         }
         if RUST_KEYWORDS.contains(&name) {
             Cow::Owned(format!("r#{}", name))
@@ -7062,6 +7099,14 @@ impl Codegen {
                     self.writeln(&format!("return {};", v));
                 }
             }
+            Statement::Break { .. } if self.jump_leaves_try(false) => {
+                let var = self.try_jumps.last().unwrap().0.clone();
+                self.writeln(&format!("{{ {} = 1; return Ok(None); }}", var));
+            }
+            Statement::Continue { .. } if self.jump_leaves_try(true) => {
+                let var = self.try_jumps.last().unwrap().0.clone();
+                self.writeln(&format!("{{ {} = 2; return Ok(None); }}", var));
+            }
             Statement::Break { .. } => {
                 // `break` exits the innermost loop OR switch (break_stack), not necessarily the
                 // innermost loop. A switch pushes a label here so its `break` stays switch-local.
@@ -7207,6 +7252,11 @@ impl Codegen {
                 //   Ok(Some(v))  = a `return v` is pending (must run finally, then return)
                 //   Err(Throw)   = a `throw` is pending (catchable; else runs finally then re-raises)
                 // `return`/`throw` inside the body emit the closure-escaping form (try_closure_depth).
+                // A `break` / `continue` out of the try body (or its catch) is recorded here: 1 / 2.
+                self.try_jump_seq += 1;
+                let jump_var = format!("_try_jump_{}", self.try_jump_seq);
+                self.writeln(&format!("let mut {}: u8 = 0;", jump_var));
+                self.try_jumps.push((jump_var.clone(), self.loop_stack.len(), self.break_stack.len()));
                 self.writeln(
                     "let mut _flow: Result<Option<Value>, Box<dyn std::error::Error>> = (|| {",
                 );
@@ -7253,6 +7303,7 @@ impl Codegen {
                     self.indent -= 1;
                     self.writeln("};");
                 }
+                self.try_jumps.pop();
 
                 if let Some(finally_stmt) = finally_body {
                     self.emit_statement(finally_stmt)?;
@@ -7277,6 +7328,23 @@ impl Codegen {
                 self.writeln("Ok(None) => {}");
                 self.indent -= 1;
                 self.writeln("}");
+                // Now make the jump the body or catch recorded, from here — through the normal paths,
+                // so labels, `for` updates and an enclosing try apply as they would have.
+                // Only the jumps that have somewhere to go from here can have been recorded.
+                if !self.break_stack.is_empty() {
+                    self.writeln(&format!("if {} == 1 {{", jump_var));
+                    self.indent += 1;
+                    self.emit_statement(&Statement::Break { span: Default::default() })?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                if !self.loop_stack.is_empty() {
+                    self.writeln(&format!("if {} == 2 {{", jump_var));
+                    self.indent += 1;
+                    self.emit_statement(&Statement::Continue { span: Default::default() })?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
             }
             Statement::FunDecl {
                 name,
@@ -7622,6 +7690,8 @@ impl Codegen {
                 // not a mis-typed `return Err`. Restored at every exit below.
                 let saved_try_depth = self.try_closure_depth;
                 self.try_closure_depth = 0;
+                // A function body is its own world for `break` / `continue`: no enclosing loop or try.
+                let saved_jump_scope = self.take_jump_scope();
                 self.indent += 1;
                 // #381 — boxed-call recursion guard: every user-fn closure counts one depth level
                 // (RAII: the guard's Drop decrements on any return path). Past TISH_MAX_CALL_DEPTH
@@ -7948,6 +8018,7 @@ impl Codegen {
                 if let Err(e) = fun_body_res {
                     self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                     self.try_closure_depth = saved_try_depth;
+                    self.restore_jump_scope(&saved_jump_scope);
                     return Err(e);
                 }
 
@@ -7956,6 +8027,7 @@ impl Codegen {
                 self.writeln("})");
                 self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
                 self.try_closure_depth = saved_try_depth;
+                self.restore_jump_scope(&saved_jump_scope);
                 self.indent -= 1;
                 if to_static {
                     self.writeln("});");
@@ -9168,30 +9240,38 @@ impl Codegen {
                         }
                     }
 
-                    // Array methods
+                    // Array / string / number methods, by name. A plain object can have its own method of the same name
+                    // (`acc.push(chunk)`, `store.get(k)`), so the fast path is chosen at run time: the receiver's own
+                    // method when it is an object that has one, the built-in otherwise.
+                    let real_obj_expr = obj_expr.clone();
+                    self.method_recv_seq += 1;
+                    let recv = format!("__mr{}", self.method_recv_seq);
+                    let recv_place = format!("(*{})", recv);
+                    let obj_expr = recv_place.clone();
+                    let fast: Option<String> = 'fast: {
                     match method_name.as_ref() {
                         "push" => {
                             let args_vec = arg_exprs.iter()
                                 .map(|a| format!("{}.clone()", a))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_push(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
                         }
                         "pop" => {
-                            return Ok(format!("tishlang_runtime::array_pop(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_pop(&{})", obj_expr));
                         }
                         "shift" => {
-                            return Ok(format!("tishlang_runtime::array_shift(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_shift(&{})", obj_expr));
                         }
                         "unshift" => {
                             let args_vec = arg_exprs.iter()
                                 .map(|a| format!("{}.clone()", a))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_unshift(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
@@ -9204,7 +9284,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_index_of(&_obj, &{}, {}), Value::String(_) => tishlang_runtime::string_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
                                 obj_expr, search, from_opt, search, from
                             ));
@@ -9221,7 +9301,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_last_index_of(&_obj, &{}, {}), Value::String(_) => tishlang_runtime::string_last_index_of(&_obj, &{}, &{}), _ => Value::Number(-1.0) }} }}",
                                 obj_expr, search, from_opt, search, position
                             ));
@@ -9230,7 +9310,7 @@ impl Codegen {
                             let t = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let s = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let e = arg_exprs.get(2).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_copy_within(&{}, &{}, &{}, &{})",
                                 obj_expr, t, s, e
                             ));
@@ -9238,40 +9318,40 @@ impl Codegen {
                         "includes" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let from = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_includes(&_obj, &{}, &{}), Value::String(_) => tishlang_runtime::string_includes(&_obj, &{}, &{}), _ => Value::Bool(false) }} }}",
                                 obj_expr, search, from, search, from
                             ));
                         }
                         "join" => {
                             let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_join(&{}, &{})",
                                 obj_expr, sep
                             ));
                         }
                         "reverse" => {
-                            return Ok(format!("tishlang_runtime::array_reverse(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_reverse(&{})", obj_expr));
                         }
                         "toReversed" => {
-                            return Ok(format!("tishlang_runtime::array_to_reversed(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_to_reversed(&{})", obj_expr));
                         }
                         "fill" => {
                             let value = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let start = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let end = arg_exprs.get(2).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_fill(&{}, &{}, &{}, &{})",
                                 obj_expr, value, start, end
                             ));
                         }
                         "shuffle" => {
-                            return Ok(format!("tishlang_runtime::array_shuffle(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_shuffle(&{})", obj_expr));
                         }
                         "slice" => {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "{{ let _obj = ({}).clone(); match &_obj {{ Value::Array(_) => tishlang_runtime::array_slice(&_obj, &{}, &{}), Value::String(_) => tishlang_runtime::string_slice(&_obj, &{}, &{}), _ => Value::Null }} }}",
                                 obj_expr, start, end, start, end
                             ));
@@ -9281,7 +9361,7 @@ impl Codegen {
                                 .map(|a| format!("{}.clone()", a))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_concat(&{}, &[{}])",
                                 obj_expr, args_vec
                             ));
@@ -9290,7 +9370,7 @@ impl Codegen {
                         "substring" => {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let end = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_substring(&{}, &{}, &{})",
                                 obj_expr, start, end
                             ));
@@ -9298,7 +9378,7 @@ impl Codegen {
                         "substr" => {
                             let start = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let length = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_substr(&{}, &{}, &{})",
                                 obj_expr, start, length
                             ));
@@ -9306,39 +9386,39 @@ impl Codegen {
                         "split" => {
                             let sep = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let limit = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_split_limit(&{}, &{}, &{})",
                                 obj_expr, sep, limit
                             ));
                         }
                         "trim" => {
-                            return Ok(format!("tishlang_runtime::string_trim(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::string_trim(&{})", obj_expr));
                         }
                         "trimStart" => {
-                            return Ok(format!("tishlang_runtime::string_trim_start(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::string_trim_start(&{})", obj_expr));
                         }
                         "trimEnd" => {
-                            return Ok(format!("tishlang_runtime::string_trim_end(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::string_trim_end(&{})", obj_expr));
                         }
                         "normalize" => {
                             let form = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_normalize(&{}, &{})",
                                 obj_expr, form
                             ));
                         }
                         "codePointAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_code_point_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "toUpperCase" => {
-                            return Ok(format!("tishlang_runtime::string_to_upper_case(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::string_to_upper_case(&{})", obj_expr));
                         }
                         "toLowerCase" => {
-                            return Ok(format!("tishlang_runtime::string_to_lower_case(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::string_to_lower_case(&{})", obj_expr));
                         }
                         "startsWith" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
@@ -9346,7 +9426,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_starts_with(&{}, &{}, {})",
                                 obj_expr, search, pos
                             ));
@@ -9357,7 +9437,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_ends_with(&{}, &{}, {})",
                                 obj_expr, search, pos
                             ));
@@ -9365,7 +9445,7 @@ impl Codegen {
                         "replace" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_replace(&{}, &{}, &{})",
                                 obj_expr, search, replacement
                             ));
@@ -9373,7 +9453,7 @@ impl Codegen {
                         "replaceAll" => {
                             let search = arg_exprs.first().cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
                             let replacement = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::String(\"\".into())".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_replace_all(&{}, &{}, &{})",
                                 obj_expr, search, replacement
                             ));
@@ -9384,28 +9464,28 @@ impl Codegen {
                         // compiled. Falls through to a generic call (no-regex builds) otherwise.
                         "match" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_match_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
                         "matchAll" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_match_all_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
                         "search" if self.has_feature("regex") => {
                             let regexp = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_search_regex(&{}, &{})",
                                 obj_expr, regexp
                             ));
                         }
                         "charAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_char_at(&{}, &{})",
                                 obj_expr, idx
                             ));
@@ -9414,21 +9494,21 @@ impl Codegen {
                             // `at` is on both String and Array; this match is by method name, so
                             // dispatch on the runtime value type (#247).
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::value_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "charCodeAt" => {
                             let idx = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_char_code_at(&{}, &{})",
                                 obj_expr, idx
                             ));
                         }
                         "repeat" => {
                             let count = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_repeat(&{}, &{})",
                                 obj_expr, count
                             ));
@@ -9436,7 +9516,7 @@ impl Codegen {
                         "padStart" => {
                             let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_pad_start(&{}, &{}, &{})",
                                 obj_expr, target_len, pad
                             ));
@@ -9444,7 +9524,7 @@ impl Codegen {
                         "padEnd" => {
                             let target_len = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
                             let pad = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::string_pad_end(&{}, &{}, &{})",
                                 obj_expr, target_len, pad
                             ));
@@ -9452,28 +9532,28 @@ impl Codegen {
                         // Number methods
                         "toFixed" => {
                             let digits = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(0.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::number_to_fixed(&{}, &{})",
                                 obj_expr, digits
                             ));
                         }
                         "toExponential" => {
                             let digits = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::number_to_exponential(&{}, &{})",
                                 obj_expr, digits
                             ));
                         }
                         "toPrecision" => {
                             let precision = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::number_to_precision(&{}, &{})",
                                 obj_expr, precision
                             ));
                         }
                         "toString" => {
                             let radix = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::number_to_string(&{}, &{})",
                                 obj_expr, radix
                             ));
@@ -9481,14 +9561,14 @@ impl Codegen {
                         // Higher-order array methods
                         "map" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_map(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "filter" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_filter(&{}, &{})",
                                 obj_expr, callback
                             ));
@@ -9504,7 +9584,7 @@ impl Codegen {
                                 if let Some(fold) =
                                     self.try_fused_reduce(args, &obj_expr, &initial)?
                                 {
-                                    return Ok(fold);
+                                    break 'fast Some(fold);
                                 }
                             }
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
@@ -9514,7 +9594,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_reduce(&{}, &{}, {})",
                                 obj_expr, callback, init_arg
                             ));
@@ -9525,7 +9605,7 @@ impl Codegen {
                                 Some(e) => format!("Some(&{})", e),
                                 None => "None".to_string(),
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_reduce_right(&{}, &{}, {})",
                                 obj_expr, callback, init_arg
                             ));
@@ -9535,59 +9615,59 @@ impl Codegen {
                         // falls through to the generic bound-method call (its get_prop resolves them).
                         // (#456 regression — the unguarded arms hijacked `m.keys()`/`s.values()`.)
                         "keys" if !self.kve_defers_to_generic(object.as_ref()) => {
-                            return Ok(format!("tishlang_runtime::array_keys(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_keys(&{})", obj_expr));
                         }
                         "values" if !self.kve_defers_to_generic(object.as_ref()) => {
-                            return Ok(format!("tishlang_runtime::array_values(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_values(&{})", obj_expr));
                         }
                         "entries" if !self.kve_defers_to_generic(object.as_ref()) => {
-                            return Ok(format!("tishlang_runtime::array_entries(&{})", obj_expr));
+                            break 'fast Some(format!("tishlang_runtime::array_entries(&{})", obj_expr));
                         }
                         "forEach" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_for_each(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "find" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_find(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "findIndex" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_find_index(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "findLast" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_find_last(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "findLastIndex" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_find_last_index(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "some" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_some(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         "every" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_every(&{}, &{})",
                                 obj_expr, callback
                             ));
@@ -9597,12 +9677,12 @@ impl Codegen {
                             if let Some(CallArg::Expr(comparator_expr)) = args.first() {
                                 if let Some(ascending) = Self::detect_numeric_sort_comparator(comparator_expr) {
                                     if ascending {
-                                        return Ok(format!(
+                                        break 'fast Some(format!(
                                             "tishlang_runtime::array_sort_numeric_asc(&{})",
                                             obj_expr
                                         ));
                                     } else {
-                                        return Ok(format!(
+                                        break 'fast Some(format!(
                                             "tishlang_runtime::array_sort_numeric_desc(&{})",
                                             obj_expr
                                         ));
@@ -9616,7 +9696,7 @@ impl Codegen {
                                 if let Some(keys) =
                                     Self::detect_lexicographic_key_comparator(comparator_expr)
                                 {
-                                    return Ok(format!(
+                                    break 'fast Some(format!(
                                         "tishlang_runtime::array_sort_by_keys(&{}, {})",
                                         obj_expr,
                                         Self::render_sort_keys(&keys)
@@ -9625,7 +9705,7 @@ impl Codegen {
                             }
                             // General case: use the callback
                             let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_sort(&{}, {})",
                                 obj_expr, comparator
                             ));
@@ -9642,7 +9722,7 @@ impl Codegen {
                             } else {
                                 "&[]".to_string()
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_splice(&{}, &{}, {}, {})",
                                 obj_expr, start, delete_count, items
                             ));
@@ -9659,14 +9739,14 @@ impl Codegen {
                             } else {
                                 "&[]".to_string()
                             };
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_to_spliced(&{}, &{}, {}, {})",
                                 obj_expr, start, delete_count, items
                             ));
                         }
                         "toSorted" => {
                             let comparator = arg_exprs.first().map(|c| format!("Some(&{})", c)).unwrap_or_else(|| "None".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_to_sorted(&{}, {})",
                                 obj_expr, comparator
                             ));
@@ -9674,27 +9754,48 @@ impl Codegen {
                         "with" => {
                             let index = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
                             let value = arg_exprs.get(1).cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_with(&{}, &{}, &{})",
                                 obj_expr, index, value
                             ));
                         }
                         "flat" => {
                             let depth = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Number(1.0)".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_flat(&{}, &{})",
                                 obj_expr, depth
                             ));
                         }
                         "flatMap" => {
                             let callback = arg_exprs.first().cloned().unwrap_or_else(|| "Value::Null".to_string());
-                            return Ok(format!(
+                            break 'fast Some(format!(
                                 "tishlang_runtime::array_flat_map(&{}, &{})",
                                 obj_expr, callback
                             ));
                         }
                         _ => {} // Fall through to normal function call
+                        }
+                        None
+                    };
+                    // A receiver that cannot be a plain object — a literal, a freshly built builtin value, or
+                    // a binding typed as an array/string — takes the fast path with no check, as before.
+                    if let Some(fast) = fast.as_ref().filter(|_| self.receiver_is_builtin(object, &real_obj_expr)) {
+                        return Ok(fast.replace(&recv_place, &real_obj_expr));
                     }
+                    // An arm that recognised the receiver's shape (a spread array, a fused chain) emitted the
+                    // receiver itself: it is an array it builds, and binding it again would evaluate it twice.
+                    if let Some(fast) = fast.as_ref().filter(|f| !f.contains(&recv_place)) {
+                        return Ok(fast.clone());
+                    }
+                    if let Some(fast) = fast {
+                        let call_args = arg_exprs.iter().map(|a| format!("({}).clone()", a)).collect::<Vec<_>>().join(", ");
+                        return Ok(format!(
+                            "{{ let {r} = &({}); if tishlang_runtime::has_own_method({r}, {:?}) {{ tishlang_runtime::call_own_method({r}, {:?}, &[{}]) }} else {{ {} }} }}",
+                            real_obj_expr, method_name.as_ref(), method_name.as_ref(), call_args, fast, r = recv
+                        ));
+                    }
+                    let obj_expr = real_obj_expr;
+                    let _ = &obj_expr;
                 }
                 
                 // Typed externs (#perf): a call to a native import with a declared typed signature →
@@ -12713,6 +12814,8 @@ impl Codegen {
         // enclosing `try`'s `Result` channel must not leak in. Reset + restore at every exit.
         let saved_try_depth = self.try_closure_depth;
         self.try_closure_depth = 0;
+        // A function body is its own world for `break` / `continue`: no enclosing loop or try.
+        let saved_jump_scope = self.take_jump_scope();
 
         // #682: same handle fetch as the FunDecl path — see the comment there.
         if self.module_statics_on {
@@ -12891,11 +12994,13 @@ impl Codegen {
         if let Err(e) = arrow_body_res {
             self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
             self.try_closure_depth = saved_try_depth;
+            self.restore_jump_scope(&saved_jump_scope);
             return Err(e);
         }
 
         self.value_fn_depth = self.value_fn_depth.saturating_sub(1);
         self.try_closure_depth = saved_try_depth;
+        self.restore_jump_scope(&saved_jump_scope);
 
         // Restore state
         self.refcell_wrapped_vars = saved_refcell_vars;
@@ -18168,6 +18273,52 @@ impl Codegen {
                 | Statement::Break { .. }
                 | Statement::Continue { .. }
         )
+    }
+
+    /// Set aside the loops, breakables and try frames around a function body being emitted (see
+    /// [`Self::restore_jump_scope`]).
+    fn take_jump_scope(&mut self) -> (Vec<(String, Option<String>)>, Vec<String>, Vec<(String, usize, usize)>) {
+        (
+            std::mem::take(&mut self.loop_stack),
+            std::mem::take(&mut self.break_stack),
+            std::mem::take(&mut self.try_jumps),
+        )
+    }
+
+    fn restore_jump_scope(&mut self, saved: &(Vec<(String, Option<String>)>, Vec<String>, Vec<(String, usize, usize)>)) {
+        self.loop_stack = saved.0.clone();
+        self.break_stack = saved.1.clone();
+        self.try_jumps = saved.2.clone();
+    }
+
+    /// Whether a method call's receiver is certainly an array, string or number — never a plain object with a
+    /// method of its own — so a builtin fast path needs no run-time check.
+    fn receiver_is_builtin(&self, object: &Expr, emitted: &str) -> bool {
+        if matches!(object, Expr::Literal { .. } | Expr::Array { .. } | Expr::TemplateLiteral { .. }) {
+            return true;
+        }
+        let e = emitted.trim_start_matches('(');
+        if e.starts_with("Value::Array(") || e.starts_with("Value::NumberArray(") || e.starts_with("Value::String(") || e.starts_with("Value::Number(") {
+            return true;
+        }
+        if let Expr::Ident { name, .. } = object {
+            return matches!(
+                self.type_context.get_type(name.as_ref()),
+                RustType::Vec(_) | RustType::String | RustType::F64
+            );
+        }
+        false
+    }
+
+    /// Whether a `break` (or, with `continue_`, a `continue`) here targets a loop or switch outside the
+    /// innermost enclosing `try` — so it must leave the try's completion closure first.
+    fn jump_leaves_try(&self, continue_: bool) -> bool {
+        let Some((_, loops, breaks)) = self.try_jumps.last() else { return false };
+        if continue_ {
+            !self.loop_stack.is_empty() && self.loop_stack.len() <= *loops
+        } else {
+            !self.break_stack.is_empty() && self.break_stack.len() <= *breaks
+        }
     }
 
     /// #303 — emit the post-call pending-throw check in the form the current frame expects: a

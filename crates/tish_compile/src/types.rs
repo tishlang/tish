@@ -188,6 +188,12 @@ impl RustType {
                     .iter()
                     .map(|(k, v)| (k.clone(), Self::from_annotation_with_aliases(v, aliases)))
                     .collect();
+                // A shape holding a function (a host interface, a record of callbacks) stays a boxed
+                // `Value` too: every call through it is dynamic anyway, and a closure field has no
+                // `Default`/`Debug` for the struct's derives — lowering it produced uncompilable Rust.
+                if typed_fields.iter().any(|(_, t)| t.holds_function()) {
+                    return RustType::Value;
+                }
                 RustType::Object(typed_fields)
             }
             TypeAnnotation::Function { params, returns } => {
@@ -253,6 +259,24 @@ impl RustType {
                 }
                 RustType::Object(fields)
             }
+        }
+    }
+
+    /// Whether this type is held as a boxed `Value` in generated Rust: `Value` itself, and an inline object
+    /// shape (which has no struct of its own). Reading one out of a borrow means cloning it.
+    pub fn stored_as_value(&self) -> bool {
+        matches!(self, RustType::Value | RustType::Object(_))
+    }
+
+    /// Whether a value of this type is, or holds, a function: directly, optional, or in an array, tuple
+    /// or nested shape.
+    pub fn holds_function(&self) -> bool {
+        match self {
+            RustType::Function { .. } => true,
+            RustType::Option(inner) | RustType::Vec(inner) => inner.holds_function(),
+            RustType::Tuple(items) => items.iter().any(RustType::holds_function),
+            RustType::Object(fields) | RustType::Named { fields, .. } => fields.iter().any(|(_, t)| t.holds_function()),
+            _ => false,
         }
     }
 
@@ -552,7 +576,13 @@ impl RustType {
             ),
             RustType::Unit => "()".to_string(),
             RustType::Vec(inner) => {
-                let inner_conversion = inner.from_value_expr("v");
+                // The elements are borrowed (`iter()`): a boxed `Value` element is cloned, as its own
+                // conversion is the identity.
+                let inner_conversion = if inner.stored_as_value() {
+                    "v.clone()".to_string()
+                } else {
+                    inner.from_value_expr("v")
+                };
                 format!(
                     "match &{} {{ Value::Array(arr) => arr.borrow().iter().map(|v| {}).collect(), _ => panic!(\"expected array\") }}",
                     value_expr, inner_conversion
@@ -655,7 +685,13 @@ impl RustType {
                 // an FnMut closure (a `serve()` handler, called per request) or used again after this
                 // conversion. Mirrors the Vec arm's `.iter()` (which likewise avoids moving). `(*v)`
                 // derefs the `&inner` the ref-match binds, so the inner's own clone/copy still applies.
-                let inner_to_value = inner.to_value_expr("(*v)");
+                // A boxed `Value` inner has no clone of its own in `to_value_expr` (it is the
+                // identity), so it is cloned here: `(*v)` would move out of the borrow.
+                let inner_to_value = if inner.stored_as_value() {
+                    "v.clone()".to_string()
+                } else {
+                    inner.to_value_expr("(*v)")
+                };
                 format!(
                     "match &({}) {{ Some(v) => {}, None => Value::Null }}",
                     native_expr, inner_to_value
@@ -733,7 +769,7 @@ pub fn named_struct_to_object_expr(fields: &[(Arc<str>, RustType)], native_expr:
             let access = format!("{}.{}", native_expr, field_ident(k));
             // A `Value`-typed field must be cloned (not `Copy`, and `to_value_expr(Value)` is identity);
             // native field types clone/copy inside their own `to_value_expr`.
-            let v_expr = if matches!(ty, RustType::Value) {
+            let v_expr = if ty.stored_as_value() {
                 format!("{}.clone()", access)
             } else {
                 ty.to_value_expr(&access)

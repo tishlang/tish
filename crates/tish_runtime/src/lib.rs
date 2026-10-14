@@ -30,6 +30,18 @@ pub fn value_call(callee: &Value, args: &[Value]) -> Value {
     }
     tishlang_core::value_call(callee, args)
 }
+/// Whether `obj` is an object with its own callable property `name` — a method a builtin of the same
+/// name (`push`, `get`, `map`, …) must not shadow. Native codegen checks this before taking a builtin
+/// array/string fast path, so `acc.push(x)` on a plain object calls the object's `push`.
+pub fn has_own_method(obj: &Value, name: &str) -> bool {
+    matches!(obj, Value::Object(_)) && matches!(get_prop(obj, name), Value::Function(_))
+}
+
+/// Call `obj`'s own method `name` (see [`has_own_method`]).
+pub fn call_own_method(obj: &Value, name: &str, args: &[Value]) -> Value {
+    value_call(&get_prop(obj, name), args)
+}
+
 /// JS ToInt32/ToUint32 for the emitted bitwise/shift code (modulo 2³², NaN/±Infinity → 0).
 pub use tishlang_core::{
     to_int32, to_int32_value, to_number_value, to_uint32, to_uint32_value,

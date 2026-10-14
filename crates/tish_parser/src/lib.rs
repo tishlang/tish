@@ -534,8 +534,11 @@ mod tests {
         assert!(matches!(alias("type C = (string) => void"), T::Function { .. }));
         assert!(matches!(alias("type D = () => number"), T::Function { .. }));
         assert!(matches!(alias("type E = (a, b) => number"), T::Function { .. }));
-        match alias("type F = { \"function\": { name: string }, id: string }") {
-            T::Object(fields) => assert_eq!(fields[0].0.as_ref(), "function"),
+        match alias("type F = { \"function\": { name: string }, type: string, declare: number }") {
+            T::Object(fields) => {
+                let names: Vec<&str> = fields.iter().map(|f| f.0.as_ref()).collect();
+                assert_eq!(names, ["function", "type", "declare"]);
+            }
             other => panic!("expected an object type, got {other:?}"),
         }
     }

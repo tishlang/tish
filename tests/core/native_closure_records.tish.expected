@@ -1,0 +1,5 @@
+own methods: abc ABC abc/2
+args name: second
+callbacks: up:HEY 3
+nullable param: ada ADA!
+captured const: 2 true false

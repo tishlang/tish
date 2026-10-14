@@ -1,0 +1,69 @@
+// break / continue out of try and catch: finally runs, a for update runs, nested trys are left in order, a
+// loop inside a try keeps its own break, and a left try's handler does not catch a later throw.
+let log = []
+let i = 0
+while (i < 6) {
+  i = i + 1
+  try {
+    if (i === 2) { continue }
+    if (i === 5) { break }
+    log.push("t" + String(i))
+  } finally {
+    log.push("f" + String(i))
+  }
+}
+for (let k = 0; k < 4; k = k + 1) {
+  try {
+    if (k === 1) { throw "x" }
+    if (k === 3) { continue }
+    log.push("k" + String(k))
+  } catch (e) {
+    if (k === 1) { continue }
+  }
+  log.push("after" + String(k))
+}
+let n = 0
+while (true) {
+  n = n + 1
+  try {
+    try {
+      if (n === 3) { break }
+    } finally {
+      log.push("in" + String(n))
+    }
+  } catch (e) {}
+}
+try {
+  let m = 0
+  while (true) {
+    m = m + 1
+    if (m === 2) { break }
+  }
+  log.push("inner" + String(m))
+} catch (e) {}
+fn retry(): number {
+  let attempt = 0
+  while (true) {
+    try {
+      attempt = attempt + 1
+      if (attempt < 3) { throw "again" }
+      return attempt
+    } catch (e) {
+      if (attempt > 5) { throw e }
+    }
+  }
+}
+console.log(log.join(",") + " retry=" + String(retry()))
+
+let seen2 = "none"
+fn leaveThenThrow(): string {
+  while (true) {
+    try {
+      break
+    } catch (e) {
+      seen2 = "stale catch ran: " + String(e)
+    }
+  }
+  throw "outside"
+}
+try { leaveThenThrow() } catch (e) { console.log("caught outside: " + String(e) + " / " + seen2) }

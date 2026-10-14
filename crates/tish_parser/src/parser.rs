@@ -869,6 +869,12 @@ impl<'a> Parser<'a> {
                             self.advance();
                             Arc::from("for")
                         }
+                        // `type` / `declare` are contextual keywords and ordinary field names
+                        // (`{ type: "text" }` in OpenAI messages, DOM events).
+                        Some(TokenKind::Type | TokenKind::Declare) => {
+                            let tok = self.advance().ok_or("Expected property name")?;
+                            Arc::from(tok.literal.as_deref().ok_or("Expected property name")?)
+                        }
                         // A quoted key, for names that are keywords or not identifiers
                         // (`"function": { … }`, the shape of an OpenAI tool call).
                         Some(TokenKind::String) => {
