@@ -1,0 +1,2 @@
+import { delay } from "tish:timers"
+export async fn later(x) { await delay(1); return x }

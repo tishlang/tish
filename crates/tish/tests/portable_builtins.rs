@@ -69,3 +69,8 @@ fn encoding_is_the_same_everywhere() {
         "héllo ✓\na?b>c\naGVsbG8gd29ybGQ= aGk_\nnull\ncafé ✓ 🙂 done\n",
     );
 }
+
+#[test]
+fn a_builtin_imported_by_two_modules_is_bound_once() {
+    same_everywhere("timers_shared_import.tish", "timers,promise", "both: 2\n");
+}

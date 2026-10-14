@@ -3183,10 +3183,16 @@ impl Codegen {
             // `with()` deliberately mirrors `LocalKey::with` (compat.rs), so every read and write the
             // emitter already produces (`G.with(|c| c.get())`) is unchanged.
             let gba = self.emit_mode == crate::NativeEmitMode::Gba;
-            self.native_numeric_globals =
+            // A `thread_local!` numeric global is per-thread: code that runs on another thread
+            // (`Promise.spawn`, a `serve` handler) would read its own fresh copy and its writes
+            // would never reach the main thread. Such programs keep the shared `VmRef` binding.
+            self.native_numeric_globals = if !gba && self.program_may_call_tish_off_thread(program) {
+                Default::default()
+            } else {
                 Self::collect_native_numeric_globals(&program.statements)
                     .into_iter()
-                    .collect();
+                    .collect()
+            };
             if !self.native_numeric_globals.is_empty() {
                 if gba {
                     self.emit_native_numeric_global_singlecore()?;
@@ -17485,12 +17491,23 @@ impl Codegen {
                 return true;
             }
         }
-        // `Promise.spawn` is an OS-thread spawn, and only exists in ws-linked programs. The member
-        // name is not an ident, so the receiver is what we can see.
-        if self.has_feature("ws") && idents.contains("Promise") {
+        // `Promise.spawn` runs its function on a real OS thread whenever the runtime is linked with
+        // `send-values`, which every feature that puts `Promise` in scope pulls in (`http`, `ws`,
+        // `fs` → `promise`). Without it the spawn runs inline and statics are safe. The member name
+        // is not an ident, so the receiver is what we can see.
+        if idents.contains("Promise") && self.links_send_values() {
             return true;
         }
         false
+    }
+
+    /// Whether the runtime this program links has `send-values` on — i.e. whether `Promise.spawn`
+    /// is a real thread. Mirrors `tishlang_runtime`'s Cargo features: `http`, `ws`, `promise` and
+    /// `fs` (via `promise`) all enable it.
+    fn links_send_values(&self) -> bool {
+        ["http", "ws", "fs", "promise"]
+            .iter()
+            .any(|f| self.has_feature(f))
     }
 
     /// #682 — re-emit a buffered builtin preamble inside the `#[inline(never)]` shim, handing its

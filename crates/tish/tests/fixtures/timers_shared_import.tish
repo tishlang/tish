@@ -1,0 +1,5 @@
+// Two modules import `delay` from `tish:timers`: one binding in the merged program, not two.
+import { delay } from "tish:timers"
+import { later } from "./timers_shared_import_dep.tish"
+await delay(1)
+console.log("both: " + String(await later(2)))
