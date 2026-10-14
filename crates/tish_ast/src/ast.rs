@@ -33,6 +33,35 @@ pub enum TypeAnnotation {
     Literal(TypeLiteral),
     /// Intersection type: T1 & T2 (e.g. `interface X extends Y { … }` → `Y & { … }`)
     Intersection(Vec<TypeAnnotation>),
+    /// A generic reference whose arguments the compiler does not use: `Promise<string>`,
+    /// `Map<string, number>`, `Record<string, T>`. Codegen and the checker treat it as the bare
+    /// `Simple(name)` (see [`TypeAnnotation::erased`]); it keeps the arguments so the `.d.ts`
+    /// emitter and the formatter can write them back. (`Array<T>` is `Array(T)`, and a ref to a
+    /// known generic alias is monomorphized to a concrete alias instead.)
+    /// Boxed so the variant does not grow every `TypeAnnotation` (and the AST nodes holding one):
+    /// the parser's deep-nesting guard depends on small frames.
+    Generic(Box<GenericRef>),
+}
+
+/// The name and arguments of a [`TypeAnnotation::Generic`] reference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericRef {
+    pub name: Arc<str>,
+    pub args: Vec<TypeAnnotation>,
+    pub span: Span,
+}
+
+impl TypeAnnotation {
+    /// The type with a top-level [`TypeAnnotation::Generic`]'s arguments erased (`Promise<T>` ->
+    /// `Promise`), which is how every consumer but `.d.ts` / the formatter reads it.
+    pub fn erased(&self) -> std::borrow::Cow<'_, TypeAnnotation> {
+        match self {
+            TypeAnnotation::Generic(g) => {
+                std::borrow::Cow::Owned(TypeAnnotation::Simple(g.name.clone(), g.span))
+            }
+            t => std::borrow::Cow::Borrowed(t),
+        }
+    }
 }
 
 /// A literal value used in type position (`"a"`, `42`, `true`).
