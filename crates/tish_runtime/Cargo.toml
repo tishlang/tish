@@ -86,6 +86,9 @@ ws = [
     "dep:rustls",
     "dep:futures-util",
     "dep:lazy_static",
+    # ws programs get `Promise` (and `Promise.spawn` for a background pump beside a blocking
+    # serve), so ws links the promise machinery, as fs does.
+    "promise",
     "send-values",
     "tishlang_core/send-values",
     "tishlang_builtins/send-values",

@@ -145,6 +145,16 @@ fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
     enabled.contains("full") || enabled.contains(name)
 }
 
+/// Whether `Promise` is in scope for this run. Every capability whose runtime links the promise
+/// machinery puts it there — `http`, `ws`, `fs` (fs/promises) and plain `promise` — the same set
+/// for which the native backend binds `Promise` and links `send-values` (`Promise.spawn`).
+#[allow(dead_code)]
+fn promise_allowed(enabled: &HashSet<String>) -> bool {
+    ["http", "ws", "fs", "promise"]
+        .iter()
+        .any(|c| cap_allows(enabled, c))
+}
+
 /// Capabilities linked into this `tishlang_vm` binary (compile-time). Used by [`Vm::new`] and `run()`.
 pub fn all_compiled_capabilities() -> HashSet<String> {
     #[allow(unused_mut)]
@@ -310,7 +320,7 @@ fn get_builtin_export(enabled: &HashSet<String>, spec: &str, export_name: &str) 
         };
     }
     #[cfg(all(feature = "promise", not(feature = "http")))]
-    if spec == "tish:http" && cap_allows(enabled, "promise") {
+    if spec == "tish:http" && promise_allowed(enabled) {
         return match export_name {
             "Promise" => Some(tishlang_runtime::promise_object()),
             "await" => Some(Value::native(|args: &[Value]| {
@@ -1156,7 +1166,7 @@ fn init_globals(enabled: &HashSet<String>) -> ObjectMap {
     }
 
     #[cfg(any(feature = "http", feature = "promise"))]
-    if cap_allows(enabled, "http") || cap_allows(enabled, "promise") {
+    if promise_allowed(enabled) {
         g.insert("Promise".into(), tishlang_runtime::promise_object());
     }
 

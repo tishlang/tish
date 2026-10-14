@@ -21,7 +21,7 @@ wasm = ["dep:wasm-bindgen"]
 # Built-in modules: fs, http, process (for bytecode LoadNativeExport).
 # `dep:tishlang_runtime` is required so enabling e.g. `http` always activates the optional runtime crate
 # (some Cargo/cache combinations only saw `tishlang_runtime/http` and built VM stubs without http).
-fs = ["dep:tishlang_runtime", "tishlang_runtime/fs"]
+fs = ["dep:tishlang_runtime", "tishlang_runtime/fs", "promise"]
 process = ["dep:tishlang_runtime", "tishlang_runtime/process"]
 tty = ["dep:tishlang_runtime", "tishlang_runtime/tty"]
 # Timer globals + `tish:timers` LoadNativeExport (uses tishlang_runtime TLS timer registry).
@@ -31,7 +31,7 @@ timers = ["dep:tishlang_runtime"]
 http = ["dep:tishlang_runtime", "tishlang_runtime/http", "send-values", "timers"]
 # Promise + `tish:http.await` / `Promise` export without the full HTTP client stack (e.g. wasm32-wasip1).
 promise = ["dep:tishlang_runtime", "tishlang_runtime/promise", "send-values"]
-ws = ["dep:tishlang_runtime", "tishlang_runtime/ws"]
+ws = ["dep:tishlang_runtime", "tishlang_runtime/ws", "promise"]
 # `tish:ffi` loadModule: runtime loading of tish FFI cdylibs.
 ffi = ["dep:tishlang_runtime", "tishlang_runtime/ffi"]
 # `tish:crypto` (sha256, sha256Hex, randomBytes) and `tish:encoding` (base64/base64url/utf8): the

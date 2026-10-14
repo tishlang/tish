@@ -1,0 +1,6 @@
+// No top-level `await`: `Promise` must still be in scope wherever the runtime links promises.
+let p = Promise.resolve(3)
+console.log(typeof Promise)
+console.log(typeof Promise.resolve)
+console.log(typeof Promise.all)
+console.log(p !== null)

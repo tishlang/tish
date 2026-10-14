@@ -3072,20 +3072,17 @@ impl Codegen {
             // `register_static_route` is http-gated in the runtime; emit its import only when http is
             // linked, else a non-http `tish build --feature …` fails with an unresolved import.
             self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
-            if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
-            } else if self.has_feature("ws") {
-                // ws programs get `Promise.spawn` (send-values OS-thread spawn) even when not async,
-                // so a server can run a background accept/pump loop alongside the blocking `serve()`.
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object};\n");
-            } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
-            }
+            self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
         }
-        // `fs/promises` (and any promise-using async program) needs the await machinery even
-        // without http. `fs` implies the runtime `promise` feature, so these resolve.
-        if self.is_async && !self.has_feature("http") && self.has_feature("fs") {
-            self.write("use tishlang_runtime::{promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
+        // `Promise` is in scope whenever the linked runtime has the promise machinery (`http`, `ws`,
+        // `fs`, `promise` — see `links_send_values`), whether or not the program awaits: a program
+        // that only builds `Promise.resolve(…)` or `Promise.spawn(…)` must compile too. The await
+        // helpers are only needed by an async `run()`.
+        if self.links_send_values() {
+            self.write("use tishlang_runtime::promise_object as tish_promise_object;\n");
+            if self.is_async {
+                self.write("use tishlang_runtime::{await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
+            }
         }
         if self.has_feature("fs") {
             self.write("use tishlang_runtime::{read_file as tish_read_file, read_file_bytes as tish_read_file_bytes, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
@@ -3815,14 +3812,14 @@ impl Codegen {
             );
             self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
         }
+        if self.links_send_values() {
+            self.writeln("let Promise = tish_promise_object();");
+        }
         if self.has_feature("http") {
             self.writeln(
                 "let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));",
             );
             self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
-            if self.is_async || self.has_feature("ws") {
-                self.writeln("let Promise = tish_promise_object();");
-            }
             // `serve` supports two shapes:
             //   1. serve(port, handler)            // single shared handler
             //   2. serve(port, { onWorker: (workerId) => handler, ... })
