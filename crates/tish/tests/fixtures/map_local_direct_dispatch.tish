@@ -1,0 +1,54 @@
+// `new Map()` locals get direct map_get/map_set/map_has/map_values calls in a native build. The
+// compiler tracks them by bare name, so every other binding of the same name must keep its own
+// meaning — and must still compile.
+
+// A module binding that closures write lives in a VmRef cell, and so does every local that shares
+// its name (dune-server, Tish 4.2.3: `tish_map_get(&sessions, …)` on a `VmRef<Value>` was E0308).
+let sessions = { count: 0 }
+let touch = fn() { sessions = { count: sessions.count + 1 } }
+touch()
+
+fn makeRegistry() {
+  let sessions = new Map()
+  let open = fn(id) {
+    sessions.set(id, { id: id, turns: 0 })
+    return sessions.has(id)
+  }
+  let bump = fn(id) {
+    let s = sessions.get(id) ?? null
+    if (s === null) { return -1 }
+    s.turns = s.turns + 1
+    sessions.set(id, s)
+    return s.turns
+  }
+  let count = fn() {
+    let n = 0
+    for (let _s of sessions.values()) { n = n + 1 }
+    return n
+  }
+  return { open: open, bump: bump, count: count }
+}
+
+// The same name as a Map local elsewhere, bound to something that is not a Map.
+fn mapLocal() {
+  let m = new Map()
+  m.set("k", 1)
+  return m.get("k")
+}
+fn param(m) { return m.get("k") }
+fn objectLocal() {
+  let m = { get: fn(k) { return "object " + k } }
+  return m.get("k")
+}
+
+// A Map local nothing else shares a name with keeps the direct path.
+fn tally(words) {
+  let counts = new Map()
+  for (let w of words) { counts.set(w, (counts.get(w) ?? 0) + 1) }
+  return counts.get("a") + "/" + counts.has("c")
+}
+
+let r = makeRegistry()
+console.log(r.open("a"), r.open("b"), r.bump("a"), r.bump("a"), r.bump("b"), r.bump("zz"), r.count(), sessions.count)
+console.log(mapLocal(), param({ get: fn(k) { return "param " + k } }), objectLocal())
+console.log(tally(["a", "b", "a"]))
