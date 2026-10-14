@@ -78,6 +78,7 @@ fn mangle_type(t: &TypeAnnotation) -> String {
         TypeAnnotation::Intersection(_) => "Is".to_string(),
         TypeAnnotation::Function { .. } => "Fn".to_string(),
         TypeAnnotation::Literal(_) => "Lit".to_string(),
+        TypeAnnotation::Generic(g) => mangle_generic(&g.name, &g.args),
     }
 }
 
@@ -106,6 +107,11 @@ fn subst_type(t: &TypeAnnotation, map: &HashMap<&str, &TypeAnnotation>) -> TypeA
             returns: Box::new(subst_type(returns, map)),
         },
         TypeAnnotation::Literal(_) => t.clone(),
+        TypeAnnotation::Generic(g) => TypeAnnotation::Generic(Box::new(tishlang_ast::GenericRef {
+            name: g.name.clone(),
+            args: g.args.iter().map(|a| subst_type(a, map)).collect(),
+            span: g.span,
+        })),
     }
 }
 
@@ -828,7 +834,7 @@ impl<'a> Parser<'a> {
                     if let Some(spec) = self.monomorphize_generic(name.as_ref(), &args) {
                         return Ok(TypeAnnotation::Simple(Arc::from(spec.as_str()), span));
                     }
-                    return Ok(TypeAnnotation::Simple(name, span));
+                    return Ok(TypeAnnotation::Generic(Box::new(tishlang_ast::GenericRef { name, args, span })));
                 }
                 Ok(TypeAnnotation::Simple(name, span))
             }

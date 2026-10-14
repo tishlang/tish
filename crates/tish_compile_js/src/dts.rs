@@ -166,7 +166,13 @@ fn function(
         parts.push(format!("...{}: {}", r.name, ty));
     }
     let ret = ts_type_or_any(returns);
-    let ret = if awaits { format!("Promise<{}>", ret) } else { ret };
+    // An awaiting function already annotated `: Promise<T>` is not wrapped a second time.
+    let already_promise = match returns {
+        Some(TypeAnnotation::Generic(g)) => g.name.as_ref() == "Promise",
+        Some(TypeAnnotation::Simple(name, _)) => name.as_ref() == "Promise",
+        _ => false,
+    };
+    let ret = if awaits && !already_promise { format!("Promise<{}>", ret) } else { ret };
     format!("{}declare function {}({}): {};\n", export, name, parts.join(", "), ret)
 }
 
@@ -217,6 +223,12 @@ fn ts_type(t: &TypeAnnotation) -> String {
             TypeLiteral::Num(n) => format!("{}", n),
             TypeLiteral::Bool(b) => b.to_string(),
         },
+        // `Promise<string>`, `Map<K, V>`, `Record<string, T>`: write the arguments back.
+        TypeAnnotation::Generic(g) => format!(
+            "{}<{}>",
+            ts_type(&TypeAnnotation::Simple(g.name.clone(), Default::default())),
+            g.args.iter().map(ts_type).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
@@ -294,5 +306,31 @@ mod tests {
         assert!(main.contains("export declare function use(p: Private, f: (arg0: number) => string): void;"), "{main}");
         assert!(main.contains("export declare const LIMIT: number;"), "{main}");
         assert!(main.contains("export { newSession };"), "{main}");
+    }
+
+    /// Generic type arguments survive into the declarations: `Promise<string>` used to come out as a
+    /// bare `Promise` (the hypery agents SDK's `childSystemPrompt` / `CallModel`).
+    #[test]
+    fn declarations_keep_generic_type_arguments() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("main.tish"),
+            "export type ModelReply = { text: string }\n\
+             export type CallModel = (string) => Promise<ModelReply>\n\
+             export type Opts = { childSystemPrompt: ((string) => string | Promise<string>)?, cache: Map<string, Promise<ModelReply>[]>, meta: Record<string, number> }\n\
+             export fn ask(m: CallModel): Promise<ModelReply> { return m(\"hi\") }\n\
+             export fn awaited(m: CallModel): Promise<ModelReply> { let r = await m(\"hi\")\n return r }\n",
+        )
+        .unwrap();
+        let modules = compile_project_esm(&dir.join("main.tish"), Some(dir), false, "lattish").unwrap();
+        let main = &modules.iter().find(|m| m.relative_path.ends_with("main.js")).unwrap().dts;
+        assert!(main.contains("export type CallModel = (arg0: string) => Promise<ModelReply>;"), "{main}");
+        assert!(
+            main.contains("export type Opts = { childSystemPrompt?: ((arg0: string) => string | Promise<string>) | null; cache: Map<string, Promise<ModelReply>[]>; meta: Record<string, number> };"),
+            "{main}"
+        );
+        assert!(main.contains("export declare function ask(m: CallModel): Promise<ModelReply>;"), "{main}");
+        assert!(main.contains("export declare function awaited(m: CallModel): Promise<ModelReply>;"), "{main}");
     }
 }

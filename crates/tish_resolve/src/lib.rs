@@ -3732,6 +3732,16 @@ fn tref_ann(ann: &tishlang_ast::TypeAnnotation, out: &mut Vec<TypeOcc>) {
             }
         }
         T::Literal(_) => {}
+        T::Generic(g) => {
+            out.push(TypeOcc {
+                name: g.name.clone(),
+                span: g.span,
+                is_decl: false,
+            });
+            for t in &g.args {
+                tref_ann(t, out);
+            }
+        }
     }
 }
 

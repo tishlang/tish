@@ -1241,6 +1241,17 @@ impl Printer {
                     self.type_ann(x);
                 }
             }
+            TypeAnnotation::Generic(g) => {
+                self.buf.push_str(g.name.as_ref());
+                self.buf.push('<');
+                for (i, x) in g.args.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.type_ann(x);
+                }
+                self.buf.push('>');
+            }
         }
     }
 
@@ -2011,6 +2022,16 @@ mod tests {
 
     /// tishlang/tish#762 — keys that aren't identifiers lost their quotes, so the output no longer
     /// parsed. They keep them (and the output is a fixed point); plain identifier keys stay bare.
+    /// Generic type arguments are kept: `Promise<string>` was printed as `Promise`, so formatting
+    /// a file silently erased them.
+    #[test]
+    fn generic_type_arguments_survive_formatting() {
+        let src = "type CallModel = (string) => Promise<string>\nlet m: Map<string, number[]> = new Map()\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("Promise<string>"), "{out}");
+        assert!(out.contains("Map<string, number[]>"), "{out}");
+    }
+
     #[test]
     fn object_keys_that_need_quotes_keep_them() {
         let src = "let h = { 'Content-Type': 'json', 'Asia/Tokyo': 1, 'π': 2, '1': 3, 'default': 4, 'a b': 5, '': 6, plain: 7, type: 8, _x1: 9 }\n";

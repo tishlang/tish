@@ -14,6 +14,8 @@ const RUNTIME_CARGO_FEATURES: &[&str] = &[
     "http-io-uring",
     "fs",
     "process",
+    "timers",
+    "promise",
     "regex",
     "ws",
     "tty",

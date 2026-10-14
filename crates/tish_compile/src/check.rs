@@ -105,6 +105,11 @@ fn show(ann: &TypeAnnotation) -> String {
         TypeAnnotation::Intersection(ts) => {
             ts.iter().map(show).collect::<Vec<_>>().join(" & ")
         }
+        TypeAnnotation::Generic(g) => format!(
+            "{}<{}>",
+            g.name,
+            g.args.iter().map(show).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 

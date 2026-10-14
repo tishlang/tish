@@ -1622,6 +1622,11 @@ fn render_type(t: &tishlang_ast::TypeAnnotation) -> String {
             }
         }
         T::Literal(L::Bool(b)) => b.to_string(),
+        T::Generic(g) => format!(
+            "{}<{}>",
+            g.name,
+            g.args.iter().map(render_type).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 

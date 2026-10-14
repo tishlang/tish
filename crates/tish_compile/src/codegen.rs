@@ -1063,7 +1063,17 @@ pub(crate) struct Codegen {
     /// `keys`/`values`/`entries` (which DO resolve as bound methods via `get_prop`). So the array
     /// fast-path fires by default and is suppressed only for a known collection local, which then
     /// falls through to the generic bound-method call.
+    ///
+    /// Scoped exactly like `map_instance_locals` (#772): saved and restored per function / closure
+    /// body, and a name the body also binds or assigns as anything but `new Map()` / `new Set()`
+    /// is not a collection there (`collection_local_blockers`). Unscoped, another function's array
+    /// of the same name lost the fast path and called `keys`/`values`/`entries` as a bound method,
+    /// which an array does not have.
     collection_instance_locals: std::collections::HashSet<String>,
+    /// Per function scope (innermost last): names bound or assigned as something other than
+    /// `let <name> = new Map()` / `new Set()` — the `collection_instance_locals` twin of
+    /// `map_local_blockers`.
+    collection_local_blockers: Vec<std::collections::HashSet<String>>,
     /// String-scan hoist: inside a `for (i; i < s.length; …)` loop over an invariant native `String`
     /// `s`, the loop body's `s.charCodeAt/charAt/at(i)` route to O(1) `Vec<char>` slice ops instead
     /// of `str_char_code_at`'s `chars().nth(i)` = O(i). Maps the source ident → the hoisted `_scN`
@@ -1367,6 +1377,7 @@ impl Codegen {
             map_instance_locals: std::collections::HashSet::new(),
             map_local_blockers: Vec::new(),
             collection_instance_locals: std::collections::HashSet::new(),
+            collection_local_blockers: Vec::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             value_used_names: std::collections::HashSet::new(),
@@ -3072,20 +3083,17 @@ impl Codegen {
             // `register_static_route` is http-gated in the runtime; emit its import only when http is
             // linked, else a non-http `tish build --feature …` fails with an unresolved import.
             self.write("use tishlang_runtime::register_static_route as tish_register_static_route;\n");
-            if self.is_async {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
-            } else if self.has_feature("ws") {
-                // ws programs get `Promise.spawn` (send-values OS-thread spawn) even when not async,
-                // so a server can run a background accept/pump loop alongside the blocking `serve()`.
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve, promise_object as tish_promise_object};\n");
-            } else {
-                self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
-            }
+            self.write("use tishlang_runtime::{fetch_promise as tish_fetch_promise, fetch_all_promise as tish_fetch_all_promise, http_serve as tish_http_serve};\n");
         }
-        // `fs/promises` (and any promise-using async program) needs the await machinery even
-        // without http. `fs` implies the runtime `promise` feature, so these resolve.
-        if self.is_async && !self.has_feature("http") && self.has_feature("fs") {
-            self.write("use tishlang_runtime::{promise_object as tish_promise_object, await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
+        // `Promise` is in scope whenever the linked runtime has the promise machinery (`http`, `ws`,
+        // `fs`, `promise` — see `links_send_values`), whether or not the program awaits: a program
+        // that only builds `Promise.resolve(…)` or `Promise.spawn(…)` must compile too. The await
+        // helpers are only needed by an async `run()`.
+        if self.links_send_values() {
+            self.write("use tishlang_runtime::promise_object as tish_promise_object;\n");
+            if self.is_async {
+                self.write("use tishlang_runtime::{await_promise as tish_await_promise, await_promise_throw as tish_await_promise_throw};\n");
+            }
         }
         if self.has_feature("fs") {
             self.write("use tishlang_runtime::{read_file as tish_read_file, read_file_bytes as tish_read_file_bytes, write_file as tish_write_file, file_exists as tish_file_exists, is_dir as tish_is_dir, read_dir as tish_read_dir, mkdir as tish_mkdir};\n");
@@ -3815,14 +3823,14 @@ impl Codegen {
             );
             self.writeln("let clearInterval = Value::native(|args: &[Value]| tish_timer_clear_interval(args));");
         }
+        if self.links_send_values() {
+            self.writeln("let Promise = tish_promise_object();");
+        }
         if self.has_feature("http") {
             self.writeln(
                 "let fetch = Value::native(|args: &[Value]| tish_fetch_promise(args.to_vec()));",
             );
             self.writeln("let fetchAll = Value::native(|args: &[Value]| tish_fetch_all_promise(args.to_vec()));");
-            if self.is_async || self.has_feature("ws") {
-                self.writeln("let Promise = tish_promise_object();");
-            }
             // `serve` supports two shapes:
             //   1. serve(port, handler)            // single shared handler
             //   2. serve(port, { onWorker: (workerId) => handler, ... })
@@ -3912,6 +3920,8 @@ impl Codegen {
 
         self.map_local_blockers =
             vec![Self::collect_non_map_bindings(&program.statements)];
+        self.collection_local_blockers =
+            vec![Self::collect_non_collection_bindings(&program.statements)];
 
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
         let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
@@ -6462,7 +6472,12 @@ impl Codegen {
                     }
                     // #456 regression: a `new Map()`/`new Set()` local must not have its
                     // keys/values/entries hijacked by the array fast-path.
-                    if Self::expr_is_map_construct(init_e) || Self::expr_is_set_construct(init_e) {
+                    if (Self::expr_is_map_construct(init_e) || Self::expr_is_set_construct(init_e))
+                        && !self
+                            .collection_local_blockers
+                            .last()
+                            .is_some_and(|b| b.contains(name.as_ref()))
+                    {
                         self.collection_instance_locals.insert(name.to_string());
                     }
                 }
@@ -17542,10 +17557,10 @@ impl Codegen {
     }
 
     /// Whether the runtime this program links has `send-values` on — i.e. whether `Promise.spawn`
-    /// is a real thread. Mirrors `tishlang_runtime`'s Cargo features: `http`, `ws`, `promise` and
-    /// `fs` (via `promise`) all enable it.
+    /// is a real thread, and whether `Promise` is in scope. Mirrors `tishlang_runtime`'s Cargo
+    /// features: `http`, `ws`, `promise`, and `fs` / `timers` (via `promise`) all enable it.
     fn links_send_values(&self) -> bool {
-        ["http", "ws", "fs", "promise"]
+        ["http", "ws", "fs", "promise", "timers"]
             .iter()
             .any(|f| self.has_feature(f))
     }
@@ -19406,29 +19421,41 @@ impl Codegen {
         rest: Option<&str>,
         body: &[Statement],
         expr_body: Option<&Expr>,
-    ) -> HashSet<String> {
-        let mut blockers = Self::collect_non_map_bindings(body);
+    ) -> (HashSet<String>, HashSet<String>) {
+        let mut extra = HashSet::new();
         if let Some(e) = expr_body {
-            Self::collect_bound_names_deep_expr(e, &mut blockers);
-            Self::collect_assigned_idents_in_expr(e, &mut blockers);
+            Self::collect_bound_names_deep_expr(e, &mut extra);
+            Self::collect_assigned_idents_in_expr(e, &mut extra);
         }
         for p in params {
             for n in p.bound_names() {
-                blockers.insert(n.to_string());
+                extra.insert(n.to_string());
             }
         }
         if let Some(r) = rest {
-            blockers.insert(r.to_string());
+            extra.insert(r.to_string());
         }
-        let saved = self.map_instance_locals.clone();
+        let mut blockers = Self::collect_non_map_bindings(body);
+        blockers.extend(extra.iter().cloned());
+        let mut coll_blockers = Self::collect_non_collection_bindings(body);
+        coll_blockers.extend(extra);
+        let saved = (
+            self.map_instance_locals.clone(),
+            self.collection_instance_locals.clone(),
+        );
         self.map_instance_locals.retain(|n| !blockers.contains(n));
+        self.collection_instance_locals
+            .retain(|n| !coll_blockers.contains(n));
         self.map_local_blockers.push(blockers);
+        self.collection_local_blockers.push(coll_blockers);
         saved
     }
 
-    fn leave_map_local_scope(&mut self, saved: HashSet<String>) {
+    fn leave_map_local_scope(&mut self, saved: (HashSet<String>, HashSet<String>)) {
         self.map_local_blockers.pop();
-        self.map_instance_locals = saved;
+        self.collection_local_blockers.pop();
+        self.map_instance_locals = saved.0;
+        self.collection_instance_locals = saved.1;
     }
 
     /// Every name `stmts` binds or assigns as something other than `let <name> = new Map()`, at
@@ -19436,11 +19463,25 @@ impl Codegen {
     /// names). Over-approximating only costs a fast path: a closure's own Map is judged again
     /// against the closure's own body when the closure is emitted.
     fn collect_non_map_bindings(stmts: &[Statement]) -> HashSet<String> {
-        fn walk(stmts: &[Statement], other: &mut HashSet<String>) {
+        Self::collect_bindings_not_constructed_by(stmts, Self::expr_is_map_construct)
+    }
+
+    /// [`Self::collect_non_map_bindings`] for `collection_instance_locals`: `new Set()` counts as a
+    /// collection too.
+    fn collect_non_collection_bindings(stmts: &[Statement]) -> HashSet<String> {
+        Self::collect_bindings_not_constructed_by(stmts, |e| {
+            Self::expr_is_map_construct(e) || Self::expr_is_set_construct(e)
+        })
+    }
+
+    fn collect_bindings_not_constructed_by(
+        stmts: &[Statement],
+        is_kind: fn(&Expr) -> bool,
+    ) -> HashSet<String> {
+        fn walk(stmts: &[Statement], other: &mut HashSet<String>, is_kind: fn(&Expr) -> bool) {
             for s in stmts {
                 match s {
-                    Statement::VarDecl { init: Some(i), .. }
-                        if Codegen::expr_is_map_construct(i) => {}
+                    Statement::VarDecl { init: Some(i), .. } if is_kind(i) => {}
                     Statement::VarDecl { name, .. } => {
                         other.insert(name.to_string());
                     }
@@ -19465,12 +19506,12 @@ impl Codegen {
                         other.insert(cp.to_string());
                     }
                     Statement::For { init: Some(i), .. } => {
-                        walk(std::slice::from_ref(i), other);
+                        walk(std::slice::from_ref(i), other, is_kind);
                     }
                     // Resolved before codegen today; walked so no binding goes unseen.
                     Statement::Export { declaration, .. } => {
                         if let tishlang_ast::ExportDeclaration::Named(d) = declaration.as_ref() {
-                            walk(std::slice::from_ref(d.as_ref()), other);
+                            walk(std::slice::from_ref(d.as_ref()), other, is_kind);
                         }
                     }
                     _ => {}
@@ -19480,11 +19521,11 @@ impl Codegen {
                     Codegen::collect_bound_names_deep_expr(e, other)
                 });
                 Codegen::collect_assigned_idents_in_stmt(s, other);
-                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, other));
+                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, other, is_kind));
             }
         }
         let mut other = HashSet::new();
-        walk(stmts, &mut other);
+        walk(stmts, &mut other, is_kind);
         other
     }
 

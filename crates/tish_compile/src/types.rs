@@ -129,6 +129,10 @@ impl RustType {
         aliases: &HashMap<String, RustType>,
     ) -> Self {
         match ann {
+            // Generic arguments are not used by codegen: `Promise<T>` lowers as `Promise`.
+            TypeAnnotation::Generic(_) => {
+                Self::from_annotation_with_aliases(&ann.erased(), aliases)
+            }
             TypeAnnotation::Simple(name, _) => match name.as_ref() {
                 "number" => RustType::F64,
                 // Concrete Rust scalar names in typed tish (user requirement): they
