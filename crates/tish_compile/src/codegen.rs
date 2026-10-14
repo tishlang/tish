@@ -1048,7 +1048,15 @@ pub(crate) struct Codegen {
     /// Locals aliased to a module const array (`cum` → `G_probs_cum` after `let cum = cumulative(probs)`).
     module_const_f64_aliases: std::collections::HashMap<String, String>,
     /// #181: locals initialized with `new Map()` — direct `map_has`/`get`/`set`/`values` dispatch.
+    /// Scoped to the function being emitted: saved on entry to a function or closure body,
+    /// restored on exit, so one function's Map never leaks to another's same-named binding.
     map_instance_locals: std::collections::HashSet<String>,
+    /// Per function scope (innermost last): the names that function binds or assigns as anything
+    /// other than `let <name> = new Map()` — its params, other locals, loop/catch bindings,
+    /// assignment targets, and every binding inside its closures. Such a name is not a Map
+    /// throughout the scope, and `map_get` on a non-Map is a silent `null`, so the direct dispatch
+    /// is off for it there (see `collect_non_map_bindings`).
+    map_local_blockers: Vec<std::collections::HashSet<String>>,
     /// #456 regression guard: locals initialized with `new Map()` OR `new Set()`. Arrays have no
     /// runtime method table (`get_prop` returns Null for a method name), so `keys`/`values`/`entries`
     /// MUST use the array fast-path — but that same fast-path would hijack a Map/Set's own
@@ -1357,6 +1365,7 @@ impl Codegen {
             module_const_f64_cum: std::collections::HashMap::new(),
             module_const_f64_aliases: std::collections::HashMap::new(),
             map_instance_locals: std::collections::HashSet::new(),
+            map_local_blockers: Vec::new(),
             collection_instance_locals: std::collections::HashSet::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
@@ -3901,6 +3910,9 @@ impl Codegen {
         analyzer.analyze_statements(&program.statements);
         self.usage_analyzer = Some(analyzer);
 
+        self.map_local_blockers =
+            vec![Self::collect_non_map_bindings(&program.statements)];
+
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
         let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
         for v in &top_level_mutated {
@@ -6440,7 +6452,12 @@ impl Codegen {
                 self.type_context.define(name.as_ref(), rust_type.clone());
 
                 if let Some(init_e) = init.as_ref() {
-                    if Self::expr_is_map_construct(init_e) {
+                    if Self::expr_is_map_construct(init_e)
+                        && !self
+                            .map_local_blockers
+                            .last()
+                            .is_some_and(|b| b.contains(name.as_ref()))
+                    {
                         self.map_instance_locals.insert(name.to_string());
                     }
                     // #456 regression: a `new Map()`/`new Set()` local must not have its
@@ -7934,6 +7951,14 @@ impl Codegen {
                     // Function bodies are sync closures (even Tish async fn) - use block_on for await
                     self.async_context_stack.push(false);
 
+                    // A function body is its own scope for the direct Map dispatch.
+                    let saved_map_locals = self.enter_map_local_scope(
+                        params,
+                        rest_param.as_ref().map(|r| r.name.as_ref()),
+                        std::slice::from_ref(body.as_ref()),
+                        None,
+                    );
+
                     // Mutable outer vars must be in refcell_wrapped_vars so Assign/CompoundAssign emit borrow_mut
                     let saved_refcell = self.refcell_wrapped_vars.clone();
                     for v in &mutable_outer_vars {
@@ -8013,6 +8038,7 @@ impl Codegen {
 
                     // Restore refcell_wrapped_vars (remove mutable outer vars we added)
                     self.refcell_wrapped_vars = saved_refcell;
+                    self.leave_map_local_scope(saved_map_locals);
 
                     // Pop params stack
                     self.outer_params_stack.pop();
@@ -9199,7 +9225,13 @@ impl Codegen {
                     // #181: `new Map()` locals — direct store access (Bun/JSC-style monomorphic site).
                     if let Expr::Ident { name: map_name, .. } = object.as_ref() {
                         if self.map_instance_locals.contains(map_name.as_ref()) {
-                            let map_ref = format!("&{}", Self::escape_ident(map_name.as_ref()));
+                            // Borrow the receiver like the key: a plain local in place, a Map
+                            // held in a `VmRef` cell read out of the cell first. Borrowing the
+                            // cell itself is `&VmRef<Value>` where `map_get` wants `&Value`
+                            // (E0308). The read clones a handle, so `set` still mutates the one
+                            // shared Map.
+                            let map_ref =
+                                self.emit_borrowed_arg(&CallArg::Expr((**object).clone()))?;
                             match method_name.as_ref() {
                                 "has" if args.len() == 1 => {
                                     // `map_has` borrows the key (`&Value`) — pass a borrow of the
@@ -12939,6 +12971,13 @@ impl Codegen {
         // Push empty scope for variables declared inside this arrow function
         self.outer_vars_stack.push(Vec::new());
 
+        let saved_map_locals = match body {
+            ArrowBody::Block(b) => {
+                self.enter_map_local_scope(params, None, std::slice::from_ref(b.as_ref()), None)
+            }
+            ArrowBody::Expr(e) => self.enter_map_local_scope(params, None, &[], Some(e.as_ref())),
+        };
+
         // Cell-backed outer vars need refcell_wrapped_vars for Assign and for reads in emit_expr
         let saved_refcell_vars = self.refcell_wrapped_vars.clone();
         for v in &cell_capture_outer_vars {
@@ -13010,6 +13049,7 @@ impl Codegen {
 
         // Restore state
         self.refcell_wrapped_vars = saved_refcell_vars;
+        self.leave_map_local_scope(saved_map_locals);
         self.outer_params_stack.pop();
         self.outer_vars_stack.pop();
 
@@ -19357,6 +19397,96 @@ impl Codegen {
 
 
 
+
+    /// Enter a function / closure body for the direct Map dispatch: drop every Map local the body
+    /// rebinds (params included), and push its blockers. Returns the outer set to restore.
+    fn enter_map_local_scope(
+        &mut self,
+        params: &[FunParam],
+        rest: Option<&str>,
+        body: &[Statement],
+        expr_body: Option<&Expr>,
+    ) -> HashSet<String> {
+        let mut blockers = Self::collect_non_map_bindings(body);
+        if let Some(e) = expr_body {
+            Self::collect_bound_names_deep_expr(e, &mut blockers);
+            Self::collect_assigned_idents_in_expr(e, &mut blockers);
+        }
+        for p in params {
+            for n in p.bound_names() {
+                blockers.insert(n.to_string());
+            }
+        }
+        if let Some(r) = rest {
+            blockers.insert(r.to_string());
+        }
+        let saved = self.map_instance_locals.clone();
+        self.map_instance_locals.retain(|n| !blockers.contains(n));
+        self.map_local_blockers.push(blockers);
+        saved
+    }
+
+    fn leave_map_local_scope(&mut self, saved: HashSet<String>) {
+        self.map_local_blockers.pop();
+        self.map_instance_locals = saved;
+    }
+
+    /// Every name `stmts` binds or assigns as something other than `let <name> = new Map()`, at
+    /// any depth (closures and nested functions included, since they share the enclosing scope's
+    /// names). Over-approximating only costs a fast path: a closure's own Map is judged again
+    /// against the closure's own body when the closure is emitted.
+    fn collect_non_map_bindings(stmts: &[Statement]) -> HashSet<String> {
+        fn walk(stmts: &[Statement], other: &mut HashSet<String>) {
+            for s in stmts {
+                match s {
+                    Statement::VarDecl { init: Some(i), .. }
+                        if Codegen::expr_is_map_construct(i) => {}
+                    Statement::VarDecl { name, .. } => {
+                        other.insert(name.to_string());
+                    }
+                    Statement::VarDeclDestructure { pattern, .. } => {
+                        Codegen::collect_destruct_names(pattern, other);
+                    }
+                    Statement::FunDecl { name, params, rest_param, .. } => {
+                        other.insert(name.to_string());
+                        for p in params {
+                            for n in p.bound_names() {
+                                other.insert(n.to_string());
+                            }
+                        }
+                        if let Some(r) = rest_param {
+                            other.insert(r.name.to_string());
+                        }
+                    }
+                    Statement::ForOf { name, .. } | Statement::ForIn { name, .. } => {
+                        other.insert(name.to_string());
+                    }
+                    Statement::Try { catch_param: Some(cp), .. } => {
+                        other.insert(cp.to_string());
+                    }
+                    Statement::For { init: Some(i), .. } => {
+                        walk(std::slice::from_ref(i), other);
+                    }
+                    // Resolved before codegen today; walked so no binding goes unseen.
+                    Statement::Export { declaration, .. } => {
+                        if let tishlang_ast::ExportDeclaration::Named(d) = declaration.as_ref() {
+                            walk(std::slice::from_ref(d.as_ref()), other);
+                        }
+                    }
+                    _ => {}
+                }
+                // Binders inside closures (their params and locals) and every assignment target.
+                Codegen::for_each_stmt_expr(s, &mut |e| {
+                    Codegen::collect_bound_names_deep_expr(e, other)
+                });
+                Codegen::collect_assigned_idents_in_stmt(s, other);
+                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, other));
+            }
+        }
+        let mut other = HashSet::new();
+        walk(stmts, &mut other);
+        other
+    }
 
     fn expr_is_map_construct(expr: &Expr) -> bool {
         matches!(
