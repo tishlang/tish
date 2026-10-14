@@ -1063,7 +1063,17 @@ pub(crate) struct Codegen {
     /// `keys`/`values`/`entries` (which DO resolve as bound methods via `get_prop`). So the array
     /// fast-path fires by default and is suppressed only for a known collection local, which then
     /// falls through to the generic bound-method call.
+    ///
+    /// Scoped exactly like `map_instance_locals` (#772): saved and restored per function / closure
+    /// body, and a name the body also binds or assigns as anything but `new Map()` / `new Set()`
+    /// is not a collection there (`collection_local_blockers`). Unscoped, another function's array
+    /// of the same name lost the fast path and called `keys`/`values`/`entries` as a bound method,
+    /// which an array does not have.
     collection_instance_locals: std::collections::HashSet<String>,
+    /// Per function scope (innermost last): names bound or assigned as something other than
+    /// `let <name> = new Map()` / `new Set()` — the `collection_instance_locals` twin of
+    /// `map_local_blockers`.
+    collection_local_blockers: Vec<std::collections::HashSet<String>>,
     /// String-scan hoist: inside a `for (i; i < s.length; …)` loop over an invariant native `String`
     /// `s`, the loop body's `s.charCodeAt/charAt/at(i)` route to O(1) `Vec<char>` slice ops instead
     /// of `str_char_code_at`'s `chars().nth(i)` = O(i). Maps the source ident → the hoisted `_scN`
@@ -1367,6 +1377,7 @@ impl Codegen {
             map_instance_locals: std::collections::HashSet::new(),
             map_local_blockers: Vec::new(),
             collection_instance_locals: std::collections::HashSet::new(),
+            collection_local_blockers: Vec::new(),
             hoisted_string_chars: std::collections::HashMap::new(),
             native_fns: std::collections::HashSet::new(),
             value_used_names: std::collections::HashSet::new(),
@@ -3909,6 +3920,8 @@ impl Codegen {
 
         self.map_local_blockers =
             vec![Self::collect_non_map_bindings(&program.statements)];
+        self.collection_local_blockers =
+            vec![Self::collect_non_collection_bindings(&program.statements)];
 
         // Prepass: vars mutated by nested closures must be RefCell from the start (top-level)
         let top_level_mutated = Self::collect_vars_needing_capture_cell(&program.statements);
@@ -6459,7 +6472,12 @@ impl Codegen {
                     }
                     // #456 regression: a `new Map()`/`new Set()` local must not have its
                     // keys/values/entries hijacked by the array fast-path.
-                    if Self::expr_is_map_construct(init_e) || Self::expr_is_set_construct(init_e) {
+                    if (Self::expr_is_map_construct(init_e) || Self::expr_is_set_construct(init_e))
+                        && !self
+                            .collection_local_blockers
+                            .last()
+                            .is_some_and(|b| b.contains(name.as_ref()))
+                    {
                         self.collection_instance_locals.insert(name.to_string());
                     }
                 }
@@ -19403,29 +19421,41 @@ impl Codegen {
         rest: Option<&str>,
         body: &[Statement],
         expr_body: Option<&Expr>,
-    ) -> HashSet<String> {
-        let mut blockers = Self::collect_non_map_bindings(body);
+    ) -> (HashSet<String>, HashSet<String>) {
+        let mut extra = HashSet::new();
         if let Some(e) = expr_body {
-            Self::collect_bound_names_deep_expr(e, &mut blockers);
-            Self::collect_assigned_idents_in_expr(e, &mut blockers);
+            Self::collect_bound_names_deep_expr(e, &mut extra);
+            Self::collect_assigned_idents_in_expr(e, &mut extra);
         }
         for p in params {
             for n in p.bound_names() {
-                blockers.insert(n.to_string());
+                extra.insert(n.to_string());
             }
         }
         if let Some(r) = rest {
-            blockers.insert(r.to_string());
+            extra.insert(r.to_string());
         }
-        let saved = self.map_instance_locals.clone();
+        let mut blockers = Self::collect_non_map_bindings(body);
+        blockers.extend(extra.iter().cloned());
+        let mut coll_blockers = Self::collect_non_collection_bindings(body);
+        coll_blockers.extend(extra);
+        let saved = (
+            self.map_instance_locals.clone(),
+            self.collection_instance_locals.clone(),
+        );
         self.map_instance_locals.retain(|n| !blockers.contains(n));
+        self.collection_instance_locals
+            .retain(|n| !coll_blockers.contains(n));
         self.map_local_blockers.push(blockers);
+        self.collection_local_blockers.push(coll_blockers);
         saved
     }
 
-    fn leave_map_local_scope(&mut self, saved: HashSet<String>) {
+    fn leave_map_local_scope(&mut self, saved: (HashSet<String>, HashSet<String>)) {
         self.map_local_blockers.pop();
-        self.map_instance_locals = saved;
+        self.collection_local_blockers.pop();
+        self.map_instance_locals = saved.0;
+        self.collection_instance_locals = saved.1;
     }
 
     /// Every name `stmts` binds or assigns as something other than `let <name> = new Map()`, at
@@ -19433,11 +19463,25 @@ impl Codegen {
     /// names). Over-approximating only costs a fast path: a closure's own Map is judged again
     /// against the closure's own body when the closure is emitted.
     fn collect_non_map_bindings(stmts: &[Statement]) -> HashSet<String> {
-        fn walk(stmts: &[Statement], other: &mut HashSet<String>) {
+        Self::collect_bindings_not_constructed_by(stmts, Self::expr_is_map_construct)
+    }
+
+    /// [`Self::collect_non_map_bindings`] for `collection_instance_locals`: `new Set()` counts as a
+    /// collection too.
+    fn collect_non_collection_bindings(stmts: &[Statement]) -> HashSet<String> {
+        Self::collect_bindings_not_constructed_by(stmts, |e| {
+            Self::expr_is_map_construct(e) || Self::expr_is_set_construct(e)
+        })
+    }
+
+    fn collect_bindings_not_constructed_by(
+        stmts: &[Statement],
+        is_kind: fn(&Expr) -> bool,
+    ) -> HashSet<String> {
+        fn walk(stmts: &[Statement], other: &mut HashSet<String>, is_kind: fn(&Expr) -> bool) {
             for s in stmts {
                 match s {
-                    Statement::VarDecl { init: Some(i), .. }
-                        if Codegen::expr_is_map_construct(i) => {}
+                    Statement::VarDecl { init: Some(i), .. } if is_kind(i) => {}
                     Statement::VarDecl { name, .. } => {
                         other.insert(name.to_string());
                     }
@@ -19462,12 +19506,12 @@ impl Codegen {
                         other.insert(cp.to_string());
                     }
                     Statement::For { init: Some(i), .. } => {
-                        walk(std::slice::from_ref(i), other);
+                        walk(std::slice::from_ref(i), other, is_kind);
                     }
                     // Resolved before codegen today; walked so no binding goes unseen.
                     Statement::Export { declaration, .. } => {
                         if let tishlang_ast::ExportDeclaration::Named(d) = declaration.as_ref() {
-                            walk(std::slice::from_ref(d.as_ref()), other);
+                            walk(std::slice::from_ref(d.as_ref()), other, is_kind);
                         }
                     }
                     _ => {}
@@ -19477,11 +19521,11 @@ impl Codegen {
                     Codegen::collect_bound_names_deep_expr(e, other)
                 });
                 Codegen::collect_assigned_idents_in_stmt(s, other);
-                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, other));
+                Codegen::for_each_child_stmt_list(s, &mut |list| walk(list, other, is_kind));
             }
         }
         let mut other = HashSet::new();
-        walk(stmts, &mut other);
+        walk(stmts, &mut other, is_kind);
         other
     }
 

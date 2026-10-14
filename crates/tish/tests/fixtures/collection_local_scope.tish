@@ -1,0 +1,59 @@
+// `keys`/`values`/`entries` take the array fast path unless the receiver is a known `new Map()` /
+// `new Set()` local. That set is keyed by bare name, so it must be scoped to the function (or
+// closure) that declares the collection: an array of the same name anywhere else keeps the fast
+// path. Arrays have no runtime method table, so `xs.values()` on an array sent down the generic
+// bound-method call is a call of a non-function.
+
+fn seen(): any {
+  let xs = new Set()
+  xs.add("a")
+  xs.add("b")
+  xs.add("a")
+  let out = []
+  for (let v of xs.values()) { out.push(v) }
+  return out.join(",")
+}
+
+fn pairs(): any {
+  let xs = new Map()
+  xs.set("k", 1)
+  let out = []
+  for (let e of xs.entries()) { out.push(e[0] + "=" + e[1]) }
+  return out.join(",")
+}
+
+// Same name, an array: a parameter, a local, and a closure's local.
+fn indices(xs: any): any {
+  let out = []
+  for (let i of xs.keys()) { out.push(i) }
+  return out.join(",")
+}
+fn arrayLocal(): any {
+  let xs = [10, 20]
+  let out = []
+  for (let v of xs.values()) { out.push(v) }
+  for (let e of xs.entries()) { out.push(e[0] + ":" + e[1]) }
+  return out.join(",")
+}
+let viaClosure = fn() {
+  let xs = ["p", "q"]
+  let out = []
+  for (let v of xs.values()) { out.push(v) }
+  return out.join(",")
+}
+
+// A closure inside the collection's own function still sees it as a collection.
+fn nested(): any {
+  let xs = new Set()
+  xs.add(1)
+  xs.add(2)
+  let count = fn() {
+    let n = 0
+    for (let _v of xs.values()) { n = n + 1 }
+    return n
+  }
+  return count()
+}
+
+console.log(seen(), pairs(), nested())
+console.log(indices(["x", "y", "z"]), arrayLocal(), viaClosure())
