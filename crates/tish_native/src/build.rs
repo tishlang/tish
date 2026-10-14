@@ -321,13 +321,7 @@ edition = "2021"
     write_if_changed(&build_dir.join("src").join(src_file), &rust_main)
         .map_err(|e| format!("Cannot write {}: {}", src_file, e))?;
 
-    let workspace_target = Path::new(&runtime_path)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|ws| ws.join("target"));
-    let target_dir = workspace_target
-        .filter(|p| p.exists())
-        .or_else(shared_native_target_dir);
+    let target_dir = native_target_dir(&runtime_path);
     let cross = build_config.cargo_target.as_deref();
     let release_sub = if let Some(triple) = cross {
         format!("{triple}/release")
@@ -1102,6 +1096,18 @@ fn find_project_toolchain_channel(start: &Path) -> Option<String> {
 /// cargo reuses the dependency artifacts across builds. Deliberately NOT the ambient
 /// `CARGO_TARGET_DIR` — see the GBA path for why that is scrubbed (`TISH_GBA_TARGET_DIR` is the
 /// same opt-in for ROM builds). The directory is created if missing.
+/// Where Cargo builds a native program: `TISH_NATIVE_TARGET_DIR` when set, else `target/tish-native/` in the
+/// Tish checkout the runtime comes from — shared by every build, so the runtime is compiled once and reused.
+/// Never the checkout's own `target/`: Cargo names the binary after `-o`, so `-o tish` would have replaced the
+/// compiler in `target/release/` and `-o sh` shadowed the system shell for anything with it on `PATH`.
+fn native_target_dir(runtime_path: &str) -> Option<PathBuf> {
+    if let Some(dir) = shared_native_target_dir() {
+        return Some(dir);
+    }
+    let workspace_target = Path::new(runtime_path).parent()?.parent()?.join("target");
+    workspace_target.exists().then(|| workspace_target.join("tish-native"))
+}
+
 fn shared_native_target_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("TISH_NATIVE_TARGET_DIR")
         .map(PathBuf::from)
@@ -1267,13 +1273,7 @@ edition = "2021"
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("Cannot write Cargo.toml: {}", e))?;
 
-    let workspace_target = Path::new(&runtime_path)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|ws| ws.join("target"));
-    let target_dir = workspace_target
-        .filter(|p| p.exists())
-        .or_else(shared_native_target_dir);
+    let target_dir = native_target_dir(&runtime_path);
     let binary_dir = target_dir
         .as_ref()
         .map(|t| t.join("release"))

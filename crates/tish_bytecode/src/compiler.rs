@@ -91,6 +91,12 @@ enum Breakable {
     Switch { unwind_depth: usize },
 }
 
+struct TryFrame {
+    finally: Option<Statement>,
+    breakables: usize,
+    in_body: bool,
+}
+
 struct Compiler<'a> {
     chunk: &'a mut Chunk,
     /// Current scope: variable name -> (depth, is_captured). Depth 0 = local.
@@ -125,6 +131,11 @@ struct Compiler<'a> {
     /// straight to the function return otherwise). Reset per function — nested fns get a fresh
     /// `Compiler`. The exception-unwind path is handled separately in the `Try` emitter.
     finally_stack: Vec<Statement>,
+    /// The enclosing `try`s in the current function (innermost last), for `break` / `continue`: each
+    /// one's `finally`, how many breakables (loops, switches) enclosed it, and whether code is still in
+    /// its body (its handler is registered) rather than its catch. A jump to a loop outside a `try`
+    /// leaves it: the handler is removed (`ExitTry`) and the `finally` runs, as when the body ends.
+    try_frames: Vec<TryFrame>,
     /// When `Some(name)`, this chunk is the body of `fn name(...)` and `name`'s binding is provably
     /// stable (no param shadows it, no reassignment/redeclaration in the body — see [`stmt_rebinds`]).
     /// A direct call `name(args)` then compiles to `SelfCall` (no name lookup / closure dispatch; the
@@ -935,6 +946,7 @@ impl<'a> Compiler<'a> {
             next_slot: 0,
             general_slots: false,
             finally_stack: Vec::new(),
+            try_frames: Vec::new(),
             self_fn_name: None,
             math_is_global: false,
             stable_globals: Arc::new(std::collections::HashSet::new()),
@@ -965,6 +977,32 @@ impl<'a> Compiler<'a> {
             frame.insert(Arc::clone(name), slot);
         }
         slot
+    }
+
+    /// Leave every `try` entered inside the breakable at index `target` (innermost first): remove its
+    /// handler while still in its body, and run its `finally`. While a finally is emitted, the frames
+    /// are set aside, so a jump inside it does not leave them again.
+    fn emit_leave_trys(&mut self, target: usize) -> Result<(), CompileError> {
+        let leaving: Vec<usize> = (0..self.try_frames.len())
+            .rev()
+            .filter(|&i| self.try_frames[i].breakables > target)
+            .collect();
+        if leaving.is_empty() {
+            return Ok(());
+        }
+        let frames = std::mem::take(&mut self.try_frames);
+        let finallys = std::mem::take(&mut self.finally_stack);
+        for i in leaving {
+            if frames[i].in_body {
+                self.emit(Opcode::ExitTry);
+            }
+            if let Some(f) = &frames[i].finally {
+                self.compile_statement(f)?;
+            }
+        }
+        self.try_frames = frames;
+        self.finally_stack = finallys;
+        Ok(())
     }
 
     /// Emit the pending `finally` bodies (innermost first) before a `return` escapes them. While
@@ -1903,6 +1941,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Opcode::Return);
             }
             Statement::Break { .. } => {
+                if !self.breakable_stack.is_empty() {
+                    self.emit_leave_trys(self.breakable_stack.len() - 1)?;
+                }
                 let unwind_depth = match self.breakable_stack.last() {
                     Some(Breakable::Loop { unwind_depth })
                     | Some(Breakable::Switch { unwind_depth }) => *unwind_depth,
@@ -1929,6 +1970,13 @@ impl<'a> Compiler<'a> {
                 }
             }
             Statement::Continue { .. } => {
+                if let Some(target) = self
+                    .breakable_stack
+                    .iter()
+                    .rposition(|b| matches!(b, Breakable::Loop { .. }))
+                {
+                    self.emit_leave_trys(target)?;
+                }
                 let unwind_depth = self
                     .breakable_stack
                     .iter()
@@ -2230,7 +2278,14 @@ impl<'a> Compiler<'a> {
                 if let Some(f) = finally_body {
                     self.finally_stack.push((**f).clone());
                 }
+                self.try_frames.push(TryFrame {
+                    finally: finally_body.as_ref().map(|f| (**f).clone()),
+                    breakables: self.breakable_stack.len(),
+                    in_body: true,
+                });
                 self.compile_statement(body)?;
+                // In the catch, the handler has been used: a jump from there only runs the finally.
+                self.try_frames.last_mut().unwrap().in_body = false;
                 self.emit(Opcode::ExitTry);
                 let jump_over_catch = self.emit_jump(Opcode::Jump);
                 let catch_start = self.chunk.code.len();
@@ -2267,6 +2322,7 @@ impl<'a> Compiler<'a> {
                 if finally_body.is_some() {
                     self.finally_stack.pop();
                 }
+                self.try_frames.pop();
                 if let Some(finally) = finally_body {
                     self.compile_statement(finally)?;
                 }

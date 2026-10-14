@@ -102,3 +102,29 @@ paintTyped(1, 2)
     );
     assert!(d.is_empty(), "correct arity must not warn, got {:?}", d);
 }
+
+#[test]
+fn a_nullable_parameter_imposes_no_minimum() {
+    // `T?` (and `any`) accept null, which is exactly what an omitted argument arrives as.
+    let d = diags(
+        r#"
+type Opts = { wait: boolean }
+function send(to: string, opts: Opts?): string { return to }
+function anything(a: string, b: any): string { return a }
+function union(a: string, b: i32 | null): string { return a }
+send("a")
+anything("a")
+union("a")
+"#,
+    );
+    assert!(d.is_empty(), "nullable parameters may be omitted, got {:?}", d);
+    // A typed, non-nullable parameter after the nullable one still forces its position.
+    let d = diags(
+        r#"
+type Opts = { wait: boolean }
+function send(to: string, opts: Opts?, n: i32): string { return to }
+send("a")
+"#,
+    );
+    assert_eq!(d.len(), 1, "{:?}", d);
+}

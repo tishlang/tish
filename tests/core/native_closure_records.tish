@@ -1,0 +1,51 @@
+// Records of functions and the names a program gives things, as an agent runtime uses them: an object's own
+// methods named like builtins (push, get, map, join, …) are called, not the array/string builtin; a local
+// named `args` captured by a closure; a type holding callbacks; a nullable parameter left out; a value read
+// after a closure captured it.
+
+type Host = { name: string, call: (string) => string, onDone: ((number) => void)? }
+
+fn makeAcc(): any {
+  let text = ""
+  let n = 0
+  return {
+    push: fn(part: string): number {
+      text = text + part
+      n = n + 1
+      return n
+    },
+    get: fn(): string { return text },
+    map: fn(f: any): string { return f(text) },
+    join: fn(sep: string): string { return text + sep + String(n) }
+  }
+}
+let acc = makeAcc()
+acc.push("ab")
+acc.push("c")
+console.log("own methods:", acc.get(), acc.map(fn(t) { return t.toUpperCase() }), acc.join("/"))
+
+fn pick(key: string): string {
+  let args = { a: "first", b: "second" }
+  let read = fn(k: string): string { return args[k] }
+  return read(key)
+}
+console.log("args name:", pick("b"))
+
+fn run(host: Host, input: string): string {
+  let out = host.call(input)
+  if (typeof host.onDone === "function") { host.onDone(out.length) }
+  return host.name + ":" + out
+}
+let lengths = []
+console.log("callbacks:", run({ name: "up", call: fn(s) { return s.toUpperCase() }, onDone: fn(n) { lengths.push(n) } }, "hey"), lengths.join(","))
+
+type Opts = { loud: boolean }
+fn greet(who: string, opts: Opts?): string {
+  return opts !== null && opts.loud ? who.toUpperCase() + "!" : who
+}
+console.log("nullable param:", greet("ada"), greet("ada", { loud: true }))
+
+const STATUSES = ["pending", "done"]
+const SPEC = { a: { values: STATUSES }, b: { values: STATUSES } }
+fn isStatus(s: string): boolean { return STATUSES.includes(s) }
+console.log("captured const:", SPEC.b.values.length, isStatus("done"), isStatus("nope"))

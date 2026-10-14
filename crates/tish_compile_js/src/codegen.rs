@@ -49,7 +49,13 @@ struct Codegen {
     /// ESM only: the module specifier the JSX runtime (`h` / `Fragment`) is auto-imported from when a
     /// module uses JSX but doesn't import them itself (issue #291). Defaults to `lattish`.
     jsx_import_source: String,
+    /// ESM only: the type names each module in the project declares or re-exports (by canonical path).
+    /// Types do not exist at runtime, so importing one by name is dropped from the emitted `import`.
+    type_names: std::sync::Arc<TypeNames>,
 }
+
+/// Per module (canonical path), the names that are types there.
+type TypeNames = std::collections::HashMap<PathBuf, std::collections::HashSet<String>>;
 
 fn stmt_terminates_switch(stmt: Option<&Statement>) -> bool {
     matches!(
@@ -71,6 +77,7 @@ impl Codegen {
             module_path: PathBuf::new(),
             project_root: PathBuf::new(),
             jsx_import_source: DEFAULT_JSX_IMPORT_SOURCE.to_string(),
+            type_names: Default::default(),
         }
     }
 
@@ -89,6 +96,7 @@ impl Codegen {
             module_path,
             project_root,
             jsx_import_source,
+            type_names: Default::default(),
         }
     }
 
@@ -1004,6 +1012,14 @@ impl Codegen {
         }
     }
 
+    /// The type names of the module `spec` names, from this module's point of view (empty when it is not
+    /// part of the project build, e.g. under Vite dev, where each module is compiled on its own).
+    fn types_of(&self, spec: &str) -> std::collections::HashSet<String> {
+        resolve_import_target(spec, &self.module_path, &self.project_root)
+            .and_then(|target| self.type_names.get(&target).cloned())
+            .unwrap_or_default()
+    }
+
     /// A portable built-in module (`tish:timers`, `tish:encoding`) has no file to import in JS: each
     /// imported name is bound to its JS lowering instead.
     fn emit_portable_builtin_import(
@@ -1047,6 +1063,17 @@ impl Codegen {
         if is_portable_builtin(from) {
             return self.emit_portable_builtin_import(specifiers, from);
         }
+        // Names that are types in the imported module have nothing to import at runtime.
+        let types = self.types_of(from);
+        let specifiers: Vec<ImportSpecifier> = specifiers
+            .iter()
+            .filter(|s| !matches!(s, ImportSpecifier::Named { name, .. } if types.contains(name.as_ref())))
+            .cloned()
+            .collect();
+        if specifiers.is_empty() {
+            return Ok(());
+        }
+        let specifiers = &specifiers[..];
         let spec = rewrite_import_to_js(
             from,
             &self.module_path,
@@ -1111,7 +1138,9 @@ impl Codegen {
                 let start = self.output.len();
                 self.emit_statement(inner)?;
                 let insert_at = start + self.indent_str().len();
-                if insert_at <= self.output.len() {
+                // A declaration that emits nothing (`export type …`, `export declare …`) exports nothing:
+                // adding the keyword anyway left a stray `export` in front of the next statement.
+                if self.output.len() > start && insert_at <= self.output.len() {
                     self.output.insert_str(insert_at, "export ");
                 }
             }
@@ -1128,7 +1157,14 @@ impl Codegen {
                 ..
             } => {
                 let mut parts: Vec<String> = Vec::new();
+                // A type re-exported by name has nothing to export at runtime.
+                let types = from.as_ref().map(|f| self.types_of(f)).unwrap_or_default();
                 for s in specifiers {
+                    if let ImportSpecifier::Named { name, .. } = s {
+                        if types.contains(name.as_ref()) {
+                            continue;
+                        }
+                    }
                     if let ImportSpecifier::Named { name, alias, .. } = s {
                         match alias {
                             Some(a) => parts.push(format!(
@@ -1167,6 +1203,75 @@ impl Codegen {
             }
         }
         Ok(())
+    }
+}
+
+/// The canonical path of the `.tish` module an import names, if it is one (relative, or a package resolving
+/// to a `.tish` entry).
+fn resolve_import_target(spec: &str, importer_abs: &Path, project_root: &Path) -> Option<PathBuf> {
+    if tishlang_compile::is_native_import(spec) {
+        return None;
+    }
+    let from_dir = importer_abs.parent().unwrap_or_else(|| Path::new("."));
+    let path = if spec.starts_with("./") || spec.starts_with("../") {
+        let p = from_dir.join(spec);
+        if p.extension().is_some() { p } else { p.with_extension("tish") }
+    } else {
+        tishlang_compile::resolve_bare_spec(spec, from_dir, project_root)?
+    };
+    Some(path.canonicalize().unwrap_or(path))
+}
+
+/// Every module's type names: its own `type` / `interface` declarations, plus the types it re-exports
+/// (`export * from`, `export { T } from`), followed through re-export chains.
+fn collect_type_names(modules: &[(PathBuf, &Program)], project_root: &Path) -> TypeNames {
+    let mut names: TypeNames = Default::default();
+    for (path, program) in modules {
+        let own = names.entry(path.clone()).or_default();
+        for stmt in &program.statements {
+            let decl = match stmt {
+                Statement::Export { declaration, .. } => match declaration.as_ref() {
+                    ExportDeclaration::Named(inner) => inner.as_ref(),
+                    _ => continue,
+                },
+                other => other,
+            };
+            if let Statement::TypeAlias { name, .. } = decl {
+                own.insert(name.to_string());
+            }
+        }
+    }
+    // Re-exports pass types on; repeat until nothing changes (chains are short).
+    loop {
+        let mut changed = false;
+        for (path, program) in modules {
+            for stmt in &program.statements {
+                let Statement::Export { declaration, .. } = stmt else { continue };
+                let ExportDeclaration::ReExport { specifiers, all, from: Some(from), .. } = declaration.as_ref() else { continue };
+                let Some(target) = resolve_import_target(from, path, project_root) else { continue };
+                let target_types = names.get(&target).cloned().unwrap_or_default();
+                let passed: Vec<String> = if *all {
+                    target_types.into_iter().collect()
+                } else {
+                    specifiers
+                        .iter()
+                        .filter_map(|s| match s {
+                            ImportSpecifier::Named { name, alias, .. } if target_types.contains(name.as_ref()) => {
+                                Some(alias.as_ref().unwrap_or(name).to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let own = names.entry(path.clone()).or_default();
+                for n in passed {
+                    changed |= own.insert(n);
+                }
+            }
+        }
+        if !changed {
+            return names;
+        }
     }
 }
 
@@ -1520,6 +1625,13 @@ pub fn compile_project_esm(
         .collect();
     let layout_base = common_ancestor_dir(&mod_canons);
 
+    let graph: Vec<(PathBuf, &Program)> = mod_canons
+        .iter()
+        .cloned()
+        .zip(modules.iter().map(|m| &m.program))
+        .collect();
+    let type_names = std::sync::Arc::new(collect_type_names(&graph, &res_root_canon));
+
     let mut out = Vec::with_capacity(modules.len());
     for (module, mod_canon) in modules.iter().zip(mod_canons.iter()) {
         let rel = mod_canon
@@ -1542,6 +1654,7 @@ pub fn compile_project_esm(
             ImportRewrite::Disk,
             jsx_import_source.to_string(),
         );
+        gen.type_names = std::sync::Arc::clone(&type_names);
         gen.emit_program(&program, None, None)?;
         let dts = crate::dts::module_declarations(&module.program, &mut |from| {
             if tishlang_compile::is_native_import(from) {

@@ -198,8 +198,13 @@ fn ts_type(t: &TypeAnnotation) -> String {
             format!("{{ {} }}", body.join("; "))
         }
         TypeAnnotation::Function { params, returns } => {
-            let ps: Vec<String> =
-                params.iter().enumerate().map(|(i, p)| format!("arg{}: {}", i, ts_type(p))).collect();
+            // As for declared functions: trailing `T?` parameters may be left out.
+            let optional_from = params.iter().rposition(|p| !is_nullable(p)).map_or(0, |i| i + 1);
+            let ps: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("arg{}{}: {}", i, if i >= optional_from { "?" } else { "" }, ts_type(p)))
+                .collect();
             format!("({}) => {}", ps.join(", "), ts_type(returns))
         }
         TypeAnnotation::Union(items) => items.iter().map(wrap).collect::<Vec<_>>().join(" | "),
@@ -247,7 +252,7 @@ mod tests {
         std::fs::write(
             dir.join("session.tish"),
             "export type Status = \"running\" | \"done\"\n\
-             export type Session = { id: string, summary: string?, rounds: i32, tags: (string | number)[], \"function\": { name: string }, onEnd: ((string) => void)? }\n\
+             export type Session = { id: string, summary: string?, rounds: i32, tags: (string | number)[], \"function\": { name: string }, onEnd: ((string) => void)?, send: (string, number?) => void }\n\
              export fn newSession(id: string, label: string = \"x\"): Session { return { id: id, summary: null, rounds: 0, tags: [] } }\n",
         )
         .unwrap();
@@ -273,7 +278,7 @@ mod tests {
         let session = dts("session.js");
         assert!(session.contains("export type Status = \"running\" | \"done\";"), "{session}");
         assert!(
-            session.contains("export type Session = { id: string; summary?: string | null; rounds: number; tags: (string | number)[]; function: { name: string }; onEnd?: ((arg0: string) => void) | null };"),
+            session.contains("export type Session = { id: string; summary?: string | null; rounds: number; tags: (string | number)[]; function: { name: string }; onEnd?: ((arg0: string) => void) | null; send: (arg0: string, arg1?: number | null) => void };"),
             "{session}"
         );
         assert!(session.contains("export declare function newSession(id: string, label?: string): Session;"), "{session}");
