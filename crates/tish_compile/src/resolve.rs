@@ -1168,28 +1168,198 @@ fn resolve_package_entry(pkg_root: &Path, require_name: Option<&str>) -> Option<
     }
 }
 
-/// Resolve a bare specifier (e.g. "lattish") to the package entry `.tish` file.
+/// Conditions a Tish importer matches in a package.json `exports` map, highest priority first.
+/// Node's semantics: the FIRST key in the object (in the package author's order) that is one of
+/// these wins, so the order here is only "which names count", not precedence between them —
+/// `"tish"` comes first in the list and authors put it first in the object so Tish consumers get
+/// the `.tish` source while JS consumers fall through to `import` / `default`.
+pub const TISH_EXPORT_CONDITIONS: &[&str] = &["tish", "import", "default"];
+
+/// Split a bare specifier into its package name and the `exports` subpath Node would look up:
+/// `lattish` -> (`lattish`, `.`), `@scope/pkg/a/b` -> (`@scope/pkg`, `./a/b`).
+fn split_package_spec(spec: &str) -> Option<(&str, String)> {
+    let segs = if spec.starts_with('@') { 2 } else { 1 };
+    let mut idx = None;
+    let mut seen = 0;
+    for (i, c) in spec.char_indices() {
+        if c == '/' {
+            seen += 1;
+            if seen == segs {
+                idx = Some(i);
+                break;
+            }
+        }
+    }
+    match idx {
+        Some(i) => Some((&spec[..i], format!(".{}", &spec[i..]))),
+        None if spec.starts_with('@') && !spec.contains('/') => None,
+        None => Some((spec, ".".to_string())),
+    }
+}
+
+/// Resolve one `exports` target (string / array / conditions object / null) per Node's
+/// `PACKAGE_TARGET_RESOLVE`. `pattern_match` replaces `*` in a string target. Returns
+/// `Some(None)` for an explicit `null` (the subpath is excluded), `None` when nothing matched.
+fn resolve_exports_target(
+    target: &serde_json::Value,
+    pattern_match: Option<&str>,
+) -> Option<Option<String>> {
+    match target {
+        serde_json::Value::String(t) => {
+            // Node only accepts package-relative targets (`./…`) for bare-specifier resolution.
+            if !t.starts_with("./") {
+                return None;
+            }
+            Some(Some(match pattern_match {
+                Some(m) => t.replace('*', m),
+                None => t.clone(),
+            }))
+        }
+        serde_json::Value::Array(items) => {
+            // First item that resolves (Node: fallback array).
+            items
+                .iter()
+                .find_map(|it| resolve_exports_target(it, pattern_match).filter(|r| r.is_some()))
+        }
+        serde_json::Value::Object(map) => {
+            // Object key order is the package author's priority order (serde_json preserve_order).
+            for (key, value) in map {
+                if TISH_EXPORT_CONDITIONS.contains(&key.as_str()) {
+                    if let Some(r) = resolve_exports_target(value, pattern_match) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        }
+        serde_json::Value::Null => Some(None),
+        _ => None,
+    }
+}
+
+/// Resolve `subpath` (`.` or `./x`) through a package.json `exports` field (Node's
+/// `PACKAGE_EXPORTS_RESOLVE`): sugar forms (a string, an array, or a conditions object without `.`
+/// keys) mean `{ ".": … }`; an exact subpath key wins over a `*` pattern; among patterns the longest
+/// prefix wins. `None` = not exported (Node would throw `ERR_PACKAGE_PATH_NOT_EXPORTED`).
+fn resolve_package_exports(exports: &serde_json::Value, subpath: &str) -> Option<String> {
+    let is_subpath_map = exports
+        .as_object()
+        .map(|m| m.keys().any(|k| k.starts_with('.')))
+        .unwrap_or(false);
+    if !is_subpath_map {
+        return if subpath == "." {
+            resolve_exports_target(exports, None).flatten()
+        } else {
+            None
+        };
+    }
+    let map = exports.as_object()?;
+    if let Some(t) = map.get(subpath) {
+        if !subpath.contains('*') {
+            return resolve_exports_target(t, None).flatten();
+        }
+    }
+    let mut best: Option<(&str, &serde_json::Value, String)> = None;
+    for (key, value) in map {
+        let Some(star) = key.find('*') else { continue };
+        if key[star + 1..].contains('*') {
+            continue;
+        }
+        let (prefix, suffix) = (&key[..star], &key[star + 1..]);
+        if subpath.len() >= key.len() - 1
+            && subpath.starts_with(prefix)
+            && subpath.ends_with(suffix)
+            && subpath != prefix
+        {
+            let m = subpath[prefix.len()..subpath.len() - suffix.len()].to_string();
+            let better = match &best {
+                None => true,
+                Some((bk, _, _)) => {
+                    let bp = &bk[..bk.find('*').unwrap()];
+                    prefix.len() > bp.len() || (prefix.len() == bp.len() && key.len() > bk.len())
+                }
+            };
+            if better {
+                best = Some((key.as_str(), value, m));
+            }
+        }
+    }
+    let (_, value, m) = best?;
+    resolve_exports_target(value, Some(&m)).flatten()
+}
+
+/// Resolve `subpath` inside the package at `pkg_root` to a `.tish` file.
 ///
-/// Walks upward from `from_dir` and, at each level, checks (same order as native [`find_package_dir`]):
-/// - `node_modules/<spec>/`
-/// - `<spec>/` as a sibling directory (monorepo: `…/tish/tish-candle` next to `…/tish/tish-hub`)
-/// - the search directory itself if its `package.json` name matches `spec`
+/// With an `exports` field, it is authoritative (Node's encapsulation): the subpath must be exported
+/// and the matched condition's target must be Tish source. A target that is not a `.tish` file (the
+/// package only ships JS for this entry) falls back to the package's legacy `tish.module` / `main`
+/// for `.`, so a Tish package that also publishes JS with a plain `exports` keeps working; a
+/// non-exported or JS-only subpath does not resolve. Without `exports`, `.` uses `tish.module` /
+/// `main` / `index.tish` and a subpath is a file inside the package (`./x` -> `x`, `x.tish`,
+/// `x/index.tish`), as before.
+fn resolve_package_subpath(pkg_root: &Path, subpath: &str) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(pkg_root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let finish = |p: PathBuf| -> Option<PathBuf> {
+        if !p.is_file() {
+            return None;
+        }
+        Some(p.canonicalize().unwrap_or(p))
+    };
+    if let Some(exports) = json.get("exports") {
+        if let Some(target) = resolve_package_exports(exports, subpath) {
+            if target.ends_with(".tish") {
+                return finish(pkg_root.join(target.trim_start_matches("./")));
+            }
+        }
+        if subpath != "." {
+            return None;
+        }
+    }
+    if subpath == "." {
+        return resolve_package_entry(pkg_root, None);
+    }
+    let rel = pkg_root.join(subpath.trim_start_matches("./"));
+    if rel.extension().is_none() {
+        finish(rel.with_extension("tish")).or_else(|| finish(rel.join("index.tish")))
+    } else {
+        finish(rel)
+    }
+}
+
+/// Resolve a bare specifier (e.g. "lattish", "@scope/pkg/sub") to a `.tish` file.
+///
+/// The specifier is split into a package name and an `exports` subpath (Node's rules), then the
+/// package directory is found walking upward from `from_dir`, checking at each level (same order as
+/// native [`find_package_dir`]):
+/// - `node_modules/<name>/`
+/// - `<name>/` as a sibling directory (monorepo: `…/tish/tish-candle` next to `…/tish/tish-hub`)
+/// - the search directory itself if its `package.json` name matches `name`
+///
+/// and the subpath is resolved inside it by [`resolve_package_subpath`] (`exports` with the
+/// [`TISH_EXPORT_CONDITIONS`], else `tish.module` / `main`).
 pub fn resolve_bare_spec(spec: &str, from_dir: &Path, _project_root: &Path) -> Option<PathBuf> {
+    let (name, subpath) = split_package_spec(spec)?;
     let mut search = from_dir.to_path_buf();
     loop {
-        // node_modules/<spec>: the directory is authoritative (npm installs by dependency key, like
+        // node_modules/<name>: the directory is authoritative (npm installs by dependency key, like
         // Node) — do NOT require the package's internal `name` to match, so aliased/scoped/`file:`
         // workspace packages linked in under this name resolve.
-        if let Some(p) = resolve_package_entry(&search.join("node_modules").join(spec), None) {
-            return Some(p);
+        let nm = search.join("node_modules").join(name);
+        if nm.join("package.json").exists() {
+            if let Some(p) = resolve_package_subpath(&nm, &subpath) {
+                return Some(p);
+            }
         }
-        // sibling <spec>/ and the search dir itself: require name match (a bare directory name is a
+        // sibling <name>/ and the search dir itself: require name match (a bare directory name is a
         // weaker signal — guard against a coincidental same-named dir in a monorepo walk).
-        if let Some(p) = resolve_package_entry(&search.join(spec), Some(spec)) {
-            return Some(p);
-        }
-        if let Some(p) = resolve_package_entry(&search, Some(spec)) {
-            return Some(p);
+        for dir in [search.join(name), search.clone()] {
+            let pj = dir.join("package.json");
+            if pj.exists() && read_package_name(&pj).as_deref() == Some(name) {
+                if let Some(p) = resolve_package_subpath(&dir, &subpath) {
+                    return Some(p);
+                }
+            }
         }
         if let Some(parent) = search.parent() {
             if parent == search {
@@ -2474,5 +2644,125 @@ mod find_package_dir_tests {
         .unwrap();
         let hit = find_package_dir("tish-macos", &project).expect("resolve");
         assert_eq!(hit.canonicalize().unwrap(), aliased.canonicalize().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod package_exports_tests {
+    use super::{resolve_bare_spec, resolve_project};
+    use std::fs;
+    use std::path::Path;
+
+    fn write(p: &Path, s: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, s).unwrap();
+    }
+
+    /// The `@hyperyai/sdk` shape: `exports` subpaths whose `tish` condition (first) points at the
+    /// `.tish` source while `types` / `default` point at JS.
+    fn hypery_like(root: &Path) -> std::path::PathBuf {
+        let pkg = root.join("node_modules/@hyperyai/sdk");
+        write(
+            &pkg.join("package.json"),
+            r#"{
+  "name": "@hyperyai/sdk",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./agents": {
+      "tish": "./tish/agents/index.tish",
+      "types": "./dist/agents/index.d.ts",
+      "default": "./dist/agents/index.js"
+    },
+    "./agents/node": { "default": "./dist/agents/node/index.js" },
+    "./tools/*": { "tish": "./tish/tools/*.tish" },
+    "./tools/private/*": null,
+    "./package.json": "./package.json"
+  }
+}"#,
+        );
+        write(&pkg.join("tish/agents/index.tish"), "export fn agent() { return 1 }\n");
+        write(&pkg.join("tish/tools/search.tish"), "export let search = 2\n");
+        write(&pkg.join("tish/tools/private/x.tish"), "export let x = 3\n");
+        write(&pkg.join("dist/agents/node/index.js"), "export {}\n");
+        pkg
+    }
+
+    #[test]
+    fn scoped_subpath_resolves_through_tish_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = hypery_like(dir.path());
+        let got = resolve_bare_spec("@hyperyai/sdk/agents", dir.path(), dir.path()).unwrap();
+        assert_eq!(got, pkg.join("tish/agents/index.tish").canonicalize().unwrap());
+    }
+
+    #[test]
+    fn exports_pattern_and_null_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = hypery_like(dir.path());
+        let got = resolve_bare_spec("@hyperyai/sdk/tools/search", dir.path(), dir.path()).unwrap();
+        assert_eq!(got, pkg.join("tish/tools/search.tish").canonicalize().unwrap());
+        // The longer `./tools/private/*` pattern wins and maps to null: excluded.
+        assert!(resolve_bare_spec("@hyperyai/sdk/tools/private/x", dir.path(), dir.path()).is_none());
+    }
+
+    #[test]
+    fn exports_encapsulate_js_only_and_unlisted_subpaths() {
+        let dir = tempfile::tempdir().unwrap();
+        hypery_like(dir.path());
+        // Exported, but only as JS: not a Tish module.
+        assert!(resolve_bare_spec("@hyperyai/sdk/agents/node", dir.path(), dir.path()).is_none());
+        // On disk but not exported: Node's encapsulation hides it.
+        assert!(resolve_bare_spec("@hyperyai/sdk/tish/agents/index", dir.path(), dir.path()).is_none());
+        // Root exports only JS and there is no tish.module: nothing Tish to import.
+        assert!(resolve_bare_spec("@hyperyai/sdk", dir.path(), dir.path()).is_none());
+    }
+
+    #[test]
+    fn condition_order_is_the_package_authors() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("node_modules/ord");
+        // `default` listed before `tish`: Node takes the first matching key, so `default` wins.
+        write(
+            &pkg.join("package.json"),
+            r#"{ "name": "ord", "exports": { "default": "./a.tish", "tish": "./b.tish" } }"#,
+        );
+        write(&pkg.join("a.tish"), "export let a = 1\n");
+        write(&pkg.join("b.tish"), "export let b = 1\n");
+        let got = resolve_bare_spec("ord", dir.path(), dir.path()).unwrap();
+        assert_eq!(got, pkg.join("a.tish").canonicalize().unwrap());
+    }
+
+    #[test]
+    fn root_js_exports_fall_back_to_tish_module_and_plain_subpaths_without_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let both = dir.path().join("node_modules/both");
+        write(
+            &both.join("package.json"),
+            r#"{ "name": "both", "exports": "./dist/index.js", "tish": { "module": "./src/index.tish" } }"#,
+        );
+        write(&both.join("src/index.tish"), "export let v = 1\n");
+        assert_eq!(
+            resolve_bare_spec("both", dir.path(), dir.path()).unwrap(),
+            both.join("src/index.tish").canonicalize().unwrap()
+        );
+        let plain = dir.path().join("node_modules/plain");
+        write(&plain.join("package.json"), r#"{ "name": "plain" }"#);
+        write(&plain.join("index.tish"), "export let v = 1\n");
+        write(&plain.join("util/strings.tish"), "export let s = 1\n");
+        assert_eq!(
+            resolve_bare_spec("plain/util/strings", dir.path(), dir.path()).unwrap(),
+            plain.join("util/strings.tish").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn program_imports_scoped_subpath() {
+        let dir = tempfile::tempdir().unwrap();
+        hypery_like(dir.path());
+        let main = dir.path().join("main.tish");
+        write(&main, "import { agent } from \"@hyperyai/sdk/agents\"\nconsole.log(agent())\n");
+        let mods = resolve_project(&main, Some(dir.path())).expect("resolves");
+        assert!(mods.iter().any(|m| m.path.ends_with("tish/agents/index.tish")));
     }
 }
