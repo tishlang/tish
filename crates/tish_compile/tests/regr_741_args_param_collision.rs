@@ -35,9 +35,14 @@ fn param_named_args_does_not_shadow_the_slice() {
 
         // `collides(args, cwd)`: BOTH parameters come off the alias. Before the fix the
         // second one read `args.get(1)` — off the `Value` the first one had just bound.
+        // The tish identifier `args` is emitted as `__tish_id_args` (#770).
         assert!(
-            rust.contains("let mut args = __tish_args.get(0)"),
+            rust.contains("let mut __tish_id_args = __tish_args.get(0)"),
             "#741 ({mode:?}): the `args` parameter itself must bind from the alias\n{rust}"
+        );
+        assert!(
+            !rust.contains("let mut args = "),
+            "#741 ({mode:?}): a parameter must never rebind the slice name `args`\n{rust}"
         );
         assert!(
             rust.contains("__tish_args.get(1)"),
