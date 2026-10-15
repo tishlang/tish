@@ -1,0 +1,22 @@
+// tishlang/tish#741 — a parameter literally named `args` collides with the name the
+// native backend gives its own `|args: &[Value]|` slice. Every parameter bound AFTER it
+// then read `.get(n)` off a Value instead of the slice.
+
+// The reported shape: `args` first, another parameter after it.
+fn collides(args, cwd: string) {
+  return "" + args.length + cwd
+}
+
+// Middle position breaks the same way — it is "any parameter after `args`", not "first".
+fn middle(a: string, args, c: string) {
+  return a + args.length + c
+}
+
+// Control: no collision, so the emitted prologue must be untouched.
+fn plain(items, cwd: string) {
+  return "" + items.length + cwd
+}
+
+console.log(collides(["a"], "/tmp"))
+console.log(middle("x", ["q"], "z"))
+console.log(plain(["a"], "/tmp"))
