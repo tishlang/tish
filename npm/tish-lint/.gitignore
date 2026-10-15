@@ -1,10 +1,11 @@
 # Materialized by scripts/install-bin.js (postinstall / pre-pack)
 bin/tish-lint
 
-# Rust payload copied in by scripts/prepack.js and removed by scripts/postpack.js.
-# Listed here so a failed pack leaves an obviously-untracked tree rather than a silently
-# .git/info/exclude-hidden one.
+# Rust payload: real copies while scripts/prepack.js is packing, and possibly symlinks into the
+# repo root the rest of the time, if a local dev setup put them there. No trailing slashes — these
+# are symlinks as often as they are directories, and `/crates/` does not match a symlink.
 /Cargo.toml
-/crates/
+/crates
 /LICENSE
 /justfile
+/.pack-payload-state.json
