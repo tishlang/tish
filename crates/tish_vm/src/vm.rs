@@ -149,6 +149,9 @@ fn cap_allows(enabled: &HashSet<String>, name: &str) -> bool {
 /// machinery puts it there — `http`, `ws`, `fs` (fs/promises), `timers` (`delay`) and plain
 /// `promise` — the same set
 /// for which the native backend binds `Promise` and links `send-values` (`Promise.spawn`).
+/// Gated like its callers (`http`, `ws`, `fs` and `timers` all enable `promise`), so builds
+/// with no capability features, such as the browser VM, don't reference the gated `cap_allows`.
+#[cfg(feature = "promise")]
 #[allow(dead_code)]
 fn promise_allowed(enabled: &HashSet<String>) -> bool {
     ["http", "ws", "fs", "promise", "timers"]
