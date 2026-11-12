@@ -1,0 +1,16 @@
+# ABI v2 fixture: links only `tishlang_ffi_guest` (its own tishlang_core copy, no host symbols) and
+# exports `tish_module_register_v2`. Standalone workspace so the main workspace ignores it.
+[package]
+name = "tish_ffi_testmod_v2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tishlang_ffi_guest = { path = "../../../../tish_ffi_guest" }
+tishlang_core = { path = "../../../../tish_core" }

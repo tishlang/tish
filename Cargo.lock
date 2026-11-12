@@ -3635,6 +3635,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tishlang_ffi_guest"
+version = "0.1.0"
+dependencies = [
+ "tishlang_core",
+]
+
+[[package]]
 name = "tishlang_fmt"
 version = "0.1.0"
 dependencies = [
@@ -3782,6 +3789,7 @@ dependencies = [
  "tiny_http",
  "tishlang_builtins",
  "tishlang_core",
+ "tishlang_ffi",
  "tokio",
  "tokio-tungstenite",
  "zip",

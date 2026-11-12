@@ -158,19 +158,26 @@ pub fn take_pending_throw() -> Option<Value> {
 // deadline *after* the body returns, which never happens. Backends poll
 // [`execution_deadline_exceeded`] on loop back-edges and abort with a catchable error.
 //
-// Disarmed is the default and costs one relaxed load — `tish run` never arms it. Armed,
+// Two deadlines can be armed, and the earlier one wins: the process-wide one
+// ([`set_execution_deadline`], `tish test`) and a per-thread one
+// ([`set_thread_execution_deadline`]) for embedders that budget each call into a guest VM
+// pinned to a thread, without affecting VMs on other threads.
+//
+// Disarmed is the default and costs two relaxed loads — `tish run` never arms either. Armed,
 // the clock is read once every `DEADLINE_POLL_MASK + 1` back-edges so a hot loop is not
 // paying a `now()` per iteration.
 // ---------------------------------------------------------------------------
 
 #[cfg(not(feature = "portable"))]
 mod deadline {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::LazyLock;
     use std::time::Instant;
 
     /// Nanoseconds since [`START`] at which execution must stop. 0 = disarmed.
     static DEADLINE_NS: AtomicU64 = AtomicU64::new(0);
+    /// Threads with a per-thread deadline armed, so the disarmed path skips the TLS read.
+    static THREADS_ARMED: AtomicUsize = AtomicUsize::new(0);
     static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
     const DEADLINE_POLL_MASK: u32 = 0x3FF;
@@ -178,6 +185,26 @@ mod deadline {
     thread_local! {
         static POLL_TICK: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
         static TRIPPED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        static THREAD_DEADLINE_NS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// Arm a deadline `millis` from now for the calling thread only, or disarm it with `None`.
+    /// Clears any previous trip on this thread. Unlike [`set_execution_deadline`], other threads
+    /// are unaffected.
+    pub fn set_thread_execution_deadline(millis: Option<u64>) {
+        TRIPPED.with(|t| t.set(false));
+        POLL_TICK.with(|t| t.set(0));
+        let at = millis.map_or(0, |ms| (START.elapsed().as_nanos() as u64 + ms.saturating_mul(1_000_000)).max(1));
+        let was = THREAD_DEADLINE_NS.with(|d| d.replace(at));
+        match (was != 0, at != 0) {
+            (false, true) => {
+                THREADS_ARMED.fetch_add(1, Ordering::Relaxed);
+            }
+            (true, false) => {
+                THREADS_ARMED.fetch_sub(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 
     /// Arm the deadline `millis` from now, or disarm with `None`. Clears any previous trip.
@@ -197,7 +224,16 @@ mod deadline {
     /// Has the armed deadline passed? Cheap and false when disarmed.
     #[inline]
     pub fn execution_deadline_exceeded() -> bool {
-        let at = DEADLINE_NS.load(Ordering::Relaxed);
+        let global = DEADLINE_NS.load(Ordering::Relaxed);
+        if global == 0 && THREADS_ARMED.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let thread = THREAD_DEADLINE_NS.with(|d| d.get());
+        let at = match (global, thread) {
+            (0, t) => t,
+            (g, 0) => g,
+            (g, t) => g.min(t),
+        };
         if at == 0 {
             return false;
         }
@@ -229,6 +265,7 @@ mod deadline {
 #[cfg(feature = "portable")]
 mod deadline {
     pub fn set_execution_deadline(_millis: Option<u64>) {}
+    pub fn set_thread_execution_deadline(_millis: Option<u64>) {}
     #[inline]
     pub fn execution_deadline_exceeded() -> bool {
         false
@@ -238,7 +275,9 @@ mod deadline {
     }
 }
 
-pub use deadline::{execution_deadline_exceeded, execution_deadline_tripped, set_execution_deadline};
+pub use deadline::{
+    execution_deadline_exceeded, execution_deadline_tripped, set_execution_deadline, set_thread_execution_deadline,
+};
 
 /// Message backends raise when [`execution_deadline_exceeded`] trips.
 pub const DEADLINE_ERROR: &str = "Test exceeded its timeout and was aborted";

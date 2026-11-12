@@ -22,6 +22,7 @@ members = [
     "crates/tish_vm",
     "crates/tish_llvm",
     "crates/tish_ffi",
+    "crates/tish_ffi_guest",
     "examples/ffi/mathext",
 
     "crates/tish_native",

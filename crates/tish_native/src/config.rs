@@ -15,6 +15,8 @@ pub enum NativeArtifact {
     /// module's `export fn`s. Unlike every other artifact, cargo is **not** run — the emitted
     /// crate directory is itself the output, for the consumer to add as a path/registry dependency.
     RustLib,
+    /// A dynamically loadable tish native module (`crate-type = ["cdylib"]`, FFI ABI v2).
+    FfiModule,
 }
 
 /// Options passed from the CLI into nested `cargo build`.
@@ -56,6 +58,14 @@ impl NativeBuildConfig {
             artifact: NativeArtifact::RustLib,
             cargo_target: None,
             emit_mode: NativeEmitMode::RustLib,
+        }
+    }
+
+    pub fn ffi_module() -> Self {
+        Self {
+            artifact: NativeArtifact::FfiModule,
+            cargo_target: None,
+            emit_mode: NativeEmitMode::FfiModule,
         }
     }
 

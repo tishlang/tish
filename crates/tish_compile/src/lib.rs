@@ -73,6 +73,10 @@ pub enum NativeEmitMode {
     /// `thread_local!` (rather than a global) is forced by `Value`: `send-values` is off unless
     /// `http` is enabled, so `VmRef` is `Rc<RefCell<_>>` and `Value` is `!Send`.
     RustLib,
+    /// [`NativeEmitMode::RustLib`] plus a tish FFI ABI v2 surface: one `extern "C"` trampoline per
+    /// `export fn` and `tish_module_register_v2`, via `tishlang_ffi_guest`. Built as a `cdylib`
+    /// that any tish host loads at runtime (`ffi:` import / `tishlang_ffi::load_module`).
+    FfiModule,
     /// Game Boy Advance ROM: `#![no_std]`, `#[agb::entry] fn agb_main(gba)`, links the
     /// `tishlang_runtime_gba` facade. Numbers/async lowering diverge; see codegen `emit_program`.
     Gba,

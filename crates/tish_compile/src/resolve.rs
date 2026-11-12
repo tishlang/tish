@@ -123,6 +123,7 @@ pub fn is_builtin_native_spec(spec: &str) -> bool {
             | "tish:encoding"
             | "tish:crypto"
             | "tish:zip"
+            | "tish:ffi"
             | "tish:test"
             | "tish:assert"
     ) || matches!(

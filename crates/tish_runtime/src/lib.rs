@@ -1828,6 +1828,27 @@ pub mod zip;
 #[cfg(feature = "zip")]
 pub use zip::{zip_entries, zip_extract};
 
+/// `tish:ffi` `loadModule(path)`: load a tish FFI cdylib (ABI v2, falling back to v1) and return
+/// its exports as an object. Loading the same path again returns the cached module. Throws a
+/// `TypeError` if the path is not a string or the library cannot be loaded.
+#[cfg(all(feature = "ffi", not(target_arch = "wasm32")))]
+pub fn ffi_load_module(args: &[Value]) -> Value {
+    let path = match args.first() {
+        Some(Value::String(s)) => s.to_string(),
+        _ => {
+            set_pending_throw(tishlang_core::type_error("loadModule: expected a library path string"));
+            return Value::Null;
+        }
+    };
+    match tishlang_ffi::load_module(&path) {
+        Ok(exports) => Value::object(exports),
+        Err(e) => {
+            set_pending_throw(tishlang_core::type_error(format!("loadModule: {e}")));
+            Value::Null
+        }
+    }
+}
+
 #[cfg(feature = "ws")]
 pub use ws::{
     web_socket_client, web_socket_server_accept, web_socket_server_construct,
