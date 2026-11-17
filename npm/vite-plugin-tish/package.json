@@ -22,10 +22,13 @@
   "scripts": {
     "test": "vitest run"
   },
-  "files": ["index.js", "README.md"],
+  "files": [
+    "index.js",
+    "README.md"
+  ],
   "peerDependencies": {
-    "vite": ">=5",
-    "@tishlang/tish": "*"
+    "@tishlang/tish": "*",
+    "vite": ">=5"
   },
   "peerDependenciesMeta": {
     "@tishlang/tish": {
@@ -33,11 +36,17 @@
     }
   },
   "devDependencies": {
-    "vite": "^7",
+    "vite": "^7.3.6",
     "vitest": "^3"
   },
   "engines": {
     "node": ">=22"
   },
-  "keywords": ["tish", "vite", "vite-plugin", "hmr", "lattish"]
+  "keywords": [
+    "tish",
+    "vite",
+    "vite-plugin",
+    "hmr",
+    "lattish"
+  ]
 }
